@@ -23,18 +23,15 @@ _Update at the end of every session (brief §13)._
   JPEG (verified via curl — correct content-type + magic bytes).
 - ✅ OSRM routing: returns a real ~14.7 km Story County route (verified via curl).
 
-### NOT yet verified
-- ⏳ **In-browser visual render.** The Chrome automation extension was offline and the
-  in-app preview tool is pinned to a different project this session, so I could not
-  screenshot the map. The dev server runs at http://localhost:5173 — open it and
-  confirm all three HUD lines go green (NAIP ✓, OSM ✓, and a test route).
+### Gate: CONFIRMED ✅
+- Visually confirmed in-browser (maintainer, 2026-07-08): all three HUD lines green —
+  NAIP imagery, OSM roads, and a real-road route (12.0 km by road vs 5.7 km straight,
+  routing along the section-line grid). **The brief's hard gate is passed.**
 
 ## Next
-1. **Confirm the spike visually** (open localhost:5173) — this is the gate; nothing
-   else proceeds until the map + roads + route are confirmed rendering.
-2. Overlay engine (brief §4) — geo-referenced raster overlay, the ONE module behind
-   painter edits, field textures, and fieldwork reveal.
-3. Buy one parcel → draw one field into the overlay (brief §12 step 2).
+1. Overlay engine (brief §4) — geo-referenced raster overlay, the ONE module behind
+   painter edits, field textures, and fieldwork reveal. Paint in geo-space.
+2. Buy one parcel → draw one field into the overlay (brief §12 step 2).
 
 ## Notes / decisions
 - Routing uses the **public OSRM demo server** for the spike. Before real gameplay,
