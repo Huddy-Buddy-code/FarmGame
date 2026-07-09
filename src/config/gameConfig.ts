@@ -58,7 +58,7 @@ export interface GameConfig {
 
 /** Baseline config. Difficulty presets will be derived by overriding fields here. */
 export const gameConfig: GameConfig = {
-  startingMoney: 100_000,
+  startingMoney: 1_000_000,
   landPricePerAcre: 12_000,
 
   crops: {

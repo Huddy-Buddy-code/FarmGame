@@ -38,9 +38,28 @@
       .stat .icon { font-size: 17px; }
       .divider { width: 2px; height: 22px; background: var(--cream-2); border-radius: 2px; }
 
+      /* ---------- Year bar (position in the year, season-themed) ---------- */
+      #yearbar {
+        position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
+        z-index: 19; width: 380px; padding: 3px 10px 5px;
+        border-radius: 10px;
+      }
+      #yearbar .seasons { display: flex; height: 10px; border-radius: 999px; overflow: hidden; border: 1.5px solid var(--wood); position: relative; }
+      #yearbar .seg { flex: 1; }
+      #yearbar .seg.spring { background: #a8d178; }
+      #yearbar .seg.summer { background: #f5c95d; }
+      #yearbar .seg.fall   { background: #d98e4a; }
+      #yearbar .seg.winter { background: #bcd8e8; }
+      #yearbar .marker {
+        position: absolute; top: -3px; bottom: -3px; width: 3px; border-radius: 2px;
+        background: var(--ink); box-shadow: 0 0 0 1.5px var(--cream);
+      }
+      #yearbar .labels { display: flex; font-size: 11px; margin-top: 1px; }
+      #yearbar .labels span { flex: 1; text-align: center; }
+
       /* ---------- Time controls ---------- */
       #timebar {
-        position: absolute; top: 64px; left: 50%; transform: translateX(-50%);
+        position: absolute; top: 102px; left: 50%; transform: translateX(-50%);
         z-index: 20; display: flex; align-items: center; gap: 6px; padding: 6px 10px;
       }
       button {
@@ -96,6 +115,31 @@
       #fp-actions { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
       #fp-msg { font-size: 12px; color: var(--red); min-height: 15px; margin-top: 4px; }
 
+      /* ---------- Crop calendar ---------- */
+      #cropcal {
+        position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        z-index: 30; width: min(640px, 92vw); padding: 16px 20px 18px; display: none;
+      }
+      #cropcal h2 { margin: 0 0 2px; font-size: 18px; }
+      #cropcal .legend { font-size: 12px; color: #8a7658; margin-bottom: 10px; display: flex; gap: 14px; }
+      #cropcal .chip { display: inline-block; width: 22px; height: 10px; border-radius: 999px; vertical-align: middle; margin-right: 4px; border: 1px solid var(--wood); }
+      #cropcal .chip.plant { background: var(--green); }
+      #cropcal .chip.harv { background: var(--gold); }
+      #cropcal .close {
+        position: absolute; top: 10px; right: 12px; border: none; background: none;
+        font-size: 16px; padding: 2px 6px; color: #8a7658;
+      }
+      #cal-grid { position: relative; display: grid; grid-template-columns: 110px repeat(12, 1fr); row-gap: 6px; align-items: center; }
+      #cal-grid .seasonhead { font-size: 15px; text-align: center; padding-bottom: 1px; }
+      #cal-grid .mo { font-size: 11px; font-weight: 700; text-align: center; color: #8a7658; border-bottom: 2px solid var(--cream-2); padding-bottom: 3px; }
+      #cal-grid .crop { font-weight: 600; font-size: 13px; }
+      #cal-grid .lane { position: relative; height: 16px; background: var(--cream-2); border-radius: 999px; grid-column: 2 / span 12; }
+      #cal-grid .band { position: absolute; top: 2px; bottom: 2px; border-radius: 999px; opacity: 0.9; }
+      #cal-grid .band.plant { background: var(--green); }
+      #cal-grid .band.harv { background: var(--gold); }
+      #cal-now { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--red); opacity: 0.7; border-radius: 2px; pointer-events: none; }
+      #cal-now::after { content: "▼"; position: absolute; top: -14px; left: -5px; font-size: 10px; color: var(--red); }
+
       /* ---------- Toast + montage ---------- */
       #toast {
         position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%);
@@ -123,6 +167,10 @@
   <body>
     <div id="map"></div>
 
+    <div id="resetbar" style="position:absolute; top:10px; left:10px; z-index:20;">
+      <button id="btn-reset" class="panel" title="Wipe the save and start a new farm" style="padding:6px 12px;">🔄 Reset</button>
+    </div>
+
     <div id="topbar" class="panel">
       <div class="stat"><span class="icon">📅</span><span id="hud-date">—</span></div>
       <div class="divider"></div>
@@ -132,11 +180,20 @@
       <div class="stat"><span class="icon">🫘</span><span id="hud-soy">0 t</span></div>
     </div>
 
+    <div id="yearbar" class="panel">
+      <div class="seasons">
+        <div class="seg spring"></div><div class="seg summer"></div>
+        <div class="seg fall"></div><div class="seg winter"></div>
+        <div class="marker" id="year-marker"></div>
+      </div>
+      <div class="labels"><span>🌱 Spring</span><span>☀️ Summer</span><span>🍂 Fall</span><span>❄️ Winter</span></div>
+    </div>
+
     <div id="timebar" class="panel">
       <button id="spd-pause" title="Pause">⏸</button>
       <button id="spd-1" class="active" title="Real time">1×</button>
-      <button id="spd-5" title="5× speed">5×</button>
       <button id="spd-10" title="10× speed">10×</button>
+      <button id="spd-60" title="60× speed — a sim-hour per real minute">60×</button>
       <select id="skip-month" title="Skip ahead to the 1st of a month">
         <option value="">⏭ Skip to…</option>
       </select>
@@ -144,6 +201,17 @@
 
     <div id="toolbar" class="panel">
       <button id="btn-field" class="primary">🚜 Buy Field</button>
+      <button id="btn-cropcal">📆 Crop Calendar</button>
+    </div>
+
+    <div id="cropcal" class="panel">
+      <button class="close" id="cal-close">✕</button>
+      <h2>📆 Crop Calendar</h2>
+      <div class="legend">
+        <span><span class="chip plant"></span>Planting</span>
+        <span><span class="chip harv"></span>Harvest</span>
+      </div>
+      <div id="cal-grid"></div>
     </div>
 
     <div id="fieldpanel" class="panel">

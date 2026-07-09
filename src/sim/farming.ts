@@ -135,3 +135,14 @@ export function startHarvest(field: Field, now: SimTime): void {
 export function isHarvesting(field: Field): boolean {
   return harvesting.has(field.id);
 }
+
+/** For persistence: which fields are mid-harvest. */
+export function getHarvestingIds(): string[] {
+  return [...harvesting];
+}
+
+/** For persistence: restore the mid-harvest set from a loaded save. */
+export function restoreHarvesting(ids: string[]): void {
+  harvesting.clear();
+  for (const id of ids) harvesting.add(id);
+}

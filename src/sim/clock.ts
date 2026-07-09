@@ -31,6 +31,11 @@ export class SimClock {
     return this.now;
   }
 
+  /** Restore sim-time from a save. Does NOT fire queued actions in between. */
+  setTime(t: SimTime): void {
+    this.now = t;
+  }
+
   isPaused(): boolean {
     return this.paused;
   }

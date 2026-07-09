@@ -25,6 +25,14 @@ import { paintFieldStatus } from "./fieldRender";
 const seq: Record<string, number> = {};
 const nextId = (prefix: string) => `${prefix}-${(seq[prefix] = (seq[prefix] ?? 0) + 1)}`;
 
+/** After loading a save, continue id sequences past the highest existing ids. */
+export function initIdCounters(save: SaveState): void {
+  for (const id of [...save.parcels.map((p) => p.id), ...save.fields.map((f) => f.id)]) {
+    const m = /^(.+)-(\d+)$/.exec(id);
+    if (m) seq[m[1]!] = Math.max(seq[m[1]!] ?? 0, Number(m[2]));
+  }
+}
+
 export interface BuyFieldResult {
   field: Field;
   acres: number;

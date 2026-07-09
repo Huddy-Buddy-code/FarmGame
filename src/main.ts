@@ -23,12 +23,16 @@ import { addRoadsLayer } from "./map/roadsLayer";
 import { OverlayEngine } from "./map/overlay";
 import { newGame } from "./state/saveState";
 import type { SaveState } from "./state/saveState";
-import { buyFieldFromBoundary, renderField } from "./field/fields";
+import { buyFieldFromBoundary, renderField, initIdCounters } from "./field/fields";
+import { persistGame, loadGame, clearSavedGame } from "./state/persistence";
 import { SimClock } from "./sim/clock";
-import { formatDate, dateOf, nextMonthStart, MONTH_NAMES, MONTH_SHORT } from "./sim/calendar";
+import {
+  formatDate, dateOf, nextMonthStart, MONTH_NAMES, MONTH_SHORT,
+  START_MONTH, DAYS_PER_MONTH, MONTHS_PER_YEAR, MINUTES_PER_MONTH,
+} from "./sim/calendar";
 import {
   plant, tickFarming, growthProgress, yieldRange, startHarvest, isHarvesting,
-  inPlantingWindow,
+  inPlantingWindow, getHarvestingIds, restoreHarvesting,
 } from "./sim/farming";
 import { gameConfig } from "./config/gameConfig";
 import type { CropId } from "./config/gameConfig";
@@ -36,9 +40,16 @@ import type { CropId } from "./config/gameConfig";
 // Which county to play. Later this comes from a save / county picker.
 const COUNTY_ID = "story-ia";
 
-// One in-memory save-state for the session (IndexedDB persistence is a later slice).
-const save: SaveState = newGame();
+// Load the persisted game if there is one; otherwise start fresh. The game
+// auto-saves (see wirePersistence), so refreshes drop you where you were.
+const loaded = loadGame();
+const save: SaveState = loaded?.save ?? newGame();
 const clock = new SimClock();
+if (loaded) {
+  clock.setTime(loaded.clockNow);
+  restoreHarvesting(loaded.harvestingIds);
+  initIdCounters(save);
+}
 
 // Only one map interaction is active at a time.
 type Mode = "none" | "field";
@@ -96,6 +107,10 @@ async function main() {
     wireFieldDrawing(map);
     wireFieldSelection(map);
     wireTimeControls();
+    buildCropCalendar();
+    wirePersistence();
+    // Re-render every field from the loaded save (textures + outlines).
+    for (const f of save.fields) renderField(map, overlay, f);
     clock.play(); // the world breathes from the start (idle-game 1×)
     requestAnimationFrame(gameLoop);
   });
@@ -145,6 +160,18 @@ function updateHud() {
   $("hud-cash").textContent = "$" + Math.round(save.money).toLocaleString();
   $("hud-corn").textContent = save.grain.corn.toFixed(1) + " t";
   $("hud-soy").textContent = save.grain.soybeans.toFixed(1) + " t";
+
+  // Year-position marker: fraction of the display year (Mar → Feb) elapsed.
+  const f = yearFraction(clock.time());
+  $("year-marker").style.left = `calc(${(f * 100).toFixed(2)}% - 1px)`;
+  // The calendar grid has a 110px label column; the lanes take the rest.
+  const calNow = document.getElementById("cal-now");
+  if (calNow) calNow.style.left = `calc(${(110 * (1 - f)).toFixed(1)}px + ${(f * 100).toFixed(2)}%)`;
+}
+
+/** 0..1 through the campaign's display year, which runs Mar 1 → end of Feb. */
+function yearFraction(t: number): number {
+  return (t % (MONTHS_PER_YEAR * MINUTES_PER_MONTH)) / (MONTHS_PER_YEAR * MINUTES_PER_MONTH);
 }
 
 function toast(text: string, ms = 2600) {
@@ -156,7 +183,33 @@ function toast(text: string, ms = 2600) {
 }
 
 // ---------------------------------------------------------------------------
-// Time controls: pause / 1× / 5× / 10× + skip-to-month montage.
+// Persistence: auto-save + the Reset button.
+// ---------------------------------------------------------------------------
+let resetting = false;
+
+function doSave() {
+  if (resetting) return; // a reset is wiping the save — don't write it back
+  persistGame({ save, clockNow: clock.time(), harvestingIds: getHarvestingIds() });
+}
+
+function wirePersistence() {
+  // Auto-save every 5s and on tab close/hide. The state is a few KB — cheap.
+  setInterval(doSave, 5000);
+  window.addEventListener("beforeunload", doSave);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") doSave();
+  });
+
+  $("btn-reset").addEventListener("click", () => {
+    if (!confirm("Start a new farm? This wipes the current save.")) return;
+    resetting = true;
+    clearSavedGame();
+    location.reload();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Time controls: pause / 1× / 10× / 60× + skip-to-month montage.
 // ---------------------------------------------------------------------------
 /** 1× = literal real time: 1 sim-minute per real minute. */
 const BASE_COMPRESSION = 1 / 60;
@@ -165,8 +218,8 @@ function wireTimeControls() {
   const speeds: Array<[string, number | null]> = [
     ["spd-pause", null],
     ["spd-1", 1],
-    ["spd-5", 5],
     ["spd-10", 10],
+    ["spd-60", 60],
   ];
   for (const [id, mult] of speeds) {
     $(id).addEventListener("click", () => {
@@ -246,10 +299,60 @@ function runMontage(target: number) {
 /** Put compression + play state back to whatever the speed buttons say. */
 function restoreSpeed(paused: boolean) {
   const active = document.querySelector("#timebar button.active")?.id ?? "spd-1";
-  const mult = active === "spd-5" ? 5 : active === "spd-10" ? 10 : 1;
+  const mult = active === "spd-60" ? 60 : active === "spd-10" ? 10 : 1;
   clock.setCompression(BASE_COMPRESSION * mult);
   if (active === "spd-pause" || paused) clock.pause();
   else clock.play();
+}
+
+// ---------------------------------------------------------------------------
+// Crop calendar: planting/harvest bands per crop over the display year (Mar→Feb),
+// derived from gameConfig (plant windows + grow time) — no hand-kept data.
+// ---------------------------------------------------------------------------
+function buildCropCalendar() {
+  const grid = $("cal-grid");
+  const disp = (mo: number) => (mo - START_MONTH + MONTHS_PER_YEAR) % MONTHS_PER_YEAR;
+
+  // Season header (the display year aligns with seasons: Mar starts spring).
+  let html = `<div></div>`;
+  for (const s of ["🌱", "☀️", "🍂", "❄️"]) {
+    html += `<div class="seasonhead" style="grid-column: span 3">${s}</div>`;
+  }
+  // Month header.
+  html += `<div></div>`;
+  for (let i = 0; i < MONTHS_PER_YEAR; i++) {
+    html += `<div class="mo">${MONTH_SHORT[(START_MONTH + i) % MONTHS_PER_YEAR]}</div>`;
+  }
+  // One lane per crop with plant + harvest bands (percent of the display year).
+  for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
+    const cfg = gameConfig.crops[cropId];
+    const growMonths = cfg.growDays / DAYS_PER_MONTH;
+    const plantStart = disp(cfg.plantMonths[0]!);
+    const plantLen = cfg.plantMonths.length;
+    // Harvest opens a grow-time after the earliest planting and closes a
+    // grow-time after the latest; crops here don't wrap past February.
+    const harvStart = plantStart + growMonths;
+    const harvLen = plantLen; // window is as wide as the planting window
+    const pct = (months: number) => (months / MONTHS_PER_YEAR) * 100;
+    html += `<div class="crop">${cfg.emoji} ${cfg.name}</div>
+      <div class="lane">
+        <div class="band plant" style="left:${pct(plantStart)}%;width:${pct(plantLen)}%"></div>
+        <div class="band harv" style="left:${pct(harvStart)}%;width:${pct(harvLen)}%"></div>
+      </div>`;
+  }
+  grid.innerHTML = html;
+
+  // "You are here" line, positioned over the lanes (offset past the label column).
+  const now = document.createElement("div");
+  now.id = "cal-now";
+  grid.appendChild(now);
+
+  $("btn-cropcal").addEventListener("click", () => {
+    const el = $("cropcal");
+    el.style.display = el.style.display === "block" ? "none" : "block";
+    updateHud();
+  });
+  $("cal-close").addEventListener("click", () => ($("cropcal").style.display = "none"));
 }
 
 // ---------------------------------------------------------------------------
