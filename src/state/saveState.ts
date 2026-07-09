@@ -16,6 +16,7 @@
 import type { Meters } from "../geo/coords";
 import type { SimTime } from "../sim/clock";
 import { gameConfig } from "../config/gameConfig";
+import type { CropId } from "../config/gameConfig";
 
 /** Field lifecycle (brief §10). */
 export type FieldStatus =
@@ -38,8 +39,19 @@ export interface Field {
   parcelId: string;
   boundary: Meters[];
   status: FieldStatus;
-  crop?: string;
+  crop?: CropId;
+  /** Sim-time the crop went in the ground. */
+  plantedAt?: SimTime;
+  /** TRUE yield in tons/acre, rolled at planting and hidden from the player —
+   * they see only the narrowing range around it (brief §6). */
+  trueYieldTonsPerAcre?: number;
+  /** Acres harvested so far (harvest runs over sim-days, brief §10). */
+  harvestedAcres?: number;
 }
+
+/** On-farm grain bin, tons per crop. Unlimited in this slice; storage limits and
+ * costs arrive with the storage mechanic (brief §5 lever 1). */
+export type GrainBin = Record<CropId, number>;
 
 export interface Agent {
   id: string;
@@ -53,6 +65,7 @@ export interface SaveState {
   money: number;
   parcels: Parcel[];
   fields: Field[];
+  grain: GrainBin;
   agents: Agent[];
   contracts: unknown[]; // shape defined when the contract slice lands (brief §6)
 }
@@ -64,6 +77,7 @@ export function newGame(): SaveState {
     money: gameConfig.startingMoney,
     parcels: [],
     fields: [],
+    grain: { corn: 0, soybeans: 0 },
     agents: [],
     contracts: [],
   };

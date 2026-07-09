@@ -1,42 +1,57 @@
 /**
- * Entry point (brief §12).
+ * Entry point — the playable season loop (brief §12 steps 2–3).
  *
- * Loads a COUNTY PACKAGE (the playable "map") by id, then builds the map from it:
- *   1. NAIP satellite imagery (source from the county manifest).
- *   2. The county's bundled OSM road extract (offline — no live Overpass).
- *   3. Routing between two clicked points on real roads.
+ * Loads a COUNTY PACKAGE (the playable "map") by id, builds the map (NAIP imagery +
+ * bundled OSM roads), then runs the game: buy fields, plant corn/soy, watch them
+ * grow on the sim clock, harvest into the grain bin.
  *
- * Everything is driven by the loaded manifest, so a new county is a data drop-in.
+ * Time model (design decision, 2026-07-09): 1× is LITERAL real time — the game can
+ * sit in a tab like an idle game. 5×/10× buttons for watching things move, and
+ * "Skip to month" (with a short montage) is the main lever for jumping seasons.
  */
 
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import type { Feature } from "geojson";
 
 import { loadCounty } from "./county/registry";
-import type { Feature } from "geojson";
-import { setProjection, toMeters, toLngLat, distanceMeters } from "./geo/coords";
+import { setProjection, toMeters, toLngLat } from "./geo/coords";
 import type { LngLat, Meters } from "./geo/coords";
+import { areaAcres, pointInPolygon } from "./geo/geometry";
 import { naipSource } from "./map/naip";
 import { addRoadsLayer } from "./map/roadsLayer";
-import { route } from "./map/routing";
 import { OverlayEngine } from "./map/overlay";
 import { newGame } from "./state/saveState";
 import type { SaveState } from "./state/saveState";
-import { buyFieldFromBoundary } from "./field/fields";
+import { buyFieldFromBoundary, renderField } from "./field/fields";
+import { SimClock } from "./sim/clock";
+import { formatDate, dateOf, nextMonthStart, MONTH_NAMES, MONTH_SHORT } from "./sim/calendar";
+import {
+  plant, tickFarming, growthProgress, yieldRange, startHarvest, isHarvesting,
+  inPlantingWindow,
+} from "./sim/farming";
+import { gameConfig } from "./config/gameConfig";
+import type { CropId } from "./config/gameConfig";
 
-// Which county to play. Later this comes from a save / county picker (see COUNTIES).
+// Which county to play. Later this comes from a save / county picker.
 const COUNTY_ID = "story-ia";
 
 // One in-memory save-state for the session (IndexedDB persistence is a later slice).
 const save: SaveState = newGame();
+const clock = new SimClock();
 
-// Only one map interaction is active at a time, so route-picking and field-drawing
-// don't both consume the same clicks.
-type Mode = "none" | "route" | "field";
+// Only one map interaction is active at a time.
+type Mode = "none" | "field";
 let mode: Mode = "none";
 
-function setStatus(id: string, text: string, cls?: "ok" | "err") {
-  const el = document.getElementById(id)!;
+let overlay: OverlayEngine;
+let mapRef: maplibregl.Map;
+let selectedFieldId: string | null = null;
+
+const $ = (id: string) => document.getElementById(id)!;
+
+function devStatus(id: string, text: string, cls?: "ok" | "err") {
+  const el = $(id);
   el.textContent = text;
   el.className = "row" + (cls ? " " + cls : "");
 }
@@ -45,14 +60,9 @@ async function main() {
   const county = await loadCounty(COUNTY_ID);
   const m = county.manifest;
 
-  // Establish the internal metric space for THIS county before any conversion.
   setProjection(m.utm.zone, m.utm.hemisphere);
-
-  document.querySelector("#hud h1")!.textContent = m.name;
-  setStatus("status-osm", `Roads: ${county.roads.features.length} loaded ✓`, "ok");
-  updateMoney();
-  document.getElementById("attr")!.innerHTML =
-    `${m.imagery.attribution} · ${m.roads.attribution}`;
+  devStatus("status-osm", `Roads: ${county.roads.features.length} ✓`, "ok");
+  $("attr").innerHTML = `${m.imagery.attribution} · ${m.roads.attribution}`;
 
   const map = new maplibregl.Map({
     container: "map",
@@ -69,69 +79,183 @@ async function main() {
       layers: [{ id: "naip", type: "raster", source: "naip" }],
     },
   });
-
+  mapRef = map;
   map.addControl(new maplibregl.NavigationControl(), "top-right");
 
   let naipOk = false;
   map.on("sourcedata", (e) => {
     if (e.isSourceLoaded && e.sourceId === "naip" && !naipOk) {
       naipOk = true;
-      setStatus("status-naip", "NAIP imagery: loaded ✓", "ok");
+      devStatus("status-naip", "NAIP: loaded ✓", "ok");
     }
   });
 
   map.on("load", () => {
     addRoadsLayer(map, county.roads);
-    const overlay = new OverlayEngine(map);
-    wireRouting(map);
-    wireFieldDrawing(map, overlay);
-  });
-}
-
-function updateMoney() {
-  setStatus("status-money", `Cash: $${save.money.toLocaleString()}`);
-}
-
-// --- Routing test: click two points, draw the real-road route. ---
-function wireRouting(map: maplibregl.Map) {
-  const picks: LngLat[] = [];
-
-  document.getElementById("btn-route")!.addEventListener("click", () => {
-    mode = "route";
-    picks.length = 0;
-    clearRoute(map);
-    setStatus("status-route", "Routing: click 2 points on the map…");
+    overlay = new OverlayEngine(map);
+    wireFieldDrawing(map);
+    wireFieldSelection(map);
+    wireTimeControls();
+    clock.play(); // the world breathes from the start (idle-game 1×)
+    requestAnimationFrame(gameLoop);
   });
 
-  map.on("click", async (e) => {
-    if (mode !== "route") return;
-    picks.push([e.lngLat.lng, e.lngLat.lat]);
-    new maplibregl.Marker().setLngLat(e.lngLat).addTo(map);
-    if (picks.length < 2) return;
+  updateHud();
+}
 
-    mode = "none";
-    setStatus("status-route", "Routing: querying OSRM…");
-    try {
-      const r = await route(picks[0]!, picks[1]!);
-      drawRoute(map, r.geometry);
-      const straight = distanceMeters(toMeters(picks[0]!), toMeters(picks[1]!));
-      const km = (r.distanceMeters / 1000).toFixed(1);
-      const min = (r.durationSeconds / 60).toFixed(0);
-      const straightKm = (straight / 1000).toFixed(1);
-      setStatus(
-        "status-route",
-        `Routing: ${km} km by road, ${min} min (${straightKm} km straight) ✓`,
-        "ok",
-      );
-    } catch (err) {
-      setStatus("status-route", "Routing: FAILED — " + (err as Error).message, "err");
+// ---------------------------------------------------------------------------
+// Game loop: advance the sim, tick farming, repaint what changed.
+// ---------------------------------------------------------------------------
+let lastFrame = performance.now();
+let lastUiRefresh = 0;
+
+function gameLoop(ts: number) {
+  const realSeconds = Math.min(1, (ts - lastFrame) / 1000); // clamp tab-sleep jumps
+  lastFrame = ts;
+
+  const before = clock.time();
+  clock.advance(realSeconds);
+  tickWorld(before);
+
+  requestAnimationFrame(gameLoop);
+}
+
+/** Advance farming from the clock's previous time to now; repaint changed fields. */
+function tickWorld(prev: number) {
+  const now = clock.time();
+  const dt = now - prev;
+  if (dt <= 0) return;
+  const { changed } = tickFarming(save, now, dt);
+  for (const f of changed) renderField(mapRef, overlay, f);
+  // Refresh UI ~2×/s (or instantly when a status flipped). Rebuilding the field
+  // panel every frame would recreate its buttons under the player's cursor.
+  const rt = performance.now();
+  if (changed.length || rt - lastUiRefresh > 500) {
+    lastUiRefresh = rt;
+    updateHud();
+    if (selectedFieldId) refreshFieldPanel();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HUD
+// ---------------------------------------------------------------------------
+function updateHud() {
+  $("hud-date").textContent = formatDate(clock.time());
+  $("hud-cash").textContent = "$" + Math.round(save.money).toLocaleString();
+  $("hud-corn").textContent = save.grain.corn.toFixed(1) + " t";
+  $("hud-soy").textContent = save.grain.soybeans.toFixed(1) + " t";
+}
+
+function toast(text: string, ms = 2600) {
+  const el = $("toast");
+  el.textContent = text;
+  el.style.display = "block";
+  clearTimeout((toast as { t?: number }).t);
+  (toast as { t?: number }).t = window.setTimeout(() => (el.style.display = "none"), ms);
+}
+
+// ---------------------------------------------------------------------------
+// Time controls: pause / 1× / 5× / 10× + skip-to-month montage.
+// ---------------------------------------------------------------------------
+/** 1× = literal real time: 1 sim-minute per real minute. */
+const BASE_COMPRESSION = 1 / 60;
+
+function wireTimeControls() {
+  const speeds: Array<[string, number | null]> = [
+    ["spd-pause", null],
+    ["spd-1", 1],
+    ["spd-5", 5],
+    ["spd-10", 10],
+  ];
+  for (const [id, mult] of speeds) {
+    $(id).addEventListener("click", () => {
+      for (const [other] of speeds) $(other).classList.remove("active");
+      $(id).classList.add("active");
+      if (mult === null) {
+        clock.pause();
+      } else {
+        clock.setCompression(BASE_COMPRESSION * mult);
+        clock.play();
+      }
+    });
+  }
+  clock.setCompression(BASE_COMPRESSION);
+
+  // Skip-to-month dropdown: always offers the next 12 month-starts.
+  const sel = $("skip-month") as HTMLSelectElement;
+  const rebuild = () => {
+    const cur = dateOf(clock.time()).month;
+    sel.options.length = 1;
+    for (let i = 1; i <= 12; i++) {
+      const mo = (cur + i) % 12;
+      sel.add(new Option(`${MONTH_SHORT[mo]} 1`, String(mo)));
     }
+  };
+  rebuild();
+  sel.addEventListener("focus", rebuild);
+  sel.addEventListener("change", () => {
+    if (sel.value === "") return;
+    const target = nextMonthStart(clock.time(), Number(sel.value));
+    sel.value = "";
+    runMontage(target);
   });
 }
 
-// --- Field drawing (brief §12 step 2): click a polygon, double-click to close,
-//     then buy the land under it and render it through the overlay engine. ---
-function wireFieldDrawing(map: maplibregl.Map, overlay: OverlayEngine) {
+/**
+ * The skip montage: fast-forward the sim to `target` over ~2.5 real seconds so the
+ * player watches the field green up / ripen instead of teleporting. All skipped
+ * time IS simulated (no shortcuts), just at very high compression.
+ */
+let montageActive = false;
+function runMontage(target: number) {
+  if (montageActive) return;
+  montageActive = true;
+  const wasPaused = clock.isPaused();
+  const durationMs = 2500;
+  const start = performance.now();
+  const from = clock.time();
+  $("montage").style.display = "flex";
+  clock.pause(); // we drive time manually during the montage
+
+  const step = (ts: number) => {
+    const t = Math.min(1, (ts - start) / durationMs);
+    const eased = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2; // easeInOutQuad
+    const now = from + (target - from) * eased;
+    const prev = clock.time();
+    // Drive the clock forward in montage steps (clock stays paused; we set time
+    // by advancing at exact compression for one fake second).
+    clock.play();
+    clock.setCompression(now - prev);
+    clock.advance(1);
+    clock.pause();
+    tickWorld(prev);
+    $("montage-month").textContent = MONTH_NAMES[dateOf(clock.time()).month]!;
+    if (t < 1) {
+      requestAnimationFrame(step);
+    } else {
+      $("montage").style.display = "none";
+      montageActive = false;
+      restoreSpeed(wasPaused);
+      toast(`📅 ${formatDate(clock.time())}`);
+    }
+  };
+  requestAnimationFrame(step);
+}
+
+/** Put compression + play state back to whatever the speed buttons say. */
+function restoreSpeed(paused: boolean) {
+  const active = document.querySelector("#timebar button.active")?.id ?? "spd-1";
+  const mult = active === "spd-5" ? 5 : active === "spd-10" ? 10 : 1;
+  clock.setCompression(BASE_COMPRESSION * mult);
+  if (active === "spd-pause" || paused) clock.pause();
+  else clock.play();
+}
+
+// ---------------------------------------------------------------------------
+// Field drawing (buy land) — click vertices, double-click to close.
+// ---------------------------------------------------------------------------
+function wireFieldDrawing(map: maplibregl.Map) {
   const verts: Meters[] = [];
   const draftId = "field-draft";
 
@@ -162,11 +286,11 @@ function wireFieldDrawing(map: maplibregl.Map, overlay: OverlayEngine) {
     if (map.getSource(draftId)) map.removeSource(draftId);
   }
 
-  document.getElementById("btn-field")!.addEventListener("click", () => {
+  $("btn-field").addEventListener("click", () => {
     mode = "field";
     clearDraft();
-    map.doubleClickZoom.disable(); // dbl-click means "finish the polygon" here.
-    setStatus("status-field", "Buy field: click vertices, double-click to close…");
+    map.doubleClickZoom.disable();
+    toast("🚜 Click to place corners — double-click to close the field");
   });
 
   map.on("click", (e) => {
@@ -175,62 +299,174 @@ function wireFieldDrawing(map: maplibregl.Map, overlay: OverlayEngine) {
     updateDraft();
   });
 
-  map.on("dblclick", (e) => {
+  map.on("dblclick", () => {
     if (mode !== "field") return;
-    // The double-click's two single clicks each pushed a vertex at the same spot;
-    // drop the duplicate finishing vertex before closing.
+    // The double-click's two single clicks each pushed the same vertex; drop one.
     verts.pop();
-    void e;
-    finishField();
-  });
-
-  function finishField() {
     mode = "none";
     map.doubleClickZoom.enable();
     const boundary = verts.slice();
     clearDraft();
     if (boundary.length < 3) {
-      setStatus("status-field", "Buy field: need at least 3 vertices — try again", "err");
+      toast("Need at least 3 corners — try again");
       return;
     }
     try {
       const { field, acres, cost } = buyFieldFromBoundary(map, overlay, save, boundary);
-      updateMoney();
-      setStatus(
-        "status-field",
-        `Bought ${field.id}: ${acres.toFixed(1)} ac for $${cost.toLocaleString()} ✓`,
-        "ok",
-      );
+      updateHud();
+      toast(`🌾 Bought ${acres.toFixed(1)} ac for $${cost.toLocaleString()}`);
+      openFieldPanel(field.id);
     } catch (err) {
-      setStatus("status-field", "Buy field: " + (err as Error).message, "err");
+      toast("❌ " + (err as Error).message, 3500);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Field selection + the cozy side panel.
+// ---------------------------------------------------------------------------
+function wireFieldSelection(map: maplibregl.Map) {
+  map.on("click", (e) => {
+    if (mode !== "none") return;
+    const p = toMeters([e.lngLat.lng, e.lngLat.lat]);
+    const hit = save.fields.find((f) => pointInPolygon(p, f.boundary));
+    if (hit) openFieldPanel(hit.id);
+    else closeFieldPanel();
+  });
+  $("fp-close").addEventListener("click", closeFieldPanel);
+}
+
+function openFieldPanel(fieldId: string) {
+  selectedFieldId = fieldId;
+  $("fieldpanel").style.display = "block";
+  refreshFieldPanel();
+}
+
+function closeFieldPanel() {
+  selectedFieldId = null;
+  $("fieldpanel").style.display = "none";
+}
+
+function fieldMsg(text: string) {
+  $("fp-msg").textContent = text;
+}
+
+/** Rebuild the panel contents from the selected field's current state. */
+let lastPanelKey = "";
+function refreshFieldPanel(force = false) {
+  const field = save.fields.find((f) => f.id === selectedFieldId);
+  if (!field) return closeFieldPanel();
+  const now = clock.time();
+  const acres = areaAcres(field.boundary);
+
+  // Skip the rebuild when nothing visible changed — replacing buttons under the
+  // player's cursor twice a second makes them unclickable. Growth/harvest progress
+  // is bucketed to 1% so live bars still animate.
+  const key = [
+    field.id, field.status, isHarvesting(field),
+    Math.round(growthProgress(field, now) * 100),
+    Math.round(((field.harvestedAcres ?? 0) / acres) * 100),
+    dateOf(now).month, // planting windows open/close on month boundaries
+    Math.round(save.money), // affordability of input costs
+  ].join("|");
+  if (!force && key === lastPanelKey) return;
+  lastPanelKey = key;
+
+  $("fp-title").textContent = "🌾 " + prettyId(field.id);
+  $("fp-sub").textContent = `${acres.toFixed(1)} acres`;
+  const badge = $("fp-status");
+  badge.textContent = isHarvesting(field) ? "harvesting" : field.status;
+
+  const body = $("fp-body");
+  const actions = $("fp-actions");
+  body.innerHTML = "";
+  actions.innerHTML = "";
+
+  if (field.status === "stubble" || field.status === "harvested") {
+    // --- Plant chooser ---
+    body.innerHTML = `<div class="small" style="margin-top:8px">Plant a crop:</div>`;
+    const row = document.createElement("div");
+    row.className = "cropbtns";
+    for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
+      const cfg = gameConfig.crops[cropId];
+      const cost = Math.round(acres * cfg.inputCostPerAcre);
+      const btn = document.createElement("button");
+      const open = inPlantingWindow(cropId, now);
+      btn.innerHTML = `${cfg.emoji} ${cfg.name}<br><span class="small">$${cost.toLocaleString()}</span>`;
+      if (!open) {
+        btn.disabled = true;
+        btn.title = `Plant in ${cfg.plantMonths.map((mo) => MONTH_SHORT[mo]).join("–")}`;
+        btn.style.opacity = "0.45";
+      }
+      btn.addEventListener("click", () => {
+        try {
+          plant(save, field, cropId, now);
+          renderField(mapRef, overlay, field);
+          updateHud();
+          fieldMsg("");
+          toast(`${cfg.emoji} ${cfg.name} planted!`);
+          refreshFieldPanel();
+        } catch (err) {
+          fieldMsg((err as Error).message);
+        }
+      });
+      row.appendChild(btn);
+    }
+    body.appendChild(row);
+    const windows = (Object.keys(gameConfig.crops) as CropId[])
+      .map((c) => `${gameConfig.crops[c].emoji} ${gameConfig.crops[c].plantMonths.map((mo) => MONTH_SHORT[mo]).join("–")}`)
+      .join("   ");
+    body.insertAdjacentHTML("beforeend", `<div class="small">${windows}</div>`);
+  } else if (field.crop) {
+    // --- Growing / ready / harvesting ---
+    const cfg = gameConfig.crops[field.crop];
+    const progress = growthProgress(field, now);
+    const range = yieldRange(field, now);
+
+    let html = `<div style="margin-top:8px">${cfg.emoji} <b>${cfg.name}</b></div>`;
+    if (!isHarvesting(field)) {
+      html += `<div class="small">Growth</div>
+        <div class="progress"><div class="fill" style="width:${(progress * 100).toFixed(0)}%"></div></div>`;
+    }
+    if (range) {
+      const uMax = cfg.baseYieldTonsPerAcre * (1 + cfg.yieldUncertainty) * 1.05;
+      const l = (range.low / uMax) * 100;
+      const w = ((range.high - range.low) / uMax) * 100;
+      html += `<div class="small">Est. yield (narrows over the season)</div>
+        <div class="rangebar"><div class="band" style="left:${l}%;width:${Math.max(2, w)}%"></div></div>
+        <div class="small">${(range.low * acres).toFixed(0)}–${(range.high * acres).toFixed(0)} t total</div>`;
+    }
+    if (isHarvesting(field)) {
+      const done = ((field.harvestedAcres ?? 0) / acres) * 100;
+      html += `<div class="small" style="margin-top:6px">Harvesting… 🚜</div>
+        <div class="progress"><div class="fill" style="width:${done.toFixed(0)}%"></div></div>`;
+    }
+    body.innerHTML = html;
+
+    if (field.status === "ready" && !isHarvesting(field)) {
+      const btn = document.createElement("button");
+      btn.className = "primary";
+      btn.textContent = "🚜 Harvest";
+      btn.addEventListener("click", () => {
+        try {
+          startHarvest(field, clock.time());
+          fieldMsg("");
+          toast("🚜 Harvest started!");
+          refreshFieldPanel();
+        } catch (err) {
+          fieldMsg((err as Error).message);
+        }
+      });
+      actions.appendChild(btn);
     }
   }
 }
 
-function clearRoute(map: maplibregl.Map) {
-  if (map.getLayer("route-line")) map.removeLayer("route-line");
-  if (map.getSource("route")) map.removeSource("route");
-}
-
-function drawRoute(map: maplibregl.Map, coords: LngLat[]) {
-  clearRoute(map);
-  map.addSource("route", {
-    type: "geojson",
-    data: {
-      type: "Feature",
-      properties: {},
-      geometry: { type: "LineString", coordinates: coords },
-    },
-  });
-  map.addLayer({
-    id: "route-line",
-    type: "line",
-    source: "route",
-    paint: { "line-color": "#ff4d4d", "line-width": 4 },
-  });
+function prettyId(id: string): string {
+  return id.replace("-", " ").replace(/^\w/, (c) => c.toUpperCase());
 }
 
 main().catch((err) => {
-  setStatus("status-naip", "Failed to load county: " + (err as Error).message, "err");
+  devStatus("status-naip", "Failed to load county: " + (err as Error).message, "err");
   console.error(err);
 });

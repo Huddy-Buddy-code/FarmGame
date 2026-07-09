@@ -2,20 +2,20 @@
 
 _Update at the end of every session (brief §13)._
 
-**Last session:** 2026-07-08. Built the geo-referenced raster **overlay engine**
-(pillar 3) and shipped **slice 2**: buy one parcel → draw one field, rendered as a
-procedural texture over NAIP. Repo is green (typecheck + 6 tests). Visually verified
-in-browser (field renders + stays pinned to real ground on zoom).
+**Last session:** 2026-07-09. Shipped **slice 3 — the growing season**: calendar +
+live clock, plant corn/soy, narrowing yield range (§6), multi-day harvest into a
+grain bin — all under a new **cozy game UI**. Repo green (typecheck + 14 tests);
+full plant→grow→harvest loop played through in-browser.
 
 ---
 
 ## Where we are
 
-The brief's **hard gate is passed** (§12 step 1): NAIP + OSM roads + real-road routing
-over Story County, IA, organized as reusable **county packages**. Now the **overlay
-engine is live** and has its first consumer: you can buy land and draw a field, which
-renders as a geo-referenced texture composited over the imagery. Next: put the field
-through its lifecycle (plant → grow via sim clock → harvest), then move grain (§12 3–5).
+Hard gate passed (§12.1); county packages; overlay engine live. **The farm now runs a
+real season**: buy land → plant corn/soybeans (pay inputs, planting windows) → watch
+the field texture change as it grows on the sim clock → yield range narrows → harvest
+over sim-days into the grain bin. §12 steps 1–3 are DONE. Next: **move the grain**
+(§12 steps 4–5) — truck + real buyer + local price — which closes the core loop.
 
 ## Done
 
@@ -75,6 +75,30 @@ through its lifecycle (plant → grow via sim clock → harvest), then move grai
 - Config: added `landPricePerAcre` ($12k, Corn-Belt ballpark). Fixed a scaffold bug —
   `newGame()` now seeds `money` from `gameConfig.startingMoney` (was hardcoded 0).
 
+### Slice 3 — The growing season + cozy game UI ✅ (2026-07-09)
+Design decisions (maintainer-interviewed):
+- **Time:** 1× is LITERAL real time — the game works as a background idle game.
+  Speed buttons 5×/10×; **Skip to Month** (dropdown, next 12 month-starts) is the
+  main season lever, shown as a ~2.5 s **montage** that fully simulates the skipped
+  time at high compression (no shortcuts/exploits).
+- **Calendar** (`src/sim/calendar.ts`): 12 × 30-day months, campaign starts Mar 1 Yr 1
+  (pre-planting). Seasons ride on months.
+- **Crops:** corn 🌽 (Apr–May, 110 d, 5.5 t/ac base) + soybeans 🫘 (May–Jun, 100 d,
+  1.6 t/ac). All numbers in gameConfig.
+- **Yield (§6, the crux):** true yield rolled hidden at planting inside ±30%;
+  player sees a **visible range that narrows** toward it (rangebar in field panel).
+  Unit-tested: always contains truth, monotonically narrows.
+- **Harvest:** takes sim-days (`harvestAcresPerDay`), grain flows into an **on-farm
+  bin** (unlimited for now — storage limits arrive with the storage mechanic).
+- **Farming sim** (`src/sim/farming.ts`) is pure/testable (no map/DOM); main.ts
+  repaints field overlay textures when a status flips.
+- **Cozy UI** (index.html rework): cream/wood panels, top HUD (📅 date, 💰 cash,
+  🌽/🫘 bins), time controls, Buy Field toolbar, click-a-field side panel (crop
+  picker w/ costs + windows, growth bar, narrowing yield bar, harvest progress),
+  toasts. Data-spike statuses live in a small dev corner. Routing click-test
+  removed (trucks bring routing back next slice; `src/map/routing.ts` untouched).
+- `pointInPolygon` in geometry.ts for click→field hit-testing. Tests now 14.
+
 ### Dev convenience
 - `start-dev.bat` — double-click to install (first run) + launch the dev server and
   open the browser at http://localhost:5173.
@@ -84,24 +108,23 @@ through its lifecycle (plant → grow via sim clock → harvest), then move grai
 - Checks: `npm run typecheck`, `npm test`.
 
 ## Next (in order)
-1. **Plant → grow → harvest one crop** (brief §12 steps 3, §6, §10). Drive the field
-   through its lifecycle status (stubble→tilled→planted→growing→ready→harvested),
-   repainting the overlay per status (already supported). Growth ticks off the **sim
-   clock** (`src/sim/clock.ts` — wire it into the loop). Pay planting inputs in spring;
-   produce an **uncertain, narrowing yield range** (§6) that resolves to tons at harvest.
-   Tunables (input cost, yield range width/narrowing, crop base yield) → gameConfig.
-2. **Move grain** (brief §12 4–5): one capacity-limited truck routes on real roads
-   (routing already works) to a real buyer, costing drive-time + fuel; sell at a local
-   price with the local-demand drop → get paid → the core loop closes.
-3. (Optional, small) A **county-picker UI** to make the multi-map structure visible.
+1. **Move grain — close the core loop** (brief §12 4–5): buyers (real elevators/mills
+   from OSM → county package `buyers.geojson`), one capacity-limited truck routing on
+   real roads (`src/map/routing.ts` still works), fuel + drive-time cost, sell at a
+   local price with the local-demand drop → get paid. *"If moving grain profitably in
+   steps 1–5 is fun, the game works."*
+2. **Persistence** (§2): save/load the SaveState to IndexedDB (+ clock time). Also
+   persist the mid-harvest set (currently session-scoped in farming.ts).
+3. (Optional) county-picker UI; tilled status/fieldwork pass (plant currently jumps
+   stubble→planted; tilling belongs to the equipment/fieldwork slice, §10).
 
 ### Notes for next session
-- **Balance smell:** land at $12k/acre vs. $100k start = only ~8 affordable acres —
-  fields end up tiny. Revisit starting money / land price / add the debt mechanism
-  (§8) so a first farm is a realistic size. Pure config tuning, no code.
-- The field-draw interaction lives in `main.ts` (`wireFieldDrawing`) alongside routing,
-  gated by a shared `mode` flag. Double-click closes the polygon (drops the duplicate
-  finishing vertex). Draw is in-memory only — **no IndexedDB persistence yet** (§2).
+- **Balance smell (still open):** $12k/ac land + $100k start = tiny first farm.
+  Consider the loan mechanism (§8) as the real fix rather than cheaper land.
+- **Growing-stage textures:** growing fields use one green fill; per-stage tinting
+  (§10) is procedural-ready in fieldRender.ts — do it when fieldwork lands.
+- 1×-real-time idle pacing is untested for feel over hours; revisit after buyers
+  exist (that's when leaving it running does something).
 
 ## Deferred / known
 - ~~In-browser visual re-check pending for Slice 0.1.~~ **Resolved this session:**

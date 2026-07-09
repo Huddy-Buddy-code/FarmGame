@@ -14,6 +14,27 @@
  * their tunables get ADDED here — never inlined into the system code.
  */
 
+/** Crops the player can plant (brief §6, §10). All numbers are balance = tunable. */
+export type CropId = "corn" | "soybeans";
+
+export interface CropConfig {
+  name: string;
+  /** HUD icon — cozy UI shorthand. */
+  emoji: string;
+  /** Planting inputs (seed, fertilizer, chemicals), paid at planting (brief §8). */
+  inputCostPerAcre: number;
+  /** Expected yield in tons/acre a typical season lands around. */
+  baseYieldTonsPerAcre: number;
+  /** Yield uncertainty half-width as a fraction of base (±30% = 0.3). The TRUE
+   * yield is rolled inside this band at planting; the VISIBLE range narrows toward
+   * it over the season (brief §6 — "show the range, don't hide the number"). */
+  yieldUncertainty: number;
+  /** 0-based months (0=Jan) in which planting is allowed. */
+  plantMonths: number[];
+  /** Sim-days from planting to harvest-ready. */
+  growDays: number;
+}
+
 export interface GameConfig {
   /** Starting cash for a new campaign. */
   startingMoney: number;
@@ -22,7 +43,16 @@ export interface GameConfig {
    * Placeholder ballpark for Corn-Belt cropland; tune in playtest. */
   landPricePerAcre: number;
 
-  // --- Economy, fuel, contracts, condition, interest, yield, etc. get added
+  crops: Record<CropId, CropConfig>;
+
+  /** How fast harvesting proceeds, in acres per sim-day (one combine, v1). */
+  harvestAcresPerDay: number;
+
+  /** How much the visible yield range has narrowed by harvest-ready (0..1).
+   * 0.85 = the band is 15% of its planting width when the crop is ready. */
+  yieldRangeNarrowing: number;
+
+  // --- Economy, fuel, contracts, condition, interest, etc. get added
   //     here slice-by-slice as those systems are built (brief §5–§8). ---
 }
 
@@ -30,4 +60,28 @@ export interface GameConfig {
 export const gameConfig: GameConfig = {
   startingMoney: 100_000,
   landPricePerAcre: 12_000,
+
+  crops: {
+    corn: {
+      name: "Corn",
+      emoji: "🌽",
+      inputCostPerAcre: 450,
+      baseYieldTonsPerAcre: 5.5, // ~200 bu/ac
+      yieldUncertainty: 0.3,
+      plantMonths: [3, 4], // Apr–May
+      growDays: 110,
+    },
+    soybeans: {
+      name: "Soybeans",
+      emoji: "🫘",
+      inputCostPerAcre: 300,
+      baseYieldTonsPerAcre: 1.6, // ~60 bu/ac
+      yieldUncertainty: 0.3,
+      plantMonths: [4, 5], // May–Jun
+      growDays: 100,
+    },
+  },
+
+  harvestAcresPerDay: 100,
+  yieldRangeNarrowing: 0.85,
 };

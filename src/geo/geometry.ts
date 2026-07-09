@@ -49,6 +49,19 @@ export function areaMeters(ring: Meters[]): number {
   return Math.abs(signedAreaMeters(ring));
 }
 
+/** Ray-cast point-in-polygon test (meters). Used for click → field hit-testing. */
+export function pointInPolygon([x, y]: Meters, ring: Meters[]): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i]!;
+    const [xj, yj] = ring[j]!;
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
 /** Convenience: area in hectares (1 ha = 10,000 m²) and acres (1 ac = 4046.8564 m²). */
 export function areaHectares(ring: Meters[]): number {
   return areaMeters(ring) / 10_000;

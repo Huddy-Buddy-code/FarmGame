@@ -3,37 +3,170 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Farm Logistics Sim — Data Spike</title>
+    <title>Farm Logistics Sim</title>
     <style>
-      html, body { margin: 0; height: 100%; background: #111; }
-      #map { position: absolute; inset: 0; }
-      #hud {
-        position: absolute; top: 10px; left: 10px; z-index: 10;
-        font: 13px/1.4 system-ui, sans-serif; color: #eee;
-        background: rgba(0,0,0,0.6); padding: 10px 12px; border-radius: 6px;
-        max-width: 320px;
+      :root {
+        --cream: #faf3e3;
+        --cream-2: #f1e4c8;
+        --wood: #8a5a33;
+        --wood-dark: #6b4426;
+        --ink: #4a3520;
+        --green: #6da144;
+        --green-dark: #55832f;
+        --gold: #e0a63c;
+        --red: #c75146;
+        --shadow: 0 3px 10px rgba(60, 40, 15, 0.35);
       }
-      #hud h1 { font-size: 14px; margin: 0 0 6px; }
-      #hud .row { margin: 2px 0; }
-      #hud .ok { color: #6f6; }
-      #hud .err { color: #f77; }
-      #hud .attr { margin-top: 8px; font-size: 11px; color: #aaa; }
-      button { font: inherit; cursor: pointer; margin-top: 6px; }
+      html, body { margin: 0; height: 100%; background: #111; overflow: hidden; }
+      body { font: 14px/1.45 "Segoe UI", system-ui, sans-serif; color: var(--ink); }
+      #map { position: absolute; inset: 0; }
+
+      .panel {
+        background: var(--cream);
+        border: 2px solid var(--wood);
+        border-radius: 14px;
+        box-shadow: var(--shadow);
+      }
+
+      /* ---------- Top HUD bar ---------- */
+      #topbar {
+        position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+        z-index: 20; display: flex; align-items: center; gap: 10px;
+        padding: 8px 14px; white-space: nowrap;
+      }
+      .stat { display: flex; align-items: center; gap: 5px; font-weight: 600; }
+      .stat .icon { font-size: 17px; }
+      .divider { width: 2px; height: 22px; background: var(--cream-2); border-radius: 2px; }
+
+      /* ---------- Time controls ---------- */
+      #timebar {
+        position: absolute; top: 64px; left: 50%; transform: translateX(-50%);
+        z-index: 20; display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+      }
+      button {
+        font: inherit; font-weight: 600; color: var(--ink); cursor: pointer;
+        background: var(--cream-2); border: 2px solid var(--wood);
+        border-radius: 10px; padding: 4px 12px;
+        transition: transform 0.06s, background 0.15s;
+      }
+      button:hover { background: #ead9b5; }
+      button:active { transform: scale(0.95); }
+      button.active { background: var(--green); border-color: var(--green-dark); color: #fff; }
+      button.primary { background: var(--green); border-color: var(--green-dark); color: #fff; }
+      button.primary:hover { background: var(--green-dark); }
+      select {
+        font: inherit; font-weight: 600; color: var(--ink);
+        background: var(--cream-2); border: 2px solid var(--wood);
+        border-radius: 10px; padding: 4px 8px; cursor: pointer;
+      }
+
+      /* ---------- Bottom toolbar ---------- */
+      #toolbar {
+        position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+        z-index: 20; display: flex; gap: 8px; padding: 8px 12px;
+      }
+
+      /* ---------- Field panel ---------- */
+      #fieldpanel {
+        position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+        z-index: 25; width: 250px; padding: 14px 16px; display: none;
+      }
+      #fieldpanel h2 { margin: 0 0 2px; font-size: 17px; }
+      #fieldpanel .sub { color: #8a7658; font-size: 12px; margin-bottom: 10px; }
+      #fieldpanel .close {
+        position: absolute; top: 8px; right: 10px; border: none; background: none;
+        font-size: 16px; padding: 2px 6px; color: #8a7658;
+      }
+      .badge {
+        display: inline-block; padding: 2px 10px; border-radius: 999px;
+        font-size: 12px; font-weight: 700; color: #fff; background: var(--gold);
+        text-transform: capitalize;
+      }
+      .cropbtns { display: flex; gap: 8px; margin: 10px 0 4px; }
+      .cropbtns button { flex: 1; padding: 8px 4px; font-size: 13px; }
+      .rangebar {
+        position: relative; height: 14px; margin: 6px 0 2px;
+        background: var(--cream-2); border: 1.5px solid var(--wood); border-radius: 999px;
+        overflow: hidden;
+      }
+      .rangebar .band { position: absolute; top: 0; bottom: 0; background: var(--green); opacity: 0.75; }
+      .small { font-size: 12px; color: #8a7658; }
+      .progress { height: 10px; background: var(--cream-2); border: 1.5px solid var(--wood); border-radius: 999px; overflow: hidden; margin: 6px 0; }
+      .progress .fill { height: 100%; background: var(--gold); width: 0%; transition: width 0.3s; }
+      #fp-actions { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+      #fp-msg { font-size: 12px; color: var(--red); min-height: 15px; margin-top: 4px; }
+
+      /* ---------- Toast + montage ---------- */
+      #toast {
+        position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%);
+        z-index: 40; padding: 8px 18px; font-weight: 600; display: none;
+      }
+      #montage {
+        position: absolute; inset: 0; z-index: 50; display: none;
+        background: rgba(30, 20, 8, 0.35); backdrop-filter: blur(1px);
+        align-items: center; justify-content: center; pointer-events: all;
+      }
+      #montage .card { padding: 18px 34px; font-size: 22px; font-weight: 700; text-align: center; }
+      #montage .card .mo { font-size: 30px; }
+
+      /* ---------- Dev corner ---------- */
+      #dev {
+        position: absolute; bottom: 12px; left: 12px; z-index: 15;
+        font-size: 11px; color: #cbb; background: rgba(0,0,0,0.55);
+        padding: 6px 9px; border-radius: 8px; max-width: 260px;
+      }
+      #dev .ok { color: #8e8; }
+      #dev .err { color: #f88; }
+      #dev .row { margin: 1px 0; }
     </style>
   </head>
   <body>
     <div id="map"></div>
-    <div id="hud">
-      <h1>Story County, IA — Data Spike</h1>
-      <div class="row" id="status-naip">NAIP imagery: …</div>
-      <div class="row" id="status-osm">OSM roads: …</div>
-      <div class="row" id="status-route">Routing: …</div>
-      <div class="row" id="status-money">Cash: …</div>
-      <div class="row" id="status-field">Fields: none yet</div>
-      <button id="btn-route">Test route (2 clicks on map)</button>
-      <button id="btn-field">Buy field (click a polygon, dbl-click to close)</button>
-      <div class="attr" id="attr"></div>
+
+    <div id="topbar" class="panel">
+      <div class="stat"><span class="icon">📅</span><span id="hud-date">—</span></div>
+      <div class="divider"></div>
+      <div class="stat"><span class="icon">💰</span><span id="hud-cash">—</span></div>
+      <div class="divider"></div>
+      <div class="stat"><span class="icon">🌽</span><span id="hud-corn">0 t</span></div>
+      <div class="stat"><span class="icon">🫘</span><span id="hud-soy">0 t</span></div>
     </div>
+
+    <div id="timebar" class="panel">
+      <button id="spd-pause" title="Pause">⏸</button>
+      <button id="spd-1" class="active" title="Real time">1×</button>
+      <button id="spd-5" title="5× speed">5×</button>
+      <button id="spd-10" title="10× speed">10×</button>
+      <select id="skip-month" title="Skip ahead to the 1st of a month">
+        <option value="">⏭ Skip to…</option>
+      </select>
+    </div>
+
+    <div id="toolbar" class="panel">
+      <button id="btn-field" class="primary">🚜 Buy Field</button>
+    </div>
+
+    <div id="fieldpanel" class="panel">
+      <button class="close" id="fp-close">✕</button>
+      <h2 id="fp-title">Field</h2>
+      <div class="sub" id="fp-sub">— acres</div>
+      <div><span class="badge" id="fp-status">stubble</span></div>
+      <div id="fp-body"></div>
+      <div id="fp-actions"></div>
+      <div id="fp-msg"></div>
+    </div>
+
+    <div id="toast" class="panel"></div>
+
+    <div id="montage"><div class="card panel"><div class="mo" id="montage-month">April</div><div>The weeks roll by…</div></div></div>
+
+    <div id="dev">
+      <div class="row" id="status-naip">NAIP: …</div>
+      <div class="row" id="status-osm">Roads: …</div>
+      <div class="row" id="status-route"></div>
+      <div class="row" id="attr"></div>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
