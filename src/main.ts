@@ -14,7 +14,8 @@ import "maplibre-gl/dist/maplibre-gl.css";
 
 import { gameConfig } from "./config/gameConfig";
 import { naipSource, NAIP_ATTRIBUTION } from "./map/naip";
-import { osmRoadsSource } from "./map/roads";
+import { OSM_ATTRIBUTION } from "./map/roads";
+import { attachOsmRoads } from "./map/osmRoadsVector";
 import { route } from "./map/routing";
 import type { LngLat } from "./geo/coords";
 import { toMeters, distanceMeters } from "./geo/coords";
@@ -37,25 +38,15 @@ const map = new maplibregl.Map({
     version: 8,
     sources: {
       naip: naipSource(),
-      "osm-roads": osmRoadsSource(),
     },
-    layers: [
-      { id: "naip", type: "raster", source: "naip" },
-      {
-        id: "osm-roads",
-        type: "raster",
-        source: "osm-roads",
-        paint: { "raster-opacity": 0.45 },
-      },
-    ],
+    layers: [{ id: "naip", type: "raster", source: "naip" }],
   },
 });
 
 map.addControl(new maplibregl.NavigationControl(), "top-right");
 
-// --- Status wiring: detect whether each tile source actually loads. ---
+// --- Status wiring. ---
 let naipOk = false;
-let osmOk = false;
 
 map.on("sourcedata", (e) => {
   if (!e.isSourceLoaded) return;
@@ -63,10 +54,11 @@ map.on("sourcedata", (e) => {
     naipOk = true;
     setStatus("status-naip", "NAIP imagery: loaded ✓", "ok");
   }
-  if (e.sourceId === "osm-roads" && !osmOk) {
-    osmOk = true;
-    setStatus("status-osm", "OSM roads: loaded ✓", "ok");
-  }
+});
+
+// OSM roads: real road geometry as vector lines, following the viewport.
+map.on("load", () => {
+  attachOsmRoads(map, (text, cls) => setStatus("status-osm", text, cls));
 });
 
 map.on("error", (e) => {
@@ -77,7 +69,7 @@ map.on("error", (e) => {
 });
 
 document.getElementById("attr")!.innerHTML =
-  NAIP_ATTRIBUTION + " · © OpenStreetMap contributors (ODbL)";
+  NAIP_ATTRIBUTION + " · " + OSM_ATTRIBUTION;
 
 // --- Routing test: click two points, draw the real-road route. ---
 let pickMode = false;
