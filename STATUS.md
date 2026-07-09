@@ -2,63 +2,80 @@
 
 _Update at the end of every session (brief §13)._
 
+**Last session:** 2026-07-08. Data spike passed its gate; counties restructured as
+data-driven "map packs." Repo is green (typecheck + tests) with 5 commits.
+
+---
+
+## Where we are
+
+The brief's **hard gate is passed** (§12 step 1): NAIP satellite imagery, OSM roads,
+and real-road routing all render together over Story County, IA. On top of that, the
+map is now organized as reusable **county packages** so we can add more playable
+counties as pure data. Next up is the geo-referenced overlay engine → first parcel/field.
+
 ## Done
 
-### Slice 0 — Scaffold + Data Spike (brief §12 step 1) — the hard gate
+### Slice 0 — Scaffold + Data Spike (the hard gate) ✅
 - Repo initialized (git from commit #1). Vite + TypeScript + MapLibre GL.
-- County chosen: **Story County, Iowa** (UTM zone 15N).
 - Architecture pillars stubbed from day one:
   - **Config object** (`src/config/gameConfig.ts`) — the only home for balance numbers.
   - **Coordinate system** (`src/geo/coords.ts`) — one internal UTM-meter space,
-    conversion only at edges. Covered by a round-trip unit test (`tests/coords.test.ts`).
+    conversion only at edges. Round-trip unit tested (`tests/coords.test.ts`).
   - **Sim clock** (`src/sim/clock.ts`) — pause, time-compression, queued future actions.
   - **Save-state shape** (`src/state/saveState.ts`) — parcels/fields/agents/contracts.
-- Data spike wired (`src/main.ts`): NAIP base + OSM roads overlay + click-to-route,
-  with a live HUD reporting whether each of the three data sources loaded.
+- **Gate CONFIRMED in-browser** (maintainer, 2026-07-08): NAIP + roads + a real route
+  (12.0 km by road vs 5.7 km straight, following the section-line grid).
+- Endpoint notes: USDA retired per-state ImageServers → we use the national mosaic
+  `NAIP/USDA_CONUS_PRIME`. Routing verified against the public OSRM demo server.
 
-### Verified this session
-- ✅ `npm run typecheck` clean; `npm test` green (3/3 coord tests).
-- ✅ NAIP endpoint: USDA per-state ImageServers were **retired**; switched to the
-  national mosaic `NAIP/USDA_CONUS_PRIME`. `exportImage` over Ames returns a real
-  JPEG (verified via curl — correct content-type + magic bytes).
-- ✅ OSRM routing: returns a real ~14.7 km Story County route (verified via curl).
-
-### Gate: CONFIRMED ✅
-- Visually confirmed in-browser (maintainer, 2026-07-08): all three HUD lines green —
-  NAIP imagery, OSM roads, and a real-road route (12.0 km by road vs 5.7 km straight,
-  routing along the section-line grid). **The brief's hard gate is passed.**
-
-### Slice 0.1 — County packages (the playable "maps")
-- Counties are now self-contained DATA packages under `public/counties/<id>/`,
-  loaded by id at runtime. Adding a county = drop a folder + one registry line; no
-  code change. Mirrors the brief's "module + party = campaign" → here "county + save
-  = session".
+### Slice 0.1 — County packages (the playable "maps") ✅
+- Each playable county is a self-contained DATA package under `public/counties/<id>/`,
+  loaded by id at runtime. Adding a county = drop a folder + one registry line; **no
+  code change**. ("county + save = session", mirroring the brief's "module + party =
+  campaign".) How-to is in the README.
   - `public/counties/story-ia/manifest.json` — identity, UTM zone, bbox, center,
     imagery source, attribution.
   - `public/counties/story-ia/roads.geojson` — pre-built OSM road extract (1.38 MB,
-    3,558 ways: public roads + field tracks; driveways/parking excluded). **Offline —
-    no live Overpass at play time.**
-  - `src/county/{types,registry}.ts` — package types + loader.
-- Coordinate system is now per-county: `setProjection(zone, hemisphere)` is called
-  from the loaded manifest at startup (a Palouse county would be a different UTM zone).
-- Imagery decision: roads are BUNDLED (small; Overpass is flaky), but full-county
+    3,558 ways: public roads + field tracks; driveways/parking excluded). **Loads
+    offline — no live Overpass at play time.**
+  - `src/county/{types,registry}.ts` — package format + loader.
+  - `src/map/roadsLayer.ts` — draws the extract as cased vector lines over NAIP
+    (yellow = major road, white = local), so imagery stays clean (no green tint).
+- Coordinate system is now **per-county**: `setProjection(zone, hemisphere)` is set
+  from the loaded manifest at startup (a Palouse county is a different UTM zone).
+- **Imagery decision:** roads are BUNDLED (small; Overpass is flaky), but full-county
   NAIP is gigabytes, so the manifest *describes* the imagery source and we serve it
   live from USDA (a reliable gov CDN). The manifest format is ready to swap to
   cached/self-hosted county tiles later without touching code.
 
-## Next
-1. Overlay engine (brief §4) — geo-referenced raster overlay, the ONE module behind
-   painter edits, field textures, and fieldwork reveal. Paint in geo-space.
-2. Buy one parcel → draw one field into the overlay (brief §12 step 2).
+### Dev convenience
+- `start-dev.bat` — double-click to install (first run) + launch the dev server and
+  open the browser at http://localhost:5173.
+
+## How to run
+- Double-click `start-dev.bat`, **or** `npm run dev` → http://localhost:5173.
+- Checks: `npm run typecheck`, `npm test`.
+
+## Next (in order)
+1. **Overlay engine** (brief §4) — the geo-referenced raster overlay, the ONE module
+   behind painter edits, field-status textures, and the fieldwork reveal. Paint in
+   **geo-space, not screen-space**, composited over NAIP (never modify the tiles).
+   This is the highest-leverage next piece — it powers three later features.
+2. **Buy one parcel → draw one field** into the overlay (brief §12 step 2), stored in
+   the save-state's `parcels`/`fields` as UTM meters.
+3. (Optional, small) A **county-picker UI** to make the multi-map structure visible
+   end to end.
 
 ## Deferred / known
-- County road extract was fetched once via public Overpass (flaky; rate-limited us
-  mid-session). Reproducible extract pipeline (Geofabrik or scripted Overpass) is a
-  TODO if we add many counties. For now the story-ia extract is committed as data.
-- Routing still uses the public OSRM demo; self-host per-county before real gameplay.
-
-## Notes / decisions
-- Routing uses the **public OSRM demo server** for the spike. Before real gameplay,
-  self-host OSRM/Valhalla on a Story County OSM extract (offline, fast, no rate limit).
-- OSM roads currently drawn as a semi-transparent **raster overlay** (visual proof
-  only). Real road geometry will come from the county extract as vector tiles.
+- **In-browser visual re-check pending for Slice 0.1.** The county-package refactor is
+  verified at typecheck/test/asset-serving level, but the Chrome automation extension
+  was offline all session so I couldn't screenshot the refactored map. Maintainer
+  should hard-refresh localhost:5173 and confirm clean NAIP + instant road lines +
+  "Roads: 3558 loaded ✓".
+- **Road extract provenance:** fetched once via public Overpass (which rate-limited us
+  mid-session). If we add many counties, build a reproducible extract pipeline
+  (Geofabrik `.osm.pbf` clip, or a scripted/throttled Overpass job). The story-ia
+  extract is committed as data for now.
+- **Routing** still uses the public OSRM demo server. Before real gameplay, self-host
+  OSRM/Valhalla on a per-county extract (offline, fast, no rate limit). Same interface.
