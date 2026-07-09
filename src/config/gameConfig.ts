@@ -18,6 +18,10 @@ export interface GameConfig {
   /** Starting cash for a new campaign. */
   startingMoney: number;
 
+  /** Capital cost to buy land, per acre (brief §8, "Capital (lumpy): land").
+   * Placeholder ballpark for Corn-Belt cropland; tune in playtest. */
+  landPricePerAcre: number;
+
   // --- Economy, fuel, contracts, condition, interest, yield, etc. get added
   //     here slice-by-slice as those systems are built (brief §5–§8). ---
 }
@@ -25,4 +29,5 @@ export interface GameConfig {
 /** Baseline config. Difficulty presets will be derived by overriding fields here. */
 export const gameConfig: GameConfig = {
   startingMoney: 100_000,
+  landPricePerAcre: 12_000,
 };

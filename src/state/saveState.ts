@@ -15,6 +15,7 @@
 
 import type { Meters } from "../geo/coords";
 import type { SimTime } from "../sim/clock";
+import { gameConfig } from "../config/gameConfig";
 
 /** Field lifecycle (brief §10). */
 export type FieldStatus =
@@ -60,7 +61,7 @@ export function newGame(): SaveState {
   return {
     version: 1,
     clock: { now: 0 },
-    money: 0,
+    money: gameConfig.startingMoney,
     parcels: [],
     fields: [],
     agents: [],

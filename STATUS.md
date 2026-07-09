@@ -2,17 +2,20 @@
 
 _Update at the end of every session (brief §13)._
 
-**Last session:** 2026-07-08. Data spike passed its gate; counties restructured as
-data-driven "map packs." Repo is green (typecheck + tests) with 5 commits.
+**Last session:** 2026-07-08. Built the geo-referenced raster **overlay engine**
+(pillar 3) and shipped **slice 2**: buy one parcel → draw one field, rendered as a
+procedural texture over NAIP. Repo is green (typecheck + 6 tests). Visually verified
+in-browser (field renders + stays pinned to real ground on zoom).
 
 ---
 
 ## Where we are
 
-The brief's **hard gate is passed** (§12 step 1): NAIP satellite imagery, OSM roads,
-and real-road routing all render together over Story County, IA. On top of that, the
-map is now organized as reusable **county packages** so we can add more playable
-counties as pure data. Next up is the geo-referenced overlay engine → first parcel/field.
+The brief's **hard gate is passed** (§12 step 1): NAIP + OSM roads + real-road routing
+over Story County, IA, organized as reusable **county packages**. Now the **overlay
+engine is live** and has its first consumer: you can buy land and draw a field, which
+renders as a geo-referenced texture composited over the imagery. Next: put the field
+through its lifecycle (plant → grow via sim clock → harvest), then move grain (§12 3–5).
 
 ## Done
 
@@ -49,6 +52,29 @@ counties as pure data. Next up is the geo-referenced overlay engine → first pa
   live from USDA (a reliable gov CDN). The manifest format is ready to swap to
   cached/self-hosted county tiles later without touching code.
 
+### Slice 1 — Overlay engine + first field ✅ (this session)
+- **Pillar 3, the geo-referenced raster overlay engine** (`src/map/overlay.ts`). The
+  ONE module behind painter edits, field textures, and the fieldwork reveal (brief §4).
+  - `OverlayEngine` hands out named `Surface`s; each Surface is an off-DOM 2D canvas
+    pinned to a patch of ground via a MapLibre **canvas source** (4 geo corners). You
+    draw in **geo-space** (`paint()` / `tracePolygon()` take meters); NAIP tiles are
+    never touched, so edits are reversible and glued to real coords on zoom/pan.
+  - Per-patch (not one county-sized) canvas: raster is allocated only where the player
+    paints, so it scales with owned land, not county size. `OVERLAY_METERS_PER_PIXEL`
+    (~1 m/px, matches NAIP) is the quality knob — technical, NOT in gameConfig.
+  - Idle-cheap: a static surface uploads for one frame on `markDirty()` then pauses.
+- **Procedural field textures** (`src/field/fieldRender.ts`, brief §10) — per-status
+  palette (stubble/tilled/planted/growing/ready/harvested) + seeded speckle, clipped
+  to the field polygon. Seeded per field id so repaints are stable.
+- **Slice 2 — buy one parcel → draw one field** (`src/field/fields.ts`, brief §12.2):
+  draw a polygon on the map (click vertices, double-click to close) → stores a Parcel +
+  Field in the save-state as **UTM meters** → deducts land cost → renders texture +
+  white outline. First real economic transaction (money now means something).
+- **Geometry helpers** (`src/geo/geometry.ts`): shoelace area (winding-independent),
+  bbox, pad. Area in m²/ha/acres. Unit-tested (`tests/geometry.test.ts`).
+- Config: added `landPricePerAcre` ($12k, Corn-Belt ballpark). Fixed a scaffold bug —
+  `newGame()` now seeds `money` from `gameConfig.startingMoney` (was hardcoded 0).
+
 ### Dev convenience
 - `start-dev.bat` — double-click to install (first run) + launch the dev server and
   open the browser at http://localhost:5173.
@@ -58,21 +84,29 @@ counties as pure data. Next up is the geo-referenced overlay engine → first pa
 - Checks: `npm run typecheck`, `npm test`.
 
 ## Next (in order)
-1. **Overlay engine** (brief §4) — the geo-referenced raster overlay, the ONE module
-   behind painter edits, field-status textures, and the fieldwork reveal. Paint in
-   **geo-space, not screen-space**, composited over NAIP (never modify the tiles).
-   This is the highest-leverage next piece — it powers three later features.
-2. **Buy one parcel → draw one field** into the overlay (brief §12 step 2), stored in
-   the save-state's `parcels`/`fields` as UTM meters.
-3. (Optional, small) A **county-picker UI** to make the multi-map structure visible
-   end to end.
+1. **Plant → grow → harvest one crop** (brief §12 steps 3, §6, §10). Drive the field
+   through its lifecycle status (stubble→tilled→planted→growing→ready→harvested),
+   repainting the overlay per status (already supported). Growth ticks off the **sim
+   clock** (`src/sim/clock.ts` — wire it into the loop). Pay planting inputs in spring;
+   produce an **uncertain, narrowing yield range** (§6) that resolves to tons at harvest.
+   Tunables (input cost, yield range width/narrowing, crop base yield) → gameConfig.
+2. **Move grain** (brief §12 4–5): one capacity-limited truck routes on real roads
+   (routing already works) to a real buyer, costing drive-time + fuel; sell at a local
+   price with the local-demand drop → get paid → the core loop closes.
+3. (Optional, small) A **county-picker UI** to make the multi-map structure visible.
+
+### Notes for next session
+- **Balance smell:** land at $12k/acre vs. $100k start = only ~8 affordable acres —
+  fields end up tiny. Revisit starting money / land price / add the debt mechanism
+  (§8) so a first farm is a realistic size. Pure config tuning, no code.
+- The field-draw interaction lives in `main.ts` (`wireFieldDrawing`) alongside routing,
+  gated by a shared `mode` flag. Double-click closes the polygon (drops the duplicate
+  finishing vertex). Draw is in-memory only — **no IndexedDB persistence yet** (§2).
 
 ## Deferred / known
-- **In-browser visual re-check pending for Slice 0.1.** The county-package refactor is
-  verified at typecheck/test/asset-serving level, but the Chrome automation extension
-  was offline all session so I couldn't screenshot the refactored map. Maintainer
-  should hard-refresh localhost:5173 and confirm clean NAIP + instant road lines +
-  "Roads: 3558 loaded ✓".
+- ~~In-browser visual re-check pending for Slice 0.1.~~ **Resolved this session:**
+  browser-verified clean NAIP + "Roads: 3558 loaded ✓" + the new field overlay
+  rendering and staying geo-pinned on zoom.
 - **Road extract provenance:** fetched once via public Overpass (which rate-limited us
   mid-session). If we add many counties, build a reproducible extract pipeline
   (Geofabrik `.osm.pbf` clip, or a scripted/throttled Overpass job). The story-ia
