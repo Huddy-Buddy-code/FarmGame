@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Farm Logistics Sim — Data Spike</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #111; }
+      #map { position: absolute; inset: 0; }
+      #hud {
+        position: absolute; top: 10px; left: 10px; z-index: 10;
+        font: 13px/1.4 system-ui, sans-serif; color: #eee;
+        background: rgba(0,0,0,0.6); padding: 10px 12px; border-radius: 6px;
+        max-width: 320px;
+      }
+      #hud h1 { font-size: 14px; margin: 0 0 6px; }
+      #hud .row { margin: 2px 0; }
+      #hud .ok { color: #6f6; }
+      #hud .err { color: #f77; }
+      #hud .attr { margin-top: 8px; font-size: 11px; color: #aaa; }
+      button { font: inherit; cursor: pointer; margin-top: 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div id="hud">
+      <h1>Story County, IA — Data Spike</h1>
+      <div class="row" id="status-naip">NAIP imagery: …</div>
+      <div class="row" id="status-osm">OSM roads: …</div>
+      <div class="row" id="status-route">Routing: …</div>
+      <button id="btn-route">Test route (2 clicks on map)</button>
+      <div class="attr" id="attr"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

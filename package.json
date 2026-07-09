@@ -1,0 +1,26 @@
+{
+  "name": "farm-logistics-sim",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "maplibre-gl": "^4.7.1",
+    "proj4": "^2.12.1"
+  },
+  "devDependencies": {
+    "@types/proj4": "^2.5.5",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.4"
+  },
+  "allowScripts": {
+    "esbuild@0.21.5": true
+  }
+}
