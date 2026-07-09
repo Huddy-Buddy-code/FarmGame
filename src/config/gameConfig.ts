@@ -45,6 +45,9 @@ export interface GameConfig {
 
   crops: Record<CropId, CropConfig>;
 
+  /** Cost to plow/till, per acre (fuel + wear; brief §8 variable costs). */
+  plowCostPerAcre: number;
+
   /** How fast harvesting proceeds, in acres per sim-day (one combine, v1). */
   harvestAcresPerDay: number;
 
@@ -82,6 +85,7 @@ export const gameConfig: GameConfig = {
     },
   },
 
+  plowCostPerAcre: 20,
   harvestAcresPerDay: 100,
   yieldRangeNarrowing: 0.85,
 };

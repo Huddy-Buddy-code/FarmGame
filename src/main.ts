@@ -32,7 +32,7 @@ import {
 } from "./sim/calendar";
 import {
   plant, tickFarming, growthProgress, yieldRange, startHarvest, isHarvesting,
-  inPlantingWindow, getHarvestingIds, restoreHarvesting,
+  inPlantingWindow, getHarvestingIds, restoreHarvesting, plow,
 } from "./sim/farming";
 import { gameConfig } from "./config/gameConfig";
 import type { CropId } from "./config/gameConfig";
@@ -110,7 +110,7 @@ async function main() {
     buildCropCalendar();
     wirePersistence();
     // Re-render every field from the loaded save (textures + outlines).
-    for (const f of save.fields) renderField(map, overlay, f);
+    for (const f of save.fields) renderField(map, overlay, f, clock.time());
     clock.play(); // the world breathes from the start (idle-game 1×)
     requestAnimationFrame(gameLoop);
   });
@@ -141,7 +141,8 @@ function tickWorld(prev: number) {
   const dt = now - prev;
   if (dt <= 0) return;
   const { changed } = tickFarming(save, now, dt);
-  for (const f of changed) renderField(mapRef, overlay, f);
+  for (const f of changed) renderField(mapRef, overlay, f, now);
+  repaintGrowthStages(now, changed);
   // Refresh UI ~2×/s (or instantly when a status flipped). Rebuilding the field
   // panel every frame would recreate its buttons under the player's cursor.
   const rt = performance.now();
@@ -149,6 +150,24 @@ function tickWorld(prev: number) {
     lastUiRefresh = rt;
     updateHud();
     if (selectedFieldId) refreshFieldPanel();
+  }
+}
+
+/**
+ * Growing fields change look WITHIN a status (young rows → closed canopy), so we
+ * repaint whenever a field crosses a growth-stage bucket (12 per season), not
+ * just on status flips. Per-field canvases make this cheap.
+ */
+const paintedStage = new Map<string, number>();
+function repaintGrowthStages(now: number, alreadyPainted: { id: string }[]) {
+  const done = new Set(alreadyPainted.map((f) => f.id));
+  for (const f of save.fields) {
+    if (f.status !== "growing" || done.has(f.id)) continue;
+    const bucket = Math.floor(growthProgress(f, now) * 12);
+    if (paintedStage.get(f.id) !== bucket) {
+      paintedStage.set(f.id, bucket);
+      renderField(mapRef, overlay, f, now);
+    }
   }
 }
 
@@ -486,6 +505,26 @@ function refreshFieldPanel(force = false) {
   actions.innerHTML = "";
 
   if (field.status === "stubble" || field.status === "harvested") {
+    // --- Plow first (§10 lifecycle: stubble → tilled → planted) ---
+    const cost = Math.round(acres * gameConfig.plowCostPerAcre);
+    body.innerHTML = `<div class="small" style="margin-top:8px">Plow to prepare for planting.</div>`;
+    const btn = document.createElement("button");
+    btn.className = "primary";
+    btn.innerHTML = `🚜 Plow <span class="small">$${cost.toLocaleString()}</span>`;
+    btn.addEventListener("click", () => {
+      try {
+        plow(save, field);
+        renderField(mapRef, overlay, field, clock.time());
+        updateHud();
+        fieldMsg("");
+        toast("🚜 Field plowed!");
+        refreshFieldPanel(true);
+      } catch (err) {
+        fieldMsg((err as Error).message);
+      }
+    });
+    actions.appendChild(btn);
+  } else if (field.status === "tilled") {
     // --- Plant chooser ---
     body.innerHTML = `<div class="small" style="margin-top:8px">Plant a crop:</div>`;
     const row = document.createElement("div");
@@ -504,7 +543,7 @@ function refreshFieldPanel(force = false) {
       btn.addEventListener("click", () => {
         try {
           plant(save, field, cropId, now);
-          renderField(mapRef, overlay, field);
+          renderField(mapRef, overlay, field, clock.time());
           updateHud();
           fieldMsg("");
           toast(`${cfg.emoji} ${cfg.name} planted!`);

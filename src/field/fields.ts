@@ -20,7 +20,9 @@ import { boundsOf, padBounds, areaAcres } from "../geo/geometry";
 import { gameConfig } from "../config/gameConfig";
 import type { SaveState, Field } from "../state/saveState";
 import type { OverlayEngine } from "../map/overlay";
-import { paintFieldStatus } from "./fieldRender";
+import { paintField } from "./fieldRender";
+import { growthProgress } from "../sim/farming";
+import type { SimTime } from "../sim/clock";
 
 const seq: Record<string, number> = {};
 const nextId = (prefix: string) => `${prefix}-${(seq[prefix] = (seq[prefix] ?? 0) + 1)}`;
@@ -64,17 +66,23 @@ export function buyFieldFromBoundary(
   save.fields.push(field);
   save.money -= cost;
 
-  renderField(map, overlay, field);
+  renderField(map, overlay, field, 0); // fresh stubble; growth time is irrelevant
   return { field, acres, cost };
 }
 
-/** Render (or re-render) a field: procedural status texture + boundary outline. */
-export function renderField(map: MlMap, overlay: OverlayEngine, field: Field): void {
+/** Render (or re-render) a field: procedural status texture + boundary outline.
+ * `now` drives the stage-aware growing texture (young rows → closing canopy). */
+export function renderField(map: MlMap, overlay: OverlayEngine, field: Field, now: SimTime): void {
   // Pad the surface a touch so the outline stroke isn't clipped at the edge.
   const bounds = padBounds(boundsOf(field.boundary), 4);
   const surface = overlay.createSurface(field.id, bounds);
   // Seed the texture from the field id so repaints stay stable across a session.
-  paintFieldStatus(surface, field.boundary, field.status, hashSeed(field.id));
+  paintField(surface, field.boundary, {
+    status: field.status,
+    crop: field.crop,
+    progress: growthProgress(field, now),
+    seed: hashSeed(field.id),
+  });
   drawOutline(map, field);
 }
 

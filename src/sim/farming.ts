@@ -24,13 +24,32 @@ export function inPlantingWindow(crop: CropId, t: SimTime): boolean {
 }
 
 /**
+ * Plow (till) a field: stubble/harvested → tilled, paying the per-acre working
+ * cost. Instant in this slice; the fieldwork/equipment slice (brief §10) will
+ * make it take time along a tractor path.
+ */
+export function plow(save: SaveState, field: Field): void {
+  if (field.status !== "stubble" && field.status !== "harvested") {
+    throw new Error(`${field.id} can't be plowed (status: ${field.status})`);
+  }
+  const acres = areaAcres(field.boundary);
+  const cost = Math.round(acres * gameConfig.plowCostPerAcre);
+  if (cost > save.money) {
+    throw new Error(`Plowing costs $${cost.toLocaleString()} — not enough cash`);
+  }
+  save.money -= cost;
+  field.status = "tilled";
+}
+
+/**
  * Plant `crop` on `field`: pay inputs per acre, roll the hidden true yield, and
- * start the growth clock. Throws with a player-facing message if not allowed.
+ * start the growth clock. Requires a plowed (tilled) field — the §10 lifecycle.
+ * Throws with a player-facing message if not allowed.
  */
 export function plant(save: SaveState, field: Field, crop: CropId, now: SimTime, rand: () => number = Math.random): void {
   const cfg = gameConfig.crops[crop];
-  if (field.status !== "stubble" && field.status !== "harvested") {
-    throw new Error(`${field.id} isn't ready to plant (status: ${field.status})`);
+  if (field.status !== "tilled") {
+    throw new Error(`Plow ${field.id} before planting (status: ${field.status})`);
   }
   if (!inPlantingWindow(crop, now)) {
     throw new Error(`${cfg.name} can't be planted this month`);

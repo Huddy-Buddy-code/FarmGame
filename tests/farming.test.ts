@@ -3,7 +3,7 @@ import { setProjection } from "../src/geo/coords";
 import { newGame } from "../src/state/saveState";
 import type { Field } from "../src/state/saveState";
 import {
-  plant, tickFarming, growthProgress, yieldRange, startHarvest, deriveStatus,
+  plant, plow, tickFarming, growthProgress, yieldRange, startHarvest, deriveStatus,
 } from "../src/sim/farming";
 import { dateOf, formatDate, nextMonthStart, MINUTES_PER_DAY, MINUTES_PER_MONTH } from "../src/sim/calendar";
 import { gameConfig } from "../src/config/gameConfig";
@@ -15,8 +15,9 @@ beforeAll(() => setProjection(15, "N"));
 const side = Math.sqrt(100 * 4046.8564224);
 const boundary: Meters[] = [[0, 0], [side, 0], [side, side], [0, side]];
 
-function freshField(): Field {
-  return { id: "field-1", parcelId: "parcel-1", boundary, status: "stubble" };
+/** Most tests want ready-to-plant ground; the plow test asks for raw stubble. */
+function freshField(status: Field["status"] = "tilled"): Field {
+  return { id: "field-1", parcelId: "parcel-1", boundary, status };
 }
 
 /** Campaign starts Mar 1 Yr 1; sim-time of April 1 Yr 1 (one month in). */
@@ -42,11 +43,26 @@ describe("calendar", () => {
   });
 });
 
-describe("plant → grow → harvest (brief §12.3, §6)", () => {
+describe("plow → plant → grow → harvest (brief §10, §12.3, §6)", () => {
+  it("plowing pays the working cost and tills the field; planting requires it", () => {
+    const save = newGame();
+    const field = freshField("stubble");
+    save.fields.push(field);
+    // Can't plant unplowed ground.
+    expect(() => plant(save, field, "corn", APRIL_1, () => 0.5)).toThrow(/[Pp]low/);
+    const cash = save.money;
+    plow(save, field);
+    expect(field.status).toBe("tilled");
+    expect(cash - save.money).toBe(Math.round(100 * gameConfig.plowCostPerAcre));
+    // Can't plow twice.
+    expect(() => plow(save, field)).toThrow(/status/);
+  });
+
   it("planting pays inputs and rolls a true yield inside the uncertainty band", () => {
     const save = newGame();
-    const field = freshField();
+    const field = freshField("stubble");
     save.fields.push(field);
+    plow(save, field);
     const cash = save.money;
     plant(save, field, "corn", APRIL_1, () => 0.5);
     expect(save.money).toBeLessThan(cash);
