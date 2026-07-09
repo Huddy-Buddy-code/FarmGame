@@ -1,5 +1,8 @@
-import { describe, it, expect } from "vitest";
-import { toMeters, toLngLat, distanceMeters } from "../src/geo/coords";
+import { describe, it, expect, beforeAll } from "vitest";
+import { setProjection, toMeters, toLngLat, distanceMeters } from "../src/geo/coords";
+
+// Story County sits in UTM zone 15N; set the active projection before converting.
+beforeAll(() => setProjection(15, "N"));
 
 /**
  * The coordinate system is the brief's "#1 architecture trap" (§3): one internal

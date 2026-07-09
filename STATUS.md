@@ -28,10 +28,34 @@ _Update at the end of every session (brief §13)._
   NAIP imagery, OSM roads, and a real-road route (12.0 km by road vs 5.7 km straight,
   routing along the section-line grid). **The brief's hard gate is passed.**
 
+### Slice 0.1 — County packages (the playable "maps")
+- Counties are now self-contained DATA packages under `public/counties/<id>/`,
+  loaded by id at runtime. Adding a county = drop a folder + one registry line; no
+  code change. Mirrors the brief's "module + party = campaign" → here "county + save
+  = session".
+  - `public/counties/story-ia/manifest.json` — identity, UTM zone, bbox, center,
+    imagery source, attribution.
+  - `public/counties/story-ia/roads.geojson` — pre-built OSM road extract (1.38 MB,
+    3,558 ways: public roads + field tracks; driveways/parking excluded). **Offline —
+    no live Overpass at play time.**
+  - `src/county/{types,registry}.ts` — package types + loader.
+- Coordinate system is now per-county: `setProjection(zone, hemisphere)` is called
+  from the loaded manifest at startup (a Palouse county would be a different UTM zone).
+- Imagery decision: roads are BUNDLED (small; Overpass is flaky), but full-county
+  NAIP is gigabytes, so the manifest *describes* the imagery source and we serve it
+  live from USDA (a reliable gov CDN). The manifest format is ready to swap to
+  cached/self-hosted county tiles later without touching code.
+
 ## Next
 1. Overlay engine (brief §4) — geo-referenced raster overlay, the ONE module behind
    painter edits, field textures, and fieldwork reveal. Paint in geo-space.
 2. Buy one parcel → draw one field into the overlay (brief §12 step 2).
+
+## Deferred / known
+- County road extract was fetched once via public Overpass (flaky; rate-limited us
+  mid-session). Reproducible extract pipeline (Geofabrik or scripted Overpass) is a
+  TODO if we add many counties. For now the story-ia extract is committed as data.
+- Routing still uses the public OSRM demo; self-host per-county before real gameplay.
 
 ## Notes / decisions
 - Routing uses the **public OSRM demo server** for the spike. Before real gameplay,

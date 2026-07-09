@@ -13,16 +13,14 @@
  */
 
 import type { RasterSourceSpecification } from "maplibre-gl";
+import type { NaipArcgisImagery } from "../county/types";
 
-// USDA APFO national NAIP mosaic ImageServer. exportImage returns a rendered image
-// for the requested web-mercator bbox at the requested pixel size.
-const NAIP_IMAGESERVER =
-  "https://gis.apfo.usda.gov/arcgis/rest/services/NAIP/USDA_CONUS_PRIME/ImageServer";
-
-export const NAIP_ATTRIBUTION =
-  'Imagery: USDA NAIP (public domain)';
-
-export function naipSource(): RasterSourceSpecification {
+/**
+ * Build a MapLibre raster source from a county's NAIP imagery manifest entry.
+ * `exportImage` returns a rendered image for the requested web-mercator bbox.
+ * The ImageServer URL comes from the county package, not a hardcoded constant.
+ */
+export function naipSource(imagery: NaipArcgisImagery): RasterSourceSpecification {
   const params = new URLSearchParams({
     bbox: "{bbox-epsg-3857}",
     bboxSR: "3857",
@@ -36,8 +34,8 @@ export function naipSource(): RasterSourceSpecification {
   const query = decodeURIComponent(params.toString());
   return {
     type: "raster",
-    tiles: [`${NAIP_IMAGESERVER}/exportImage?${query}`],
+    tiles: [`${imagery.imageServer}/exportImage?${query}`],
     tileSize: 256,
-    attribution: NAIP_ATTRIBUTION,
+    attribution: imagery.attribution,
   };
 }

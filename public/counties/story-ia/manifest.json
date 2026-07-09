@@ -1,0 +1,19 @@
+{
+  "id": "story-ia",
+  "name": "Story County, Iowa",
+  "state": "IA",
+  "fips": "19169",
+  "utm": { "zone": 15, "hemisphere": "N" },
+  "bbox": [-93.7, 41.86, -93.32, 42.11],
+  "center": [-93.4635, 42.0308],
+  "defaultZoom": 12,
+  "imagery": {
+    "kind": "naip-arcgis",
+    "imageServer": "https://gis.apfo.usda.gov/arcgis/rest/services/NAIP/USDA_CONUS_PRIME/ImageServer",
+    "attribution": "Imagery: USDA NAIP (public domain)"
+  },
+  "roads": {
+    "file": "roads.geojson",
+    "attribution": "© OpenStreetMap contributors (ODbL)"
+  }
+}
