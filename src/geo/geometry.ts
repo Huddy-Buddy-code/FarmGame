@@ -64,28 +64,33 @@ export function pointInPolygon([x, y]: Meters, ring: Meters[]): boolean {
 
 /**
  * Lightly bevel + round a closed ring's corners for DISPLAY ONLY (corner-cutting).
- * Each edge is replaced by two points a small fraction `cut` in from its ends, so
- * only the region right around each corner is affected and the long straight edges
- * stay straight — a subtle chamfer, not a blob. A second iteration turns the flat
- * bevel into a gentle fillet. Pure point-list math — no curves/canvas calls — so
- * the same ring works for both the canvas texture clip and the vector outline
- * (brief §4: smooth in meters before the lng/lat render conversion, not after).
+ * Each edge is replaced by two points near its ends, so only the region right
+ * around each corner is affected and the long straight edges stay straight — a
+ * subtle chamfer, not a blob. A second iteration turns the flat bevel into a
+ * gentle fillet. Pure point-list math — no curves/canvas calls — so the same ring
+ * works for both the canvas texture clip and the vector outline (brief §4: smooth
+ * in meters before the lng/lat render conversion, not after).
  *
- * `cut` is the fraction of each edge taken off near a corner (0.1 = 10%); keep it
- * small so edges read as straight. Only for rendering: the true polygon (area,
- * hit-testing, auto-manage) is never replaced — a drawn field's stored boundary
- * stays exactly what the player clicked.
+ * The cut is a FIXED DISTANCE in meters (`maxCutMeters`), not a fraction, so a
+ * corner gets the same small bevel whether its edges are 40 m or 600 m long — a
+ * percentage would over-round the big fields. `cut` only caps it on short edges
+ * (never take more than that fraction of a stubby edge). Only for rendering: the
+ * true polygon (area, hit-testing, auto-manage) is never replaced — a drawn
+ * field's stored boundary stays exactly what the player clicked.
  */
-export function smoothPolygon(ring: Meters[], iterations = 2, cut = 0.1): Meters[] {
-  const c = Math.min(0.5, Math.max(0, cut));
+export function smoothPolygon(ring: Meters[], iterations = 2, maxCutMeters = 10, cut = 0.15): Meters[] {
+  const cap = Math.min(0.5, Math.max(0, cut));
   let pts = ring;
   for (let iter = 0; iter < iterations; iter++) {
     const next: Meters[] = [];
     for (let i = 0; i < pts.length; i++) {
       const [x0, y0] = pts[i]!;
       const [x1, y1] = pts[(i + 1) % pts.length]!;
-      next.push([x0 + (x1 - x0) * c, y0 + (y1 - y0) * c]);
-      next.push([x0 + (x1 - x0) * (1 - c), y0 + (y1 - y0) * (1 - c)]);
+      const len = Math.hypot(x1 - x0, y1 - y0);
+      // Fixed-distance bevel, but never more than `cap` of a short edge.
+      const f = len > 0 ? Math.min(cap, maxCutMeters / len) : cap;
+      next.push([x0 + (x1 - x0) * f, y0 + (y1 - y0) * f]);
+      next.push([x0 + (x1 - x0) * (1 - f), y0 + (y1 - y0) * (1 - f)]);
     }
     pts = next;
   }
