@@ -105,6 +105,8 @@ async function main() {
     }
   });
 
+  wireMiddleMousePan(map);
+
   map.on("load", () => {
     addRoadsLayer(map, county.roads);
     overlay = new OverlayEngine(map);
@@ -122,6 +124,42 @@ async function main() {
   });
 
   updateHud();
+}
+
+// ---------------------------------------------------------------------------
+// Middle-mouse pan: left-click is taken by field select / field drawing, so
+// panning gets the middle button. MapLibre has no built-in middle-button drag,
+// so we drive panBy() from the raw pointer deltas ourselves.
+// ---------------------------------------------------------------------------
+function wireMiddleMousePan(map: maplibregl.Map) {
+  const container = map.getCanvasContainer();
+  let panning = false;
+  let lastX = 0;
+  let lastY = 0;
+
+  container.addEventListener("mousedown", (e) => {
+    if (e.button !== 1) return; // middle button only
+    e.preventDefault(); // suppress the browser's middle-click autoscroll
+    panning = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    container.style.cursor = "grabbing";
+  });
+
+  // On window so a drag that leaves the canvas still tracks and releases.
+  window.addEventListener("mousemove", (e) => {
+    if (!panning) return;
+    // Drag content with the cursor: mouse right → view shifts left, so panBy(-Δ).
+    map.panBy([lastX - e.clientX, lastY - e.clientY], { animate: false });
+    lastX = e.clientX;
+    lastY = e.clientY;
+  });
+
+  window.addEventListener("mouseup", (e) => {
+    if (e.button !== 1 || !panning) return;
+    panning = false;
+    container.style.cursor = "";
+  });
 }
 
 // ---------------------------------------------------------------------------
