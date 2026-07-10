@@ -5,6 +5,7 @@ import type { Field } from "../src/state/saveState";
 import {
   plant, plow, tickFarming, growthProgress, yieldRange, startHarvest, deriveStatus,
 } from "../src/sim/farming";
+import { sellGrain } from "../src/sim/economy";
 import { dateOf, formatDate, nextMonthStart, MINUTES_PER_DAY, MINUTES_PER_MONTH } from "../src/sim/calendar";
 import { gameConfig } from "../src/config/gameConfig";
 import type { Meters } from "../src/geo/coords";
@@ -123,6 +124,19 @@ describe("plow → plant → grow → harvest (brief §10, §12.3, §6)", () => 
     expect(field.status).toBe("harvested");
     expect(field.crop).toBeUndefined();
     expect(save.grain.corn).toBeCloseTo(100 * truth, 0);
+  });
+
+  it("sells grain from the bin at the flat price, clamped to what's stored", () => {
+    const save = newGame();
+    save.grain.corn = 50;
+    const cash = save.money;
+    const r = sellGrain(save, "corn", Infinity);
+    expect(r.tons).toBe(50);
+    expect(r.revenue).toBe(Math.round(50 * gameConfig.crops.corn.sellPricePerTon));
+    expect(save.money).toBe(cash + r.revenue);
+    expect(save.grain.corn).toBe(0);
+    // Selling from an empty bin is a no-op.
+    expect(sellGrain(save, "corn", 10)).toEqual({ tons: 0, revenue: 0 });
   });
 
   it("refuses to harvest an unready field", () => {

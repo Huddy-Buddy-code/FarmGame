@@ -33,6 +33,10 @@ export interface CropConfig {
   plantMonths: number[];
   /** Sim-days from planting to harvest-ready. */
   growDays: number;
+  /** Placeholder flat sale price, $/ton. Replaced by the real market (buyers,
+   * local demand, hauling) in the economy slice (brief §5) — this just lets the
+   * money loop close while that's being built. */
+  sellPricePerTon: number;
 }
 
 export interface GameConfig {
@@ -73,6 +77,7 @@ export const gameConfig: GameConfig = {
       yieldUncertainty: 0.3,
       plantMonths: [3, 4], // Apr–May
       growDays: 110,
+      sellPricePerTon: 180,
     },
     soybeans: {
       name: "Soybeans",
@@ -82,6 +87,7 @@ export const gameConfig: GameConfig = {
       yieldUncertainty: 0.3,
       plantMonths: [4, 5], // May–Jun
       growDays: 100,
+      sellPricePerTon: 390,
     },
   },
 

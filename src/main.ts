@@ -25,6 +25,7 @@ import { newGame } from "./state/saveState";
 import type { SaveState } from "./state/saveState";
 import { buyFieldFromBoundary, renderField, initIdCounters } from "./field/fields";
 import { persistGame, loadGame, clearSavedGame } from "./state/persistence";
+import { sellGrain } from "./sim/economy";
 import { SimClock } from "./sim/clock";
 import {
   formatDate, dateOf, nextMonthStart, MONTH_NAMES, MONTH_SHORT,
@@ -108,6 +109,7 @@ async function main() {
     wireFieldSelection(map);
     wireTimeControls();
     buildCropCalendar();
+    wireInventory();
     wirePersistence();
     // Re-render every field from the loaded save (textures + outlines).
     for (const f of save.fields) renderField(map, overlay, f, clock.time());
@@ -199,6 +201,51 @@ function toast(text: string, ms = 2600) {
   el.style.display = "block";
   clearTimeout((toast as { t?: number }).t);
   (toast as { t?: number }).t = window.setTimeout(() => (el.style.display = "none"), ms);
+}
+
+// ---------------------------------------------------------------------------
+// Inventory: grain storage + the v0 flat-price sale (real market comes later).
+// ---------------------------------------------------------------------------
+function wireInventory() {
+  $("btn-inventory").addEventListener("click", () => {
+    const el = $("inventory");
+    const opening = el.style.display !== "block";
+    el.style.display = opening ? "block" : "none";
+    if (opening) refreshInventory();
+  });
+  $("inv-close").addEventListener("click", () => ($("inventory").style.display = "none"));
+}
+
+function refreshInventory() {
+  const rows = $("inv-rows");
+  rows.innerHTML = "";
+  for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
+    const cfg = gameConfig.crops[cropId];
+    const tons = save.grain[cropId];
+    const row = document.createElement("div");
+    row.className = "inv-row";
+    row.innerHTML = `
+      <span class="icon">${cfg.emoji}</span>
+      <span class="info">
+        <div class="name">${cfg.name}</div>
+        <div class="qty">${tons.toFixed(1)} t stored</div>
+      </span>
+      <span class="price">$${cfg.sellPricePerTon.toLocaleString()}/t</span>`;
+    const btn = document.createElement("button");
+    btn.className = "primary";
+    const value = Math.round(tons * cfg.sellPricePerTon);
+    btn.textContent = tons > 0 ? `Sell all · $${value.toLocaleString()}` : "Empty";
+    btn.disabled = tons <= 0;
+    btn.addEventListener("click", () => {
+      const { tons: sold, revenue } = sellGrain(save, cropId, Infinity);
+      if (sold <= 0) return;
+      updateHud();
+      refreshInventory();
+      toast(`💰 Sold ${sold.toFixed(1)} t of ${cfg.name.toLowerCase()} for $${revenue.toLocaleString()}`);
+    });
+    row.appendChild(btn);
+    rows.appendChild(row);
+  }
 }
 
 // ---------------------------------------------------------------------------
