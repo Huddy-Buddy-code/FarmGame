@@ -45,16 +45,21 @@
         border-radius: 10px;
       }
       #yearbar .daybar {
-        height: 8px; border-radius: 999px; overflow: hidden;
-        border: 1.5px solid var(--wood); position: relative; margin-bottom: 4px;
-        /* Midnight at both ends, noon in the middle: night -> dawn -> day -> dusk -> night. */
+        height: 10px; border-radius: 999px;
+        border: 1.5px solid var(--wood); position: relative; margin-bottom: 6px;
+        /* Cozy sky, midnight at both ends → noon in the middle. Soft periwinkle
+           night, warm peach dawn/dusk, pale-blue midday — pastels that sit with
+           the season row below (border-radius clips the gradient; no overflow). */
         background: linear-gradient(to right,
-          #17203f 0%, #17203f 10%, #4e6690 18%, #f3a35c 26%, #cdeaff 36%,
-          #cdeaff 64%, #f3a35c 74%, #4e6690 82%, #17203f 90%, #17203f 100%);
+          #6d78b0 0%, #8b93c6 12%, #e7a982 21%, #ffd9a8 29%,
+          #cdeafc 43%, #dff2ff 50%, #cdeafc 57%,
+          #ffd9a8 71%, #e7a982 79%, #8b93c6 88%, #6d78b0 100%);
       }
+      /* Sun/moon token that rides the day track (emoji set in JS). */
       #yearbar .daybar .marker {
-        position: absolute; top: -3px; bottom: -3px; width: 3px; border-radius: 2px;
-        background: #fff; box-shadow: 0 0 0 1.5px var(--ink);
+        position: absolute; top: 50%; transform: translate(-50%, -50%);
+        font-size: 13px; line-height: 1; pointer-events: none;
+        filter: drop-shadow(0 1px 1.5px rgba(40, 30, 10, 0.5));
       }
       #yearbar .seasons { display: flex; height: 10px; border-radius: 999px; overflow: hidden; border: 1.5px solid var(--wood); position: relative; }
       #yearbar .seg { flex: 1; }

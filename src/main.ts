@@ -256,9 +256,12 @@ function updateHud() {
   const calNow = document.getElementById("cal-now");
   if (calNow) calNow.style.left = `calc(${(110 * (1 - f)).toFixed(1)}px + ${(f * 100).toFixed(2)}%)`;
 
-  // Day-position marker: fraction of the current 24h day elapsed (midnight = 0).
+  // Day-position marker: a sun/moon token riding the day track (midnight = 0).
   const df = dayFraction(clock.time());
-  $("day-marker").style.left = `calc(${(df * 100).toFixed(2)}% - 1px)`;
+  const dayMarker = $("day-marker");
+  dayMarker.style.left = `${(df * 100).toFixed(2)}%`;
+  // Daytime ~6am–6pm (0.25–0.75); sun then, moon overnight.
+  dayMarker.textContent = df >= 0.25 && df < 0.75 ? "☀️" : "🌙";
 }
 
 /** 0..1 through the campaign's display year, which runs Mar 1 → end of Feb. */
