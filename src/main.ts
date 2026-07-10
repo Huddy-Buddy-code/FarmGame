@@ -237,8 +237,8 @@ function wireTimeControls() {
   const speeds: Array<[string, number | null]> = [
     ["spd-pause", null],
     ["spd-1", 1],
-    ["spd-10", 10],
     ["spd-60", 60],
+    ["spd-600", 600],
   ];
   for (const [id, mult] of speeds) {
     $(id).addEventListener("click", () => {
@@ -318,7 +318,7 @@ function runMontage(target: number) {
 /** Put compression + play state back to whatever the speed buttons say. */
 function restoreSpeed(paused: boolean) {
   const active = document.querySelector("#timebar button.active")?.id ?? "spd-1";
-  const mult = active === "spd-60" ? 60 : active === "spd-10" ? 10 : 1;
+  const mult = active === "spd-600" ? 600 : active === "spd-60" ? 60 : 1;
   clock.setCompression(BASE_COMPRESSION * mult);
   if (active === "spd-pause" || paused) clock.pause();
   else clock.play();
