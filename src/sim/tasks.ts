@@ -1,29 +1,35 @@
 /**
  * The work queue + agents (brief §9, §10) — plowing, planting, and harvesting
- * are TASKS that queue up, and discrete agents work through them one after
- * another at realistic rates (task duration = acres ÷ acres-per-hour, all
- * tunable in gameConfig.work).
+ * are TASKS that queue up, and discrete machines work through them one after
+ * another. Machines drive a back-and-forth COVERAGE PATH across the field (see
+ * `coverage.ts`) at a physical field speed, so a job's duration EMERGES from the
+ * field's size and the implement's working width — no abstract acres/hour rate.
  *
- * v1 agents: one TRACTOR (plow + plant) and one COMBINE harvester (harvest).
- * Each is the brief's §9 state machine: idle → drive to field → work → next
- * task. Driving is straight-line at a config speed for now; real-road routing
- * plugs in later. Positions are UTM meters like everything else (brief §3).
+ * Equipment model: a TRACTOR is a power unit that attaches an IMPLEMENT (a plow
+ * now; planters/etc. reuse this later). A tractor pulls implements of its own
+ * size class or smaller. Plowing needs a tractor WITH a plow. The COMBINE is
+ * self-contained (integral header). Each machine is the brief's §9 state machine:
+ * idle → drive to field → work the coverage path → next task.
  *
  * Money: costs are paid ON QUEUE (design decision 2026-07-10) — queueing a plow
  * or plant task charges immediately, and canceling a still-queued task refunds
- * in full. This keeps "can I afford it" at the moment of the player's decision.
+ * in full. Machines/implements refund their purchase price on sell-back.
  *
- * Pure logic on the save-state (agents + tasks are persisted in it): no map, no
- * DOM, so it's unit-testable like farming.ts.
+ * Pure logic on the save-state (agents/implements/tasks are persisted in it): no
+ * map, no DOM, so it's unit-testable like farming.ts.
  */
 
-import { gameConfig } from "../config/gameConfig";
-import type { CropId } from "../config/gameConfig";
+import { gameConfig, SIZE_RANK, FEET_TO_METERS } from "../config/gameConfig";
+import type { CropId, EquipmentSize } from "../config/gameConfig";
 import type { SimTime } from "./clock";
-import type { SaveState, Field, FieldStatus, FarmTask, Agent, TaskType } from "../state/saveState";
-import { areaAcres, centroidOf } from "../geo/geometry";
+import type { SaveState, Field, FieldStatus, FarmTask, Agent, Implement, TaskType } from "../state/saveState";
+import { areaAcres } from "../geo/geometry";
 import type { Meters } from "../geo/coords";
 import { inPlantingWindow, canPlow, applyPlow, applyPlant, applyHarvestDone } from "./farming";
+import { buildCoveragePath, sampleAt, workDoneAt, distanceAtWork } from "./coverage";
+import type { CoveragePath } from "./coverage";
+
+const ACRE_M2 = 4046.8564224;
 
 /** Which agent kind performs each task type. */
 export const TASK_AGENT_KIND: Record<TaskType, Agent["kind"]> = {
@@ -42,54 +48,125 @@ export function initTaskIds(save: SaveState): void {
   }
 }
 
-/** Kinds of machine the player can own/buy. */
+/** Buyable power units. */
 export type EquipmentKind = "tractor" | "harvester";
+/** Buyable implements (a plow now; more reuse this system later). */
+export type ImplementKind = "plow";
 
 const EQUIPMENT_NAME: Record<EquipmentKind, string> = { tractor: "Tractor", harvester: "Combine" };
+const IMPLEMENT_NAME: Record<ImplementKind, string> = { plow: "Plow" };
+const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
 
-/** Make sure the starting fleet exists (also upgrades pre-agent saves).
- * `home` is where new machines park — the farmstead-to-be (county center v1). */
-export function ensureAgents(save: SaveState, home: Meters): void {
-  for (const kind of ["tractor", "harvester"] as const) {
-    if (!save.agents.some((a) => a.kind === kind)) {
-      save.agents.push(makeAgent(save, kind, home));
-    }
-  }
-  // Older saves' agents predate purchaseCost — treat them like the starting
-  // fleet (sell-back at config price).
-  for (const a of save.agents) a.purchaseCost ??= gameConfig.equipmentPrices[a.kind as EquipmentKind] ?? 0;
+/** Price of a power unit at a given size. */
+export function agentPrice(kind: EquipmentKind, size: EquipmentSize): number {
+  return kind === "harvester" ? gameConfig.equipment.harvester.price : gameConfig.equipment.tractor[size].price;
 }
 
-function makeAgent(save: SaveState, kind: EquipmentKind, pos: Meters): Agent {
+/** Price of an implement at a given size. */
+export function implementPrice(kind: ImplementKind, size: EquipmentSize): number {
+  return gameConfig.equipment[kind][size].price;
+}
+
+/** Working width (meters) of an implement. */
+export function implementWidthM(impl: Implement): number {
+  return gameConfig.equipment[impl.kind][impl.size].widthFt * FEET_TO_METERS;
+}
+
+/** Can a tractor of `tractorSize` pull an implement of `implSize`? (its class or smaller) */
+export function canPull(tractorSize: EquipmentSize, implSize: EquipmentSize): boolean {
+  return SIZE_RANK[implSize] <= SIZE_RANK[tractorSize];
+}
+
+/** Display name for a machine/implement including its size ("Medium Plow"). */
+function sizedName(base: string, size: EquipmentSize, n: number): string {
+  const sized = `${SIZE_LABEL[size]} ${base}`;
+  return n === 1 ? sized : `${sized} ${n}`;
+}
+
+/** Make sure the starting fleet exists (also upgrades pre-agent saves): a medium
+ * tractor + medium combine, plus a medium plow hitched to the tractor so plowing
+ * works out of the box. `home` is where machines park (county center v1). */
+export function ensureAgents(save: SaveState, home: Meters): void {
+  save.implements ??= [];
+  // Migrate/seed power units.
+  for (const kind of ["tractor", "harvester"] as const) {
+    if (!save.agents.some((a) => a.kind === kind)) {
+      save.agents.push(makeAgent(save, kind, "medium", home));
+    }
+  }
+  for (const a of save.agents) {
+    if (a.kind === "tractor" || a.kind === "harvester") {
+      a.size ??= "medium"; // pre-size saves default to medium
+      a.purchaseCost ??= agentPrice(a.kind, a.size);
+    }
+  }
+  // Seed a medium plow attached to a tractor, if the farm owns no plow yet.
+  if (!save.implements.some((i) => i.kind === "plow")) {
+    const impl = makeImplement(save, "plow", "medium");
+    const tractor = save.agents.find((a) => a.kind === "tractor");
+    if (tractor) impl.attachedTo = tractor.id;
+    save.implements.push(impl);
+  }
+}
+
+function makeAgent(save: SaveState, kind: EquipmentKind, size: EquipmentSize, pos: Meters): Agent {
   let n = 1;
   while (save.agents.some((a) => a.id === `${kind}-${n}`)) n++;
+  // Name numbers within a size class, so the first Large is just "Large Tractor".
+  const nth = save.agents.filter((a) => a.kind === kind && a.size === size).length + 1;
   return {
     id: `${kind}-${n}`,
     kind,
-    name: n === 1 ? EQUIPMENT_NAME[kind] : `${EQUIPMENT_NAME[kind]} ${n}`,
+    name: sizedName(EQUIPMENT_NAME[kind], size, nth),
+    size,
     pos,
     state: "idle",
-    purchaseCost: gameConfig.equipmentPrices[kind],
+    purchaseCost: agentPrice(kind, size),
   };
 }
 
-/** Buy a new machine (brief §8 capital). It parks at `home` and starts pulling
- * from the queue immediately. Throws if unaffordable. */
-export function buyAgent(save: SaveState, kind: EquipmentKind, home: Meters): Agent {
-  const price = gameConfig.equipmentPrices[kind];
+function makeImplement(save: SaveState, kind: ImplementKind, size: EquipmentSize): Implement {
+  let n = 1;
+  while (save.implements.some((i) => i.id === `${kind}-${n}`)) n++;
+  return { id: `${kind}-${n}`, kind, size, purchaseCost: implementPrice(kind, size) };
+}
+
+/** Display name for an implement including its size, numbered within its class. */
+export function implementName(save: SaveState, impl: Implement): string {
+  const peers = save.implements.filter((i) => i.kind === impl.kind && i.size === impl.size);
+  const nth = peers.indexOf(impl) + 1;
+  return sizedName(IMPLEMENT_NAME[impl.kind], impl.size, nth);
+}
+
+/** Buy a power unit at a given size (brief §8 capital). Parks at `home`, starts
+ * pulling from the queue immediately. Throws if unaffordable. */
+export function buyAgent(save: SaveState, kind: EquipmentKind, size: EquipmentSize, home: Meters): Agent {
+  const price = agentPrice(kind, size);
   if (price > save.money) {
-    throw new Error(`A ${EQUIPMENT_NAME[kind].toLowerCase()} costs $${price.toLocaleString()} — not enough cash`);
+    throw new Error(`A ${SIZE_LABEL[size].toLowerCase()} ${EQUIPMENT_NAME[kind].toLowerCase()} costs $${price.toLocaleString()} — not enough cash`);
   }
   save.money -= price;
-  const agent = makeAgent(save, kind, home);
+  const agent = makeAgent(save, kind, size, home);
   save.agents.push(agent);
   return agent;
 }
 
+/** Buy an implement at a given size. Parks unattached in the yard. */
+export function buyImplement(save: SaveState, kind: ImplementKind, size: EquipmentSize): Implement {
+  const price = implementPrice(kind, size);
+  if (price > save.money) {
+    throw new Error(`A ${SIZE_LABEL[size].toLowerCase()} ${IMPLEMENT_NAME[kind].toLowerCase()} costs $${price.toLocaleString()} — not enough cash`);
+  }
+  save.money -= price;
+  const impl = makeImplement(save, kind, size);
+  save.implements.push(impl);
+  return impl;
+}
+
 /**
- * Sell a machine back for exactly what it cost (same rule as land). Refuses if
- * it's mid-job, or if it's the last machine of its kind while jobs that need it
- * are still queued (they'd wait forever).
+ * Sell a power unit back for its purchase price (same rule as land). Any attached
+ * implement drops back to the yard (kept, not sold). Refuses if it's mid-job, or
+ * if it's the last tractor/combine while jobs that need it are still queued.
  */
 export function sellAgent(save: SaveState, agentId: string): { agent: Agent; refund: number } {
   const idx = save.agents.findIndex((a) => a.id === agentId);
@@ -103,10 +180,77 @@ export function sellAgent(save: SaveState, agentId: string): { agent: Agent; ref
   if (lastOfKind && kindHasWork) {
     throw new Error(`Jobs are waiting for your only ${EQUIPMENT_NAME[agent.kind as EquipmentKind]?.toLowerCase() ?? agent.kind} — cancel them first`);
   }
-  const refund = agent.purchaseCost ?? gameConfig.equipmentPrices[agent.kind as EquipmentKind] ?? 0;
+  // Unhitch anything it was carrying (implement stays in the yard).
+  for (const impl of save.implements) if (impl.attachedTo === agentId) impl.attachedTo = undefined;
+  const refund = agent.purchaseCost ?? (agent.size ? agentPrice(agent.kind as EquipmentKind, agent.size) : 0);
   save.agents.splice(idx, 1);
   save.money += refund;
   return { agent, refund };
+}
+
+/** Sell an implement back for its purchase price. Unhitches first; refuses if the
+ * tractor it's on is mid-job. */
+export function sellImplement(save: SaveState, implId: string): { impl: Implement; refund: number } {
+  const idx = save.implements.findIndex((i) => i.id === implId);
+  if (idx === -1) throw new Error(`Implement ${implId} not found`);
+  const impl = save.implements[idx]!;
+  if (impl.attachedTo) {
+    const host = save.agents.find((a) => a.id === impl.attachedTo);
+    if (host && host.state !== "idle") {
+      throw new Error(`${host.name} is using that ${IMPLEMENT_NAME[impl.kind].toLowerCase()} — let it finish first`);
+    }
+  }
+  const refund = impl.purchaseCost ?? implementPrice(impl.kind, impl.size);
+  save.implements.splice(idx, 1);
+  save.money += refund;
+  return { impl, refund };
+}
+
+/** Hitch an implement to a tractor. Enforces the pull-size rule and unhitches
+ * whatever either side was previously attached to. Refuses while the tractor is
+ * mid-job. */
+export function attachImplement(save: SaveState, tractorId: string, implId: string): void {
+  const tractor = save.agents.find((a) => a.id === tractorId);
+  const impl = save.implements.find((i) => i.id === implId);
+  if (!tractor || tractor.kind !== "tractor") throw new Error(`No such tractor`);
+  if (!impl) throw new Error(`No such implement`);
+  if (tractor.state !== "idle") throw new Error(`${tractor.name} is mid-job`);
+  if (!tractor.size || !canPull(tractor.size, impl.size)) {
+    throw new Error(`${tractor.name} can't pull a ${SIZE_LABEL[impl.size].toLowerCase()} ${IMPLEMENT_NAME[impl.kind].toLowerCase()}`);
+  }
+  // One implement per tractor: detach whatever the tractor currently holds, and
+  // detach this implement from any other tractor.
+  for (const i of save.implements) if (i.attachedTo === tractorId) i.attachedTo = undefined;
+  impl.attachedTo = tractorId;
+}
+
+/** Unhitch an implement (park it in the yard). Refuses while its tractor works. */
+export function detachImplement(save: SaveState, implId: string): void {
+  const impl = save.implements.find((i) => i.id === implId);
+  if (!impl) throw new Error(`No such implement`);
+  if (impl.attachedTo) {
+    const host = save.agents.find((a) => a.id === impl.attachedTo);
+    if (host && host.state !== "idle") throw new Error(`${host.name} is mid-job`);
+  }
+  impl.attachedTo = undefined;
+}
+
+/** The plow currently hitched to `tractor`, if any. */
+function attachedPlow(save: SaveState, tractorId: string): Implement | undefined {
+  return save.implements.find((i) => i.attachedTo === tractorId && i.kind === "plow");
+}
+
+/** An idle, unattached plow this tractor could hitch (largest that fits first). */
+function availablePlowFor(save: SaveState, tractor: Agent): Implement | undefined {
+  return save.implements
+    .filter((i) => i.kind === "plow" && !i.attachedTo && tractor.size && canPull(tractor.size, i.size))
+    .sort((a, b) => SIZE_RANK[b.size] - SIZE_RANK[a.size])[0];
+}
+
+/** Can this tractor take a plow task right now — does it have (or can it hitch) a
+ * plow? Used both for task assignment and UI hints. */
+export function tractorCanPlow(save: SaveState, tractor: Agent): boolean {
+  return !!attachedPlow(save, tractor.id) || !!availablePlowFor(save, tractor);
 }
 
 /** All not-yet-finished tasks for a field (optionally of one type). */
@@ -193,6 +337,7 @@ export function cancelTask(save: SaveState, taskId: string): FarmTask {
     throw new Error(`Can't cancel — ${task.type} is already underway`);
   }
   save.tasks.splice(idx, 1);
+  clearTaskRuntime(taskId);
   save.money += task.costPaid;
   return task;
 }
@@ -214,6 +359,44 @@ function isStartable(task: FarmTask, field: Field): boolean {
   if (task.type === "plow") return canPlow(field.status);
   if (task.type === "plant") return field.status === "tilled";
   return field.status === "ready";
+}
+
+// --- coverage-path runtime (not persisted; rebuilt from doneAcres on reload) ---
+const pathCache = new Map<string, CoveragePath>();
+const pathDistRuntime = new Map<string, number>();
+
+/** Working width (meters) for a task: from the attached plow, or the config
+ * planter/header width for plant/harvest. */
+function taskSwathMeters(save: SaveState, task: FarmTask, agent: Agent): number {
+  if (task.type === "harvest") return gameConfig.equipment.harvester.widthFt * FEET_TO_METERS;
+  if (task.type === "plant") return gameConfig.equipment.planterWidthFt * FEET_TO_METERS;
+  const plow = attachedPlow(save, agent.id);
+  return (plow ? implementWidthM(plow) : gameConfig.equipment.plow.medium.widthFt * FEET_TO_METERS);
+}
+
+/** The coverage path an active task is driving, built + cached on first use. */
+function getActivePath(save: SaveState, task: FarmTask, field: Field, agent: Agent): CoveragePath {
+  let path = pathCache.get(task.id);
+  if (!path) {
+    path = buildCoveragePath(field.boundary, taskSwathMeters(save, task, agent));
+    pathCache.set(task.id, path);
+  }
+  return path;
+}
+
+/** The coverage path for an active task, for the RENDERER (reveal). Null unless
+ * the task is active with a known agent + field. */
+export function getCoveragePath(save: SaveState, task: FarmTask): CoveragePath | null {
+  if (task.status !== "active" || !task.agentId) return null;
+  const agent = save.agents.find((a) => a.id === task.agentId);
+  const field = save.fields.find((f) => f.id === task.fieldId);
+  if (!agent || !field) return null;
+  return getActivePath(save, task, field, agent);
+}
+
+function clearTaskRuntime(taskId: string): void {
+  pathCache.delete(taskId);
+  pathDistRuntime.delete(taskId);
 }
 
 /** Things that happened during a tick, for the UI to toast. */
@@ -258,15 +441,22 @@ function tickAgent(
 
     if (!task) {
       // Pick the first queued task of this agent's kind that's startable now.
+      // Plowing also needs the tractor to have (or be able to hitch) a plow.
       const next = save.tasks.find(
         (t) =>
           t.status === "queued" &&
           TASK_AGENT_KIND[t.type] === agent.kind &&
+          (t.type !== "plow" || tractorCanPlow(save, agent)) &&
           save.fields.some((f) => f.id === t.fieldId && isStartable(t, f)),
       );
       if (!next) {
         agent.state = "idle";
         return;
+      }
+      // Auto-hitch a plow for a plow task if the tractor is bare.
+      if (next.type === "plow" && !attachedPlow(save, agent.id)) {
+        const p = availablePlowFor(save, agent);
+        if (p) p.attachedTo = agent.id;
       }
       next.status = "active";
       next.agentId = agent.id;
@@ -286,11 +476,15 @@ function tickAgent(
     }
 
     if (agent.state === "traveling") {
-      const target = centroidOf(field.boundary);
+      // Drive to the field's coverage-path START (not the centroid), so work
+      // begins exactly where the first lane does.
+      const path = getActivePath(save, task, field, agent);
+      const target = path.pts[0]!;
       const dx = target[0] - agent.pos[0];
       const dy = target[1] - agent.pos[1];
       const dist = Math.hypot(dx, dy);
       const speed = (gameConfig.work.travelSpeedKmh * 1000) / 60; // meters per sim-minute
+      if (dist > 1e-6) agent.heading = Math.atan2(dy, dx);
       const timeNeeded = dist / speed;
       if (timeNeeded <= budget) {
         agent.pos = target;
@@ -304,36 +498,42 @@ function tickAgent(
       continue;
     }
 
-    // Working.
-    const rate = workRatePerMinute(task.type); // acres per sim-minute
-    const remaining = task.totalAcres - task.doneAcres;
-    const timeNeeded = remaining / rate;
+    // Working: drive the coverage path at field speed; swept in-field distance ×
+    // swath = area worked, which is where doneAcres comes from (physical model).
+    const path = getActivePath(save, task, field, agent);
+    const speed = (gameConfig.work.fieldSpeedKmh * 1000) / 60; // meters per sim-minute
+    let dist = pathDistRuntime.get(task.id);
+    if (dist === undefined) dist = distanceAtWork(path, (task.doneAcres * ACRE_M2) / path.swath);
+    const timeNeeded = (path.total - dist) / speed;
     const timeUsed = Math.min(timeNeeded, budget);
-    const cut = rate * timeUsed;
-    task.doneAcres += cut;
+    dist = Math.min(path.total, dist + speed * timeUsed);
     budget -= timeUsed;
+    pathDistRuntime.set(task.id, dist);
+
+    const prevAcres = task.doneAcres;
+    const workLen = workDoneAt(path, dist);
+    task.doneAcres = Math.min(task.totalAcres, (workLen * path.swath) / ACRE_M2);
+    const s = sampleAt(path, dist);
+    agent.pos = s.pos;
+    agent.heading = s.heading;
 
     if (task.type === "harvest" && field.crop && field.trueYieldTonsPerAcre !== undefined) {
       // Grain banks continuously as the combine works, like real cart loads.
-      save.grain[field.crop] += cut * field.trueYieldTonsPerAcre;
+      save.grain[field.crop] += (task.doneAcres - prevAcres) * field.trueYieldTonsPerAcre;
       field.harvestedAcres = task.doneAcres;
     }
 
-    if (task.doneAcres >= task.totalAcres - 1e-9) {
+    if (dist >= path.total - 1e-6) {
+      task.doneAcres = task.totalAcres;
       completeTask(task, field, now, rand);
       changed.push(field);
       events.push({ kind: "finished", task, agent });
+      clearTaskRuntime(task.id);
       save.tasks.splice(save.tasks.indexOf(task), 1);
       agent.taskId = undefined;
       agent.state = "idle";
     }
   }
-}
-
-function workRatePerMinute(type: TaskType): number {
-  const w = gameConfig.work;
-  const perHour = type === "plow" ? w.plowAcresPerHour : type === "plant" ? w.seedAcresPerHour : w.harvestAcresPerHour;
-  return perHour / 60;
 }
 
 function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => number): void {

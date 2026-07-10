@@ -32,18 +32,37 @@ export interface FieldPaintParams {
 
 /** Paint the field's current look into `surface`, clipped to `boundary`. */
 export function paintField(surface: Surface, boundary: Meters[], p: FieldPaintParams): void {
+  surface.paint((ctx) =>
+    drawFieldTexture(ctx, surface.canvas.width, surface.canvas.height, (m) => surface.toPixel(m), boundary, p),
+  );
+}
+
+/**
+ * Draw the field's texture into ANY 2D context, given the canvas size and a
+ * meters→pixel mapper. Split out from `paintField` so the sweep-reveal (main.ts)
+ * can BAKE the target texture into an offscreen canvas and blit it in strip by
+ * strip as the machine drives — using the exact same pixels the final repaint
+ * will use, so there's no visible "pop" when the job completes.
+ */
+export function drawFieldTexture(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  toPixel: (m: Meters) => [number, number],
+  boundary: Meters[],
+  p: FieldPaintParams,
+): void {
   const seed = p.seed ?? 1;
   // Row direction reads off the TRUE boundary (its longest real edge); only the
   // clip path is rounded, so smoothing doesn't skew "which way did the farmer
   // actually plant this field."
-  const angle = dominantAngle(boundary, surface);
+  const angle = dominantAngle(boundary, toPixel);
   const smoothed = smoothPolygon(boundary);
 
-  surface.paint((ctx) => {
+  {
     ctx.save();
-    surface.tracePolygon(smoothed);
+    tracePolygon(ctx, smoothed, toPixel);
     ctx.clip();
-    const w = surface.canvas.width, h = surface.canvas.height;
 
     const { base, dark, light } = palette(p);
     ground(ctx, w, h, seed, base, dark, light);
@@ -87,7 +106,7 @@ export function paintField(surface: Surface, boundary: Meters[], p: FieldPaintPa
     }
 
     ctx.restore();
-  });
+  }
 }
 
 /**
@@ -208,11 +227,11 @@ function canopyMottle(ctx: CanvasRenderingContext2D, w: number, h: number, seed:
  * Row direction: along the field's longest edge, in CANVAS pixel space (the
  * y-flip from north-up meters is handled by measuring edges after projection).
  */
-function dominantAngle(boundary: Meters[], surface: Surface): number {
+function dominantAngle(boundary: Meters[], toPixel: (m: Meters) => [number, number]): number {
   let best = 0, bestLen = -1;
   for (let i = 0; i < boundary.length; i++) {
-    const a = surface.toPixel(boundary[i]!);
-    const b = surface.toPixel(boundary[(i + 1) % boundary.length]!);
+    const a = toPixel(boundary[i]!);
+    const b = toPixel(boundary[(i + 1) % boundary.length]!);
     const dx = b[0] - a[0], dy = b[1] - a[1];
     const len = dx * dx + dy * dy;
     if (len > bestLen) {
@@ -221,6 +240,17 @@ function dominantAngle(boundary: Meters[], surface: Surface): number {
     }
   }
   return best;
+}
+
+/** Trace a polygon ring (meters) into `ctx` as a path, ready to clip/fill. */
+function tracePolygon(ctx: CanvasRenderingContext2D, ring: Meters[], toPixel: (m: Meters) => [number, number]): void {
+  ctx.beginPath();
+  ring.forEach((pt, i) => {
+    const [px, py] = toPixel(pt);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
+  ctx.closePath();
 }
 
 // --- small utils -------------------------------------------------------------

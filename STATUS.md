@@ -2,7 +2,18 @@
 
 _Update at the end of every session (brief §13)._
 
-**Last session:** 2026-07-10. **The work-queue + agents slice**: plowing, planting,
+**Latest:** 2026-07-10 (cont'd). **Fieldwork you can watch + an implements system.**
+Machines now DRIVE a back-and-forth coverage path across the field, revealing the
+new texture (tilled/seeded/cut stubble) strip-by-strip behind them, icon rotating to
+its heading — plowing/planting/harvesting are visible at the satellite view, not
+instant. Timing went PHYSICAL: a job's length emerges from field size × implement
+width. Tractors are now POWER UNITS that attach IMPLEMENTS (Small/Medium/Large plows,
+5/10/20 ft); a tractor pulls its class or smaller, and plowing needs a tractor + plow.
+Equipment tab buys/sells every size and hitches/unhitches plows. 43 tests green
+(coverage geometry + serpentine motion + implements). **Visual layer (the reveal
+stamping + icon rotation) is NOT browser-verified — needs an eyeball.**
+
+**Earlier 2026-07-10:** **The work-queue + agents slice**: plowing, planting,
 and harvesting are now TASKS that queue in a right-hand Work Queue panel, performed
 over realistic sim-hours by two discrete agents — a 🚜 Tractor (plow/plant) and a
 🌾 Combine (harvest) — that drive to fields as dots on the map. Pay-on-queue with
@@ -235,6 +246,47 @@ slice of 5 (placeholder sale) are DONE. Next: **move the grain for real** (§12 
   189 t banking live → chained plow re-queue → cancel refunded $573 → reload
   restored grain/date/agents with zero console errors.
 
+### Slice 7 — Watchable fieldwork + implements/sizes system ✅ (2026-07-10, cont'd)
+- **The sweep (the whole point):** a machine drives a back-and-forth
+  **coverage path** (`src/sim/coverage.ts`, pure + tested) whose lanes run along
+  the field's longest edge (same direction `fieldRender` draws rows), spaced one
+  implement-**width** apart, joined by headland U-turns. As it drives, the NEW
+  texture (tilled/seeded/cut-stubble) is revealed **strip by strip behind it**
+  (`updateReveals`/`stampReveal` in main.ts): the target texture is baked once into
+  an offscreen canvas (via the new `drawFieldTexture` export, same seed as the final
+  repaint → no "pop"), and only the swept swaths are blitted onto the field surface.
+  The machine icon **rotates to its driving heading** (`Agent.heading`; SVGs face
+  west, so CSS rotate = π − heading). `Surface.setAnimating()` keeps the canvas
+  re-uploading only while a sweep is live.
+- **PHYSICAL timing** (replaced acres/hour): duration emerges from field size ÷
+  (implement width × field speed). `gameConfig.work` is now `{ fieldSpeedKmh: 12,
+  travelSpeedKmh: 22 }`; the acres/hour rates are gone. Wider implement → fewer,
+  longer-spaced lanes → shorter route → faster job (a real trade-up to buy toward).
+- **Implements + sizes system** (`EquipmentSize` = small/medium/large, `SIZE_RANK`,
+  `FEET_TO_METERS` in gameConfig): a **tractor is a power unit** with a `size`; an
+  **`Implement`** (a `"plow"` now; planters/etc. reuse the shape) attaches to a
+  tractor via `attachedTo`. `canPull` = implement class ≤ tractor class. **Plowing
+  requires a tractor WITH a plow** — task selection gates on `tractorCanPlow` and
+  **auto-hitches** an idle compatible plow on pickup. Plow widths are LITERAL feet
+  (maintainer choice): Small 5 / Medium 10 / Large 20 ft (≈100+ fine passes on a big
+  field — realistic, dense). Combine is self-contained (30 ft integral header);
+  planting uses a 30 ft implicit planter width until planter implements exist.
+- **Starting fleet:** medium tractor + medium combine + medium plow (hitched), so
+  plowing works out of the box. Prices in `gameConfig.equipment`
+  (tractor 150/250/400k, plow 40/80/150k, combine 450k). Pre-size/pre-implement
+  saves migrate to medium in `ensureAgents`.
+- **Equipment tab rebuilt:** a buy "shop" (tractors & plows in each size + combine,
+  live affordability) + the owned fleet, where each tractor has a **hitch dropdown**
+  to attach/detach a plow (pull-size rule enforced, disabled mid-job), 📍 fly-to, and
+  💰 sell (purchase-price refund; selling a tractor drops its plow back to the yard).
+  Unattached plows list separately with sell.
+- Tests: 43 total (was 31) — new `tests/coverage.test.ts` (7), physical-model +
+  implements + serpentine-motion tests replacing the old acres/hour assertions.
+- ⚠️ **Unverified visually:** browser preview was off this session (maintainer:
+  too slow). The reveal stamping, texture-alignment, U-turn look, and icon rotation
+  direction are typecheck+unit-test backed but NOT eyeballed. If icons drive
+  backward, flip the `Math.PI - heading` offset in `updateAgentMarkers`.
+
 ### Dev convenience
 - `start-dev.bat` — double-click to install (first run) + launch the dev server and
   open the browser at http://localhost:5173.
@@ -255,11 +307,11 @@ slice of 5 (placeholder sale) are DONE. Next: **move the grain for real** (§12 
    signals exist, this is the natural place to make it a real decision instead of a
    fixed order — surface a per-field "preferred crop" setting, or leave it as a
    deliberately dumb default players can override by switching auto-manage off.
-3. (Optional) county-picker UI; deepen the fieldwork pass — agents + realistic task
-   durations landed (Slice 6), but the tractor still "teleports work" across the
-   field: the overlay's **progressive texture reveal along a swept path** (§10) and
-   road-following travel (routing.ts) are the natural next steps. Equipment
-   condition→efficiency (§8) hooks in here too.
+3. (Optional) county-picker UI; **road-following travel** (routing.ts) so machines
+   drive real roads from the yard to the field instead of straight lines; **planter
+   implements** (extend the implements system the plow established — right now plant
+   uses an implicit 30 ft width, no attachable planter); equipment
+   **condition→efficiency** (§8) hooks onto the size/implement model.
 
 ### Notes for next session
 - **Verification status:** Claude stopped driving the browser-preview tool

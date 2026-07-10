@@ -17,6 +17,15 @@
 /** Crops the player can plant (brief §6, §10). All numbers are balance = tunable. */
 export type CropId = "corn" | "soybeans";
 
+/** Equipment size classes. A tractor pulls implements of its class or smaller. */
+export type EquipmentSize = "small" | "medium" | "large";
+
+/** Size ordering, so `canPull` and UI can compare classes. */
+export const SIZE_RANK: Record<EquipmentSize, number> = { small: 0, medium: 1, large: 2 };
+
+/** Feet → meters (implement widths are specified in real feet). */
+export const FEET_TO_METERS = 0.3048;
+
 export interface CropConfig {
   name: string;
   /** HUD icon — cozy UI shorthand. */
@@ -55,26 +64,34 @@ export interface GameConfig {
   /** Cost to plow/till, per acre (fuel + wear; brief §8 variable costs). */
   plowCostPerAcre: number;
 
-  /** Fieldwork pacing (brief §9–§10): agents (tractor, combine) work through
-   * queued tasks at realistic rates, so task duration = acres ÷ rate. All
-   * tunable — these ARE the "how long does farming take" difficulty feel. */
+  /** Fieldwork pacing (brief §9–§10). PHYSICAL model (design decision 2026-07-10):
+   * a machine drives a back-and-forth coverage path at `fieldSpeedKmh`, so a
+   * job's duration EMERGES from the field's size and the implement's working
+   * WIDTH (a wider tool = fewer, longer-spaced lanes = a shorter route = a faster
+   * job). Nothing here is an abstract acres/hour rate any more. */
   work: {
-    /** Tractor tillage rate, acres per sim-hour (~big tractor + disk). */
-    plowAcresPerHour: number;
-    /** Tractor planting rate, acres per sim-hour (~16-row planter). */
-    seedAcresPerHour: number;
-    /** Combine harvest rate, acres per sim-hour. */
-    harvestAcresPerHour: number;
-    /** How fast agents drive between jobs, km/h (straight-line for now;
-     * real-road routing plugs in later, brief §9). */
+    /** In-field working speed while driving the coverage lanes, km/h. */
+    fieldSpeedKmh: number;
+    /** Point-to-point travel speed between the yard and a field, km/h
+     * (straight-line for now; real-road routing plugs in later, brief §9). */
     travelSpeedKmh: number;
   };
 
-  /** Capital cost of machines (brief §8 "Capital (lumpy): equipment"). Sell-back
+  /** Equipment: tractors are POWER UNITS that attach IMPLEMENTS (a plow now;
+   * planters/etc. reuse this system later). A tractor can pull an implement of
+   * its own size class or smaller. Widths are the real thing (feet); the physical
+   * model turns width into lane count → route length → job time. Sell-back
    * refunds the purchase price, same rule as land. */
-  equipmentPrices: {
-    tractor: number;
-    harvester: number;
+  equipment: {
+    /** Power units. `pull` is the largest implement size this tractor handles. */
+    tractor: Record<EquipmentSize, { price: number }>;
+    /** Plow implements: price + working width in feet, by size. */
+    plow: Record<EquipmentSize, { price: number; widthFt: number }>;
+    /** The combine is self-contained for now (integral grain header). */
+    harvester: { price: number; widthFt: number };
+    /** Planting width (feet) until planter implements exist — the tractor's
+     * implicit planter for plant tasks. */
+    planterWidthFt: number;
   };
 
   /** How much the visible yield range has narrowed by harvest-ready (0..1).
@@ -115,14 +132,25 @@ export const gameConfig: GameConfig = {
 
   plowCostPerAcre: 20,
   work: {
-    plowAcresPerHour: 12,
-    seedAcresPerHour: 18,
-    harvestAcresPerHour: 9,
+    // Slower than road travel: a working pass is deliberate. Tuned so a medium
+    // (10 ft) plow on a ~30-acre field takes a few sim-hours — in the ballpark
+    // of the old flat rate, now emerging from width × field size.
+    fieldSpeedKmh: 12,
     travelSpeedKmh: 22,
   },
-  equipmentPrices: {
-    tractor: 250_000, // big row-crop tractor + implements, ballpark
-    harvester: 450_000, // combine + header, ballpark
+  equipment: {
+    tractor: {
+      small: { price: 150_000 },
+      medium: { price: 250_000 },
+      large: { price: 400_000 },
+    },
+    plow: {
+      small: { price: 40_000, widthFt: 5 },
+      medium: { price: 80_000, widthFt: 10 },
+      large: { price: 150_000, widthFt: 20 },
+    },
+    harvester: { price: 450_000, widthFt: 30 },
+    planterWidthFt: 30,
   },
   yieldRangeNarrowing: 0.85,
 };

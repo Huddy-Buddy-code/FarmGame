@@ -191,8 +191,10 @@ function drawOutline(map: MlMap, field: Field, color: string): void {
   });
 }
 
-/** Deterministic 32-bit seed from a string id (FNV-1a), for stable textures. */
-function hashSeed(s: string): number {
+/** Deterministic 32-bit seed from a string id (FNV-1a), for stable textures.
+ * Exported so the sweep-reveal (main.ts) bakes with the SAME seed renderField
+ * uses, keeping the revealed texture identical to the final repaint. */
+export function hashSeed(s: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);

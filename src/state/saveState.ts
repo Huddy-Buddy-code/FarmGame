@@ -16,7 +16,7 @@
 import type { Meters } from "../geo/coords";
 import type { SimTime } from "../sim/clock";
 import { gameConfig } from "../config/gameConfig";
-import type { CropId } from "../config/gameConfig";
+import type { CropId, EquipmentSize } from "../config/gameConfig";
 
 /** Field lifecycle (brief §10). */
 export type FieldStatus =
@@ -71,11 +71,27 @@ export interface Agent {
   name: string;
   pos: Meters;
   state: AgentState;
+  /** Size class of a tractor/combine — caps which implements a tractor can pull. */
+  size?: EquipmentSize;
+  /** Travel heading in radians (meters frame), for rotating the map icon. */
+  heading?: number;
   /** The task this agent is on (traveling to or working), if any. */
   taskId?: string;
   /** What was paid for this machine — refunded in full on sell-back (same rule
    * as land). The starting fleet gets the config price (bought with starting
    * capital, notionally). */
+  purchaseCost?: number;
+}
+
+/** An attachable implement (a plow now; planters/etc. reuse this shape). A
+ * tractor is a power unit; an implement gives it a job it can do. */
+export interface Implement {
+  id: string;
+  kind: "plow";
+  size: EquipmentSize;
+  /** Id of the tractor this is hitched to, or undefined if parked in the yard. */
+  attachedTo?: string;
+  /** What was paid — refunded on sell-back. */
   purchaseCost?: number;
 }
 
@@ -108,6 +124,8 @@ export interface SaveState {
   fields: Field[];
   grain: GrainBin;
   agents: Agent[];
+  /** Attachable implements owned by the farm (plows now; more later). */
+  implements: Implement[];
   tasks: FarmTask[];
   contracts: unknown[]; // shape defined when the contract slice lands (brief §6)
 }
@@ -121,6 +139,7 @@ export function newGame(): SaveState {
     fields: [],
     grain: { corn: 0, soybeans: 0 },
     agents: [],
+    implements: [],
     tasks: [],
     contracts: [],
   };

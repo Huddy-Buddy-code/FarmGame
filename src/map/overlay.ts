@@ -123,8 +123,34 @@ export class Surface {
     this.markDirty();
   }
 
+  private animating = false;
+
+  /**
+   * Keep the canvas source re-uploading every frame (for a live animation like
+   * the fieldwork reveal) vs. letting it idle. Cheaper and cleaner than calling
+   * `markDirty()` per frame, which would register a fresh `once("idle")` handler
+   * each time. Pair setAnimating(true) at the start with (false) at the end.
+   */
+  setAnimating(on: boolean): void {
+    if (this.destroyed || on === this.animating) return;
+    this.animating = on;
+    const src = this.map.getSource(this.sourceId) as CanvasSource | undefined;
+    if (!src) return;
+    if (on) {
+      src.play();
+      this.map.triggerRepaint();
+    } else {
+      src.pause();
+    }
+  }
+
   /** Force a one-frame GPU re-upload of the canvas, then return to idle. */
   markDirty(): void {
+    if (this.animating) {
+      // Already re-uploading every frame; nothing to schedule.
+      this.map.triggerRepaint();
+      return;
+    }
     if (this.destroyed) return;
     const src = this.map.getSource(this.sourceId) as CanvasSource | undefined;
     if (!src) return;

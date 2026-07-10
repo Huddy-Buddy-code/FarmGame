@@ -24,7 +24,10 @@ import { addRoadsLayer } from "./map/roadsLayer";
 import { OverlayEngine } from "./map/overlay";
 import { newGame } from "./state/saveState";
 import type { SaveState, Field } from "./state/saveState";
-import { buyFieldFromBoundary, renderField, initIdCounters, sellField } from "./field/fields";
+import { buyFieldFromBoundary, renderField, initIdCounters, sellField, hashSeed } from "./field/fields";
+import { drawFieldTexture } from "./field/fieldRender";
+import { distanceAtWork } from "./sim/coverage";
+import type { CoveragePath } from "./sim/coverage";
 import { persistGame, loadGame, clearSavedGame } from "./state/persistence";
 import { sellGrain } from "./sim/economy";
 import { SimClock } from "./sim/clock";
@@ -39,12 +42,13 @@ import {
 import {
   ensureAgents, initTaskIds, enqueueTask, cancelTask, taskCost, tasksFor,
   isFieldHarvesting, effectiveStatus, tickTasks, autoManageAll, autoManageField,
-  buyAgent, sellAgent,
+  buyAgent, sellAgent, buyImplement, sellImplement, attachImplement, detachImplement,
+  agentPrice, implementPrice, canPull, implementName, getCoveragePath,
 } from "./sim/tasks";
 import type { EquipmentKind } from "./sim/tasks";
-import type { FarmTask, Agent } from "./state/saveState";
+import type { FarmTask, Agent, FieldStatus } from "./state/saveState";
 import { gameConfig } from "./config/gameConfig";
-import type { CropId } from "./config/gameConfig";
+import type { CropId, EquipmentSize } from "./config/gameConfig";
 
 // Which county to play. Later this comes from a save / county picker.
 const COUNTY_ID = "story-ia";
@@ -62,6 +66,7 @@ if (loaded) {
   // mid-harvest markers into queued harvest tasks so the combine resumes them.
   save.tasks ??= [];
   save.agents ??= [];
+  save.implements ??= [];
   initTaskIds(save);
   for (const id of loaded.harvestingIds ?? []) {
     const f = save.fields.find((x) => x.id === id);
@@ -223,6 +228,7 @@ function tickWorld(prev: number) {
   for (const f of allChanged) renderField(mapRef, overlay, f, now);
   repaintGrowthStages(now, allChanged);
   for (const ev of work.events) toastTaskEvent(ev.task, ev.agent, ev.kind);
+  updateReveals();
   updateAgentMarkers();
   // Refresh UI ~2×/s (or instantly when a status flipped). Rebuilding the field
   // panel every frame would recreate its buttons under the player's cursor.
@@ -258,7 +264,48 @@ function repaintGrowthStages(now: number, alreadyPainted: { id: string }[]) {
 // ---------------------------------------------------------------------------
 // Agents on the map + the work-queue panel (right side).
 // ---------------------------------------------------------------------------
+// Toasts are plain text (toast() sets textContent), so they keep a small emoji
+// fallback; every rendered UI icon (map dots, queue rows, equipment panel) uses
+// the SVGs below instead — a classic big-tractor/combine silhouette in the
+// game's own cozy palette, not a real manufacturer's colors/logo.
 const AGENT_EMOJI: Record<string, string> = { tractor: "🚜", harvester: "🌾" };
+
+/** A big row-crop tractor: large rear drive wheel, small front wheel, cab. */
+function tractorIconSvg(size = 22): string {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+    <path d="M2 19a3 3 0 1 0 6 0 3 3 0 0 0-6 0Z" fill="#e0a63c" stroke="#6b4426" stroke-width="1"/>
+    <path d="M2 19a3 3 0 1 0 6 0 3 3 0 0 0-6 0Z" fill="none" stroke="#4a3520" stroke-width="0.6" opacity="0.5"/>
+    <circle cx="5" cy="19" r="1.1" fill="#4a3520"/>
+    <circle cx="17" cy="19" r="1.6" fill="#4a3520"/>
+    <path d="M14 19.6a3.6 3.6 0 1 0 7.2 0 3.6 3.6 0 0 0-7.2 0Z" fill="#e0a63c" stroke="#6b4426" stroke-width="1"/>
+    <path d="M9 8h4.5l1.5 4h3.8a2 2 0 0 1 2 2v2.2h-3.2a3.6 3.6 0 0 0-7.1 0H10a3 3 0 0 0-5.8-1.1L3 15v-2.3L9 10Z" fill="#6da144" stroke="#55832f" stroke-width="1"/>
+    <rect x="9.6" y="4" width="4.4" height="4.4" rx="0.6" fill="#6da144" stroke="#55832f" stroke-width="1"/>
+    <rect x="10.4" y="4.7" width="2.8" height="2.4" rx="0.3" fill="#dff2ff" opacity="0.9"/>
+    <rect x="16" y="6.5" width="1" height="4" fill="#4a3520"/>
+  </svg>`;
+}
+
+/** A combine harvester: boxy cab/body with a wide grain header out front. */
+function combineIconSvg(size = 22): string {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+    <path d="M1 15.5h4.5l1-2.2h4.8l0.6 2.2H15v3.3H1Z" fill="#e0a63c" stroke="#6b4426" stroke-width="1"/>
+    <line x1="2.5" y1="13.6" x2="2.5" y2="18.4" stroke="#6b4426" stroke-width="0.8"/>
+    <line x1="4.3" y1="13.6" x2="4.3" y2="18.4" stroke="#6b4426" stroke-width="0.8"/>
+    <line x1="6.1" y1="13.6" x2="6.1" y2="18.4" stroke="#6b4426" stroke-width="0.8"/>
+    <line x1="7.9" y1="13.6" x2="7.9" y2="18.4" stroke="#6b4426" stroke-width="0.8"/>
+    <rect x="13.5" y="6.5" width="8" height="9.5" rx="1.2" fill="#6da144" stroke="#55832f" stroke-width="1"/>
+    <rect x="14.6" y="8" width="3" height="3" rx="0.3" fill="#dff2ff" opacity="0.9"/>
+    <circle cx="17.5" cy="19" r="3" fill="#4a3520"/>
+    <circle cx="17.5" cy="19" r="1.9" fill="#e0a63c" stroke="#6b4426" stroke-width="0.8"/>
+    <circle cx="21.2" cy="18.2" r="1.6" fill="#4a3520"/>
+    <circle cx="21.2" cy="18.2" r="0.9" fill="#e0a63c"/>
+  </svg>`;
+}
+
+const AGENT_ICON: Record<string, (size?: number) => string> = {
+  tractor: tractorIconSvg,
+  harvester: combineIconSvg,
+};
 
 /** Human verb for a task, present participle ("plowing Field 1"). */
 function taskVerb(task: FarmTask): string {
@@ -285,16 +332,28 @@ function updateAgentMarkers(): void {
   for (const agent of save.agents) {
     let marker = agentMarkers.get(agent.id);
     if (!marker) {
+      // Outer dot = chrome + bounce; inner glyph rotates to the driving heading,
+      // so the two transforms don't fight (bounce animates the outer element).
       const el = document.createElement("div");
       el.className = "agent-dot";
-      el.textContent = AGENT_EMOJI[agent.kind] ?? "🚜";
       el.title = agent.name;
+      const glyph = document.createElement("span");
+      glyph.className = "agent-glyph";
+      glyph.innerHTML = (AGENT_ICON[agent.kind] ?? tractorIconSvg)(20);
+      el.appendChild(glyph);
       marker = new maplibregl.Marker({ element: el }).setLngLat(toLngLat(agent.pos)).addTo(mapRef);
       agentMarkers.set(agent.id, marker);
     } else {
       marker.setLngLat(toLngLat(agent.pos));
     }
-    marker.getElement().classList.toggle("working", agent.state === "working");
+    const el = marker.getElement();
+    el.classList.toggle("working", agent.state === "working");
+    // Rotate the glyph to the driving heading. The SVGs are drawn facing WEST
+    // (front wheels / combine header on the left), and screen-y points down while
+    // meters-north points up, so the CSS rotation is (π − heading): driving east
+    // → 180°, north → 90° CW, etc.
+    const glyph = el.querySelector<HTMLElement>(".agent-glyph");
+    if (glyph && agent.heading !== undefined) glyph.style.transform = `rotate(${Math.PI - agent.heading}rad)`;
   }
   // Tear down markers for machines that were sold.
   for (const [id, marker] of agentMarkers) {
@@ -303,6 +362,132 @@ function updateAgentMarkers(): void {
       agentMarkers.delete(id);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// The fieldwork REVEAL (brief §10): as a machine drives the coverage path, the
+// NEW texture (tilled / seeded / cut stubble) appears strip-by-strip behind it.
+// We bake the target texture once into an offscreen canvas, then blit only the
+// swept strips onto the field's live surface — cheap, and pixel-identical to the
+// final full repaint so there's no "pop" when the job finishes.
+// ---------------------------------------------------------------------------
+const ACRE_M2 = 4046.8564224;
+
+interface Reveal {
+  taskId: string;
+  baked: HTMLCanvasElement;
+  /** How far along the route (full-route meters) we've stamped so far. */
+  lastDist: number;
+}
+const reveals = new Map<string, Reveal>(); // keyed by fieldId
+
+function revealTargetStatus(task: FarmTask): FieldStatus {
+  return task.type === "plow" ? "tilled" : task.type === "plant" ? "planted" : "harvested";
+}
+
+function updateReveals(): void {
+  if (!overlay) return;
+  // Which field each active task is working right now.
+  const activeByField = new Map<string, FarmTask>();
+  for (const t of save.tasks) if (t.status === "active") activeByField.set(t.fieldId, t);
+
+  // Drop reveals whose task ended or changed; stop animating that surface.
+  for (const [fid, r] of reveals) {
+    const t = activeByField.get(fid);
+    if (!t || t.id !== r.taskId) {
+      overlay.get(fid)?.setAnimating(false);
+      reveals.delete(fid);
+    }
+  }
+
+  for (const [fid, task] of activeByField) {
+    const agent = save.agents.find((a) => a.id === task.agentId);
+    if (!agent || agent.state !== "working") continue; // reveal only while working
+    const path = getCoveragePath(save, task);
+    const field = save.fields.find((f) => f.id === fid);
+    const surface = overlay.get(fid);
+    if (!path || !field || !surface) continue;
+
+    let r = reveals.get(fid);
+    if (!r || r.taskId !== task.id) {
+      const baked = document.createElement("canvas");
+      baked.width = surface.canvas.width;
+      baked.height = surface.canvas.height;
+      const bctx = baked.getContext("2d");
+      if (!bctx) continue;
+      drawFieldTexture(bctx, baked.width, baked.height, (mtr) => surface.toPixel(mtr), field.boundary, {
+        status: revealTargetStatus(task),
+        crop: field.crop,
+        progress: 0,
+        seed: hashSeed(fid),
+      });
+      r = { taskId: task.id, baked, lastDist: 0 };
+      reveals.set(fid, r);
+      surface.setAnimating(true); // re-upload every frame while the sweep runs
+    }
+
+    // Reveal up to the swept in-field distance implied by how much is done.
+    const revealWork = Math.min(path.totalWork, (task.doneAcres * ACRE_M2) / path.swath);
+    const revealDist = distanceAtWork(path, revealWork);
+    if (revealDist > r.lastDist + 1e-6) {
+      stampReveal(surface, r.baked, path, r.lastDist, revealDist);
+      r.lastDist = revealDist;
+    }
+  }
+}
+
+/** Blit the baked NEW texture onto `surface` along the route between full-route
+ * distances `from` and `to`, one swath-wide strip per in-field lane segment. */
+function stampReveal(
+  surface: { ctx: CanvasRenderingContext2D; toPixel: (m: Meters) => [number, number] },
+  baked: HTMLCanvasElement,
+  path: CoveragePath,
+  from: number,
+  to: number,
+): void {
+  const ctx = surface.ctx;
+  const half = (path.swath / 2) * 1.08; // slight overlap avoids seams between lanes
+  for (let i = 0; i < path.pts.length - 1; i++) {
+    if (!path.inField[i]) continue;
+    const segA = path.cum[i]!;
+    const segB = path.cum[i + 1]!;
+    const lo = Math.max(from, segA);
+    const hi = Math.min(to, segB);
+    if (hi <= lo) continue;
+    const a = path.pts[i]!;
+    const b = path.pts[i + 1]!;
+    const p0 = lerpAlong(a, b, segA, segB, lo);
+    const p1 = lerpAlong(a, b, segA, segB, hi);
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    const len = Math.hypot(dx, dy) || 1;
+    dx /= len;
+    dy /= len;
+    const px = -dy * half;
+    const py = dx * half;
+    const quad: Meters[] = [
+      [p0[0] + px, p0[1] + py],
+      [p1[0] + px, p1[1] + py],
+      [p1[0] - px, p1[1] - py],
+      [p0[0] - px, p0[1] - py],
+    ];
+    ctx.save();
+    ctx.beginPath();
+    quad.forEach((m, k) => {
+      const [x, y] = surface.toPixel(m);
+      if (k === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(baked, 0, 0); // baked is transparent outside the field, so safe
+    ctx.restore();
+  }
+}
+
+function lerpAlong(a: Meters, b: Meters, distA: number, distB: number, d: number): Meters {
+  const t = distB - distA > 1e-9 ? (d - distA) / (distB - distA) : 0;
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
 }
 
 /** Rebuild the right-hand queue panel: each agent's status, then queued jobs. */
@@ -330,7 +515,7 @@ function refreshQueuePanel(): void {
     const row = document.createElement("div");
     row.className = "agent-row" + (agent.state === "idle" ? " idle" : "");
     row.innerHTML = `
-      <span class="icon">${AGENT_EMOJI[agent.kind] ?? "🚜"}</span>
+      <span class="icon">${(AGENT_ICON[agent.kind] ?? tractorIconSvg)(18)}</span>
       <span class="ar-info">
         <div class="ar-name">${agent.name}</div>
         <div class="ar-status">${status}</div>
@@ -345,10 +530,14 @@ function refreshQueuePanel(): void {
     rows.innerHTML = `<div class="queue-empty">No jobs queued — plow, plant, or harvest a field.</div>`;
     return;
   }
-  const TASK_ICON: Record<string, string> = { plow: "🚜", plant: "🌱", harvest: "🌾" };
   for (const task of save.tasks) {
     const pct = (task.doneAcres / task.totalAcres) * 100;
-    const icon = task.type === "plant" && task.crop ? gameConfig.crops[task.crop].emoji : TASK_ICON[task.type];
+    const icon =
+      task.type === "plant" && task.crop
+        ? gameConfig.crops[task.crop].emoji
+        : task.type === "harvest"
+          ? combineIconSvg(18)
+          : tractorIconSvg(18);
     const row = document.createElement("div");
     row.className = "queue-row" + (task.status === "active" ? " active" : "");
     row.innerHTML = `
@@ -536,9 +725,14 @@ function refreshFieldsTab() {
 }
 
 // ---------------------------------------------------------------------------
-// Equipment tab: the machine fleet — status at a glance, buy new machines,
-// sell idle ones back (purchase-price refund, same rule as land).
+// Equipment tab: the machine fleet. Tractors are power units that attach
+// implements (a plow now); the combine is self-contained. Buy any size, hitch a
+// plow to a tractor (its class or smaller), and sell idle gear back for its
+// purchase price (same rule as land).
 // ---------------------------------------------------------------------------
+const SIZES: EquipmentSize[] = ["small", "medium", "large"];
+const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
+
 function wireEquipTab() {
   $("btn-equip").addEventListener("click", () => {
     const el = $("equiptab");
@@ -547,102 +741,230 @@ function wireEquipTab() {
     if (opening) refreshEquipTab(true);
   });
   $("equip-close").addEventListener("click", () => ($("equiptab").style.display = "none"));
-
-  for (const kind of ["tractor", "harvester"] as EquipmentKind[]) {
-    $(`buy-${kind}`).addEventListener("click", () => {
-      try {
-        const agent = buyAgent(save, kind, homePos);
-        updateHud();
-        updateAgentMarkers();
-        refreshEquipTab(true);
-        refreshQueuePanel();
-        toast(`${AGENT_EMOJI[kind]} Bought ${agent.name} — parked at the yard, ready for work`);
-      } catch (err) {
-        toast("❌ " + (err as Error).message, 3500);
-      }
-    });
-  }
 }
 
-/** Rebuild the equipment list. Cheap no-op while the panel is hidden. */
+/** Refresh after any fleet change: HUD cash, map dots, panels. */
+function afterFleetChange(): void {
+  updateHud();
+  updateAgentMarkers();
+  refreshEquipTab(true);
+  refreshQueuePanel();
+}
+
+function agentStatusText(agent: Agent): { text: string; pct: number | null } {
+  const task = agent.taskId ? save.tasks.find((t) => t.id === agent.taskId) : undefined;
+  if (task && agent.state === "traveling") return { text: `Driving to ${prettyId(task.fieldId)}…`, pct: null };
+  if (task && agent.state === "working") {
+    return { text: `${cap(taskVerb(task))} ${prettyId(task.fieldId)}`, pct: (task.doneAcres / task.totalAcres) * 100 };
+  }
+  return { text: "Idle — waiting for work", pct: null };
+}
+
+/** Rebuild the equipment tab. Cheap no-op while hidden. */
 let lastEquipKey = "";
 function refreshEquipTab(force = false) {
   const el = $("equiptab");
   if (el.style.display !== "block") return;
 
-  const key = save.agents
-    .map((a) => {
-      const task = a.taskId ? save.tasks.find((t) => t.id === a.taskId) : undefined;
-      const pct = task ? Math.round((task.doneAcres / task.totalAcres) * 100) : "";
-      return `${a.id}:${a.state}:${a.taskId ?? ""}:${pct}`;
-    })
-    .join("|") + `|$${Math.round(save.money)}`;
+  const key =
+    save.agents
+      .map((a) => {
+        const task = a.taskId ? save.tasks.find((t) => t.id === a.taskId) : undefined;
+        const pct = task ? Math.round((task.doneAcres / task.totalAcres) * 100) : "";
+        return `${a.id}:${a.state}:${pct}`;
+      })
+      .join("|") +
+    "#" +
+    save.implements.map((i) => `${i.id}:${i.attachedTo ?? ""}`).join("|") +
+    `|$${Math.round(save.money)}`;
   if (!force && key === lastEquipKey) return;
   lastEquipKey = key;
 
-  // Buy buttons show live affordability.
-  for (const kind of ["tractor", "harvester"] as EquipmentKind[]) {
-    const btn = $(`buy-${kind}`) as HTMLButtonElement;
-    const price = gameConfig.equipmentPrices[kind];
-    btn.innerHTML = `${AGENT_EMOJI[kind]} Buy ${kind === "tractor" ? "Tractor" : "Combine"}<br><span class="small">$${price.toLocaleString()}</span>`;
-    btn.disabled = price > save.money;
+  buildEquipShop();
+  buildEquipFleet();
+}
+
+/** The "buy" shop: tractors & plows in each size, plus the combine. */
+function buildEquipShop(): void {
+  const shop = $("equip-shop");
+  shop.innerHTML = "";
+
+  const group = (label: string, iconSvg: string) => {
+    const g = document.createElement("div");
+    g.className = "shop-group";
+    g.innerHTML = `<div class="shop-label"><span class="icon">${iconSvg}</span>${label}</div>`;
+    shop.appendChild(g);
+    return g;
+  };
+
+  const tractors = group("Tractors", tractorIconSvg(16));
+  for (const size of SIZES) {
+    const price = agentPrice("tractor", size);
+    tractors.appendChild(
+      buyButton(`${SIZE_LABEL[size]}`, price, () => {
+        const a = buyAgent(save, "tractor", size, homePos);
+        afterFleetChange();
+        toast(`Bought ${a.name} — parked at the yard`);
+      }),
+    );
   }
 
+  const plows = group("Plows", "🔧");
+  for (const size of SIZES) {
+    const price = implementPrice("plow", size);
+    const ft = gameConfig.equipment.plow[size].widthFt;
+    plows.appendChild(
+      buyButton(`${SIZE_LABEL[size]} · ${ft}ft`, price, () => {
+        const i = buyImplement(save, "plow", size);
+        afterFleetChange();
+        toast(`Bought ${implementName(save, i)} — parked in the yard`);
+      }),
+    );
+  }
+
+  const combine = group("Combine", combineIconSvg(16));
+  const cprice = gameConfig.equipment.harvester.price;
+  combine.appendChild(
+    buyButton("Combine", cprice, () => {
+      const a = buyAgent(save, "harvester", "medium", homePos);
+      afterFleetChange();
+      toast(`Bought ${a.name} — parked at the yard`);
+    }),
+  );
+}
+
+function buyButton(label: string, price: number, onBuy: () => void): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.className = "shop-buy";
+  btn.innerHTML = `${label}<span class="small">$${price.toLocaleString()}</span>`;
+  btn.disabled = price > save.money;
+  btn.addEventListener("click", () => {
+    try {
+      onBuy();
+    } catch (err) {
+      toast("❌ " + (err as Error).message, 3500);
+    }
+  });
+  return btn;
+}
+
+/** The owned fleet: tractors (with a plow selector), the combine, and yard plows. */
+function buildEquipFleet(): void {
   const rows = $("equip-rows");
   rows.innerHTML = "";
-  for (const agent of save.agents) {
-    const task = agent.taskId ? save.tasks.find((t) => t.id === agent.taskId) : undefined;
-    let status = "Idle — waiting for work";
-    let pct: number | null = null;
-    if (task && agent.state === "traveling") status = `Driving to ${prettyId(task.fieldId)}…`;
-    else if (task && agent.state === "working") {
-      pct = (task.doneAcres / task.totalAcres) * 100;
-      status = `${cap(taskVerb(task))} ${prettyId(task.fieldId)}`;
-    }
 
+  for (const agent of save.agents) {
+    const { text, pct } = agentStatusText(agent);
     const row = document.createElement("div");
     row.className = "equip-row";
     row.innerHTML = `
-      <span class="icon">${AGENT_EMOJI[agent.kind] ?? "🚜"}</span>
+      <span class="icon">${(AGENT_ICON[agent.kind] ?? tractorIconSvg)(20)}</span>
       <span class="er-info">
         <div class="er-name">${agent.name}</div>
-        <div class="er-status">${status}</div>
+        <div class="er-status">${text}</div>
         ${pct !== null ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
       </span>`;
 
-    const locate = document.createElement("button");
-    locate.className = "er-btn";
-    locate.textContent = "📍";
-    locate.title = `Fly to ${agent.name}`;
-    locate.addEventListener("click", () => {
-      mapRef.flyTo({ center: toLngLat(agent.pos), zoom: Math.max(mapRef.getZoom(), 14) });
-    });
-    row.appendChild(locate);
+    // Tractors get a plow selector (hitch/unhitch).
+    if (agent.kind === "tractor") row.appendChild(plowSelector(agent));
 
-    const refund = agent.purchaseCost ?? gameConfig.equipmentPrices[agent.kind as EquipmentKind] ?? 0;
-    const sell = document.createElement("button");
-    sell.className = "er-btn";
-    sell.textContent = "💰";
-    sell.title = `Sell ${agent.name} · $${refund.toLocaleString()}`;
-    sell.disabled = agent.state !== "idle";
-    if (sell.disabled) sell.title = `${agent.name} is mid-job`;
-    sell.addEventListener("click", () => {
-      if (!confirm(`Sell ${agent.name} for $${refund.toLocaleString()}?`)) return;
-      try {
+    row.appendChild(locateButton(agent.name, agent.pos));
+
+    const refund = agent.purchaseCost ?? (agent.size ? agentPrice(agent.kind as EquipmentKind, agent.size) : 0);
+    row.appendChild(
+      iconButton("💰", agent.state !== "idle" ? `${agent.name} is mid-job` : `Sell · $${refund.toLocaleString()}`, agent.state !== "idle", () => {
+        if (!confirm(`Sell ${agent.name} for $${refund.toLocaleString()}?`)) return;
         const { refund: paid } = sellAgent(save, agent.id);
-        updateHud();
-        updateAgentMarkers();
-        refreshEquipTab(true);
-        refreshQueuePanel();
+        afterFleetChange();
         toast(`💰 Sold ${agent.name} for $${paid.toLocaleString()}`);
-      } catch (err) {
-        toast("❌ " + (err as Error).message, 3500);
-      }
-    });
-    row.appendChild(sell);
-
+      }),
+    );
     rows.appendChild(row);
   }
+
+  // Plows parked in the yard (unattached) — attached ones show on their tractor.
+  for (const impl of save.implements) {
+    if (impl.attachedTo) continue;
+    const ft = gameConfig.equipment.plow[impl.size].widthFt;
+    const refund = impl.purchaseCost ?? implementPrice(impl.kind, impl.size);
+    const row = document.createElement("div");
+    row.className = "equip-row implement";
+    row.innerHTML = `
+      <span class="icon">🔧</span>
+      <span class="er-info">
+        <div class="er-name">${implementName(save, impl)}</div>
+        <div class="er-status">In the yard · ${ft} ft wide</div>
+      </span>`;
+    row.appendChild(
+      iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, () => {
+        if (!confirm(`Sell ${implementName(save, impl)} for $${refund.toLocaleString()}?`)) return;
+        const { refund: paid } = sellImplement(save, impl.id);
+        afterFleetChange();
+        toast(`💰 Sold for $${paid.toLocaleString()}`);
+      }),
+    );
+    rows.appendChild(row);
+  }
+}
+
+/** A <select> to hitch/unhitch a plow on `tractor` (its size class or smaller). */
+function plowSelector(tractor: Agent): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "er-hitch";
+  const attached = save.implements.find((i) => i.attachedTo === tractor.id && i.kind === "plow");
+  const options = save.implements.filter(
+    (i) => i.kind === "plow" && tractor.size && canPull(tractor.size, i.size) && (!i.attachedTo || i.id === attached?.id),
+  );
+  const sel = document.createElement("select");
+  sel.className = "hitch-select";
+  sel.disabled = tractor.state !== "idle";
+  sel.title = tractor.state !== "idle" ? "Can't change implements mid-job" : "Hitch a plow";
+  const none = new Option("— no plow —", "");
+  none.selected = !attached;
+  sel.add(none);
+  for (const impl of options) {
+    const ft = gameConfig.equipment.plow[impl.size].widthFt;
+    const o = new Option(`${implementName(save, impl)} (${ft}ft)`, impl.id);
+    if (impl.id === attached?.id) o.selected = true;
+    sel.add(o);
+  }
+  sel.addEventListener("change", () => {
+    try {
+      if (sel.value === "") {
+        if (attached) detachImplement(save, attached.id);
+      } else {
+        attachImplement(save, tractor.id, sel.value);
+      }
+      afterFleetChange();
+    } catch (err) {
+      toast("❌ " + (err as Error).message, 3500);
+      refreshEquipTab(true);
+    }
+  });
+  wrap.appendChild(sel);
+  return wrap;
+}
+
+function locateButton(name: string, pos: Meters): HTMLButtonElement {
+  return iconButton("📍", `Fly to ${name}`, false, () => {
+    mapRef.flyTo({ center: toLngLat(pos), zoom: Math.max(mapRef.getZoom(), 14) });
+  });
+}
+
+function iconButton(label: string, title: string, disabled: boolean, onClick: () => void): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.className = "er-btn";
+  btn.textContent = label;
+  btn.title = title;
+  btn.disabled = disabled;
+  btn.addEventListener("click", () => {
+    try {
+      onClick();
+    } catch (err) {
+      toast("❌ " + (err as Error).message, 3500);
+    }
+  });
+  return btn;
 }
 
 // ---------------------------------------------------------------------------

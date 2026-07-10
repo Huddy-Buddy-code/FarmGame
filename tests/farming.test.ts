@@ -8,6 +8,8 @@ import {
 import {
   ensureAgents, enqueueTask, cancelTask, tickTasks, autoManageAll,
   effectiveStatus, isFieldHarvesting, taskCost, buyAgent, sellAgent,
+  buyImplement, sellImplement, attachImplement, detachImplement,
+  agentPrice, implementPrice, canPull,
 } from "../src/sim/tasks";
 import { sellGrain } from "../src/sim/economy";
 import {
@@ -15,6 +17,7 @@ import {
   getDaysPerMonth, setDaysPerMonth,
 } from "../src/sim/calendar";
 import { gameConfig } from "../src/config/gameConfig";
+import { boundsOf } from "../src/geo/geometry";
 import type { Meters } from "../src/geo/coords";
 
 beforeAll(() => setProjection(15, "N"));
@@ -46,6 +49,20 @@ function runWorld(save: SaveState, from: number, minutes: number, step = 60): nu
     tickFarming(save, now);
     autoManageAll(save, now);
     tickTasks(save, now, dt, () => 0.5);
+  }
+  return now;
+}
+
+/** Drive the world from `from` in `step`-minute ticks until `done()` or the cap.
+ * Used for the PHYSICAL work model where a job's duration emerges from field
+ * size × implement width rather than a known acres/hour rate. */
+function runUntil(save: SaveState, from: number, done: () => boolean, capMinutes = 200_000, step = 120): number {
+  let now = from;
+  while (!done() && now - from < capMinutes) {
+    now += step;
+    tickFarming(save, now);
+    autoManageAll(save, now);
+    tickTasks(save, now, step, () => 0.5);
   }
   return now;
 }
@@ -126,20 +143,23 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     expect(() => enqueueTask(save, field, "plant", APRIL_1, "corn")).toThrow(/cash/);
   });
 
-  it("the tractor drives out and plows at the configured rate (realistic hours)", () => {
+  it("the tractor drives out and plows over sim-time (physical: drives the field)", () => {
     const save = gameWithAgents();
     const field = freshField("stubble");
     save.fields.push(field);
     enqueueTask(save, field, "plow", 0);
 
-    // 100 ac at plowAcresPerHour → this many minutes of work (plus a short drive).
-    const workMin = (100 / gameConfig.work.plowAcresPerHour) * 60;
-    runWorld(save, 0, workMin * 0.5, 30);
-    expect(field.status).toBe("stubble"); // halfway: still working, not magically done
-    expect(save.agents.find((a) => a.kind === "tractor")!.state).toBe("working");
-    runWorld(save, workMin * 0.5, workMin * 0.6, 30);
+    // A couple of sim-hours in: driving/working, nowhere near done (a 100-ac
+    // field at a 10-ft swath is a long route). The tractor should be moving.
+    runWorld(save, 0, 120, 30);
+    const tractor = save.agents.find((a) => a.kind === "tractor")!;
+    expect(field.status).toBe("stubble");
+    expect(tractor.state === "working" || tractor.state === "traveling").toBe(true);
+    // Drive to completion.
+    runUntil(save, 120, () => field.status === "tilled");
     expect(field.status).toBe("tilled");
     expect(save.tasks).toHaveLength(0);
+    expect(tractor.state).toBe("idle");
   });
 
   it("a queued plant waits for the plow, then the tractor does both in order", () => {
@@ -149,9 +169,7 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     enqueueTask(save, field, "plow", APRIL_1);
     enqueueTask(save, field, "plant", APRIL_1, "corn");
 
-    const plowMin = (100 / gameConfig.work.plowAcresPerHour) * 60;
-    const plantMin = (100 / gameConfig.work.seedAcresPerHour) * 60;
-    runWorld(save, APRIL_1, (plowMin + plantMin) * 1.1, 30);
+    runUntil(save, APRIL_1, () => field.status === "planted");
     expect(field.status).toBe("planted");
     expect(field.crop).toBe("corn");
     const cfg = gameConfig.crops.corn;
@@ -173,12 +191,12 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     tickFarming(save, ready);
     enqueueTask(save, field, "harvest", ready);
 
-    const harvestMin = (100 / gameConfig.work.harvestAcresPerHour) * 60;
-    runWorld(save, ready, harvestMin * 0.5, 30);
+    // Partway: harvesting, grain banking but not yet complete.
+    runWorld(save, ready, 120, 30);
     expect(isFieldHarvesting(save, field.id)).toBe(true);
     expect(save.grain.corn).toBeGreaterThan(0);
     expect(save.grain.corn).toBeLessThan(100 * truth);
-    runWorld(save, ready + harvestMin * 0.5, harvestMin * 0.6, 30);
+    runUntil(save, ready + 120, () => field.status === "harvested");
     expect(field.status).toBe("harvested");
     expect(field.crop).toBeUndefined();
     expect(save.grain.corn).toBeCloseTo(100 * truth, 0);
@@ -237,47 +255,62 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
   });
 });
 
-describe("equipment: buy & sell machines (brief §8 capital)", () => {
-  it("buying charges the config price; a second machine gets a numbered name", () => {
+describe("equipment: sizes, implements, buy/sell/attach (brief §8 capital)", () => {
+  it("the starting fleet is a medium tractor + medium combine + medium plow hitched", () => {
     const save = gameWithAgents();
-    const cash = save.money;
-    const t2 = buyAgent(save, "tractor", [0, 0]);
-    expect(save.money).toBe(cash - gameConfig.equipmentPrices.tractor);
-    expect(t2.name).toBe("Tractor 2");
-    expect(save.agents.filter((a) => a.kind === "tractor")).toHaveLength(2);
-    save.money = 0;
-    expect(() => buyAgent(save, "harvester", [0, 0])).toThrow(/cash/);
+    const tractor = save.agents.find((a) => a.kind === "tractor")!;
+    const combine = save.agents.find((a) => a.kind === "harvester")!;
+    expect(tractor.size).toBe("medium");
+    expect(combine.size).toBe("medium");
+    const plow = save.implements.find((i) => i.kind === "plow")!;
+    expect(plow.size).toBe("medium");
+    expect(plow.attachedTo).toBe(tractor.id); // ready to plow out of the box
   });
 
-  it("selling refunds the purchase price; refuses mid-job or when it's the only one with work waiting", () => {
+  it("buying charges the size price; a second tractor gets a numbered, sized name", () => {
     const save = gameWithAgents();
+    const cash = save.money;
+    const t2 = buyAgent(save, "tractor", "large", [0, 0]);
+    expect(save.money).toBe(cash - agentPrice("tractor", "large"));
+    expect(t2.name).toBe("Large Tractor");
+    expect(t2.size).toBe("large");
+    save.money = 0;
+    expect(() => buyAgent(save, "harvester", "medium", [0, 0])).toThrow(/cash/);
+  });
+
+  it("pull-size rule: a tractor pulls its own class or smaller", () => {
+    expect(canPull("large", "small")).toBe(true);
+    expect(canPull("medium", "medium")).toBe(true);
+    expect(canPull("small", "medium")).toBe(false);
+
+    const save = gameWithAgents();
+    const small = buyAgent(save, "tractor", "small", [0, 0]);
+    const bigPlow = buyImplement(save, "plow", "large");
+    expect(() => attachImplement(save, small.id, bigPlow.id)).toThrow(/can't pull/);
+    const smallPlow = buyImplement(save, "plow", "small");
+    expect(() => attachImplement(save, small.id, smallPlow.id)).not.toThrow();
+    expect(smallPlow.attachedTo).toBe(small.id);
+  });
+
+  it("plowing needs a plow: with none available, the task waits", () => {
+    const save = gameWithAgents();
+    // Remove the seeded plow entirely.
+    const plow = save.implements.find((i) => i.kind === "plow")!;
+    detachImplement(save, plow.id);
+    sellImplement(save, plow.id);
     const field = freshField("stubble");
     save.fields.push(field);
     enqueueTask(save, field, "plow", 0);
-    tickTasks(save, 30, 30); // tractor picks it up
-    const tractor = save.agents.find((a) => a.kind === "tractor")!;
-    expect(() => sellAgent(save, tractor.id)).toThrow(/mid-job/);
-
-    // An idle combine with no harvest work sells fine, at the purchase price.
-    const combine = save.agents.find((a) => a.kind === "harvester")!;
-    const cash = save.money;
-    const { refund } = sellAgent(save, combine.id);
-    expect(refund).toBe(gameConfig.equipmentPrices.harvester);
-    expect(save.money).toBe(cash + refund);
-    expect(save.agents.some((a) => a.kind === "harvester")).toBe(false);
-
-    // Can't sell the only tractor while plow/plant jobs still queue for it.
-    const save2 = gameWithAgents();
-    const f2 = freshField("stubble");
-    save2.fields.push(f2);
-    enqueueTask(save2, f2, "plow", 0);
-    const t = save2.agents.find((a) => a.kind === "tractor")!;
-    expect(() => sellAgent(save2, t.id)).toThrow(/only tractor/);
+    runWorld(save, 0, 600, 60);
+    // No plow anywhere → the tractor never starts; the field stays stubble.
+    expect(field.status).toBe("stubble");
+    expect(save.tasks[0]!.status).toBe("queued");
   });
 
-  it("buying more machines makes work run in parallel across fields", () => {
+  it("buys a second plow and auto-hitches it so two tractors plow in parallel", () => {
     const save = gameWithAgents();
-    buyAgent(save, "tractor", [0, 0]);
+    buyAgent(save, "tractor", "medium", [0, 0]); // tractor-2, bare
+    buyImplement(save, "plow", "medium"); // a second, unattached plow
     const f1 = freshField("stubble");
     const f2: Field = { id: "field-2", parcelId: "parcel-2", boundary, status: "stubble" };
     save.fields.push(f1, f2);
@@ -286,7 +319,77 @@ describe("equipment: buy & sell machines (brief §8 capital)", () => {
     tickTasks(save, 30, 30);
     const working = save.tasks.filter((t) => t.status === "active");
     expect(working).toHaveLength(2);
-    expect(new Set(working.map((t) => t.agentId)).size).toBe(2);
+    expect(new Set(working.map((t) => t.agentId)).size).toBe(2); // two different tractors
+  });
+
+  it("selling refunds the purchase price; refuses mid-job or the last of its kind with work", () => {
+    const save = gameWithAgents();
+    const field = freshField("stubble");
+    save.fields.push(field);
+    enqueueTask(save, field, "plow", 0);
+    runWorld(save, 0, 60, 30); // tractor picks it up and starts
+    const tractor = save.agents.find((a) => a.kind === "tractor")!;
+    expect(() => sellAgent(save, tractor.id)).toThrow(/mid-job/);
+
+    // An idle combine with no harvest work sells fine, at its purchase price.
+    const combine = save.agents.find((a) => a.kind === "harvester")!;
+    const cash = save.money;
+    const { refund } = sellAgent(save, combine.id);
+    expect(refund).toBe(agentPrice("harvester", "medium"));
+    expect(save.money).toBe(cash + refund);
+    expect(save.agents.some((a) => a.kind === "harvester")).toBe(false);
+
+    // Can't sell the only tractor while plow jobs still queue for it.
+    const save2 = gameWithAgents();
+    const f2 = freshField("stubble");
+    save2.fields.push(f2);
+    enqueueTask(save2, f2, "plow", 0);
+    const t = save2.agents.find((a) => a.kind === "tractor")!;
+    expect(() => sellAgent(save2, t.id)).toThrow(/only tractor/);
+  });
+
+  it("the working tractor drives a serpentine across the field (the visual sweep)", () => {
+    const save = gameWithAgents();
+    const field = freshField("stubble");
+    save.fields.push(field);
+    enqueueTask(save, field, "plow", 0);
+    const tractor = save.agents.find((a) => a.kind === "tractor")!;
+
+    const xs: number[] = [];
+    let now = 0;
+    for (let i = 0; i < 600 && field.status !== "tilled"; i++) {
+      now += 30;
+      tickFarming(save, now);
+      tickTasks(save, now, 30, () => 0.5);
+      if (tractor.state === "working") {
+        xs.push(tractor.pos[0]);
+        expect(tractor.heading).toBeDefined(); // faces its driving direction
+      }
+    }
+    expect(field.status).toBe("tilled");
+    // Back-and-forth: the along-lane coordinate both increases and decreases.
+    let up = false;
+    let down = false;
+    for (let i = 1; i < xs.length; i++) {
+      if (xs[i]! > xs[i - 1]! + 0.01) up = true;
+      if (xs[i]! < xs[i - 1]! - 0.01) down = true;
+    }
+    expect(up && down).toBe(true);
+    // And it stayed within the field (plus a small turn-headland margin).
+    const [minE, , maxE] = boundsOf(boundary);
+    expect(Math.min(...xs)).toBeGreaterThanOrEqual(minE - 15);
+    expect(Math.max(...xs)).toBeLessThanOrEqual(maxE + 15);
+  });
+
+  it("selling a tractor drops its implement back to the yard (kept, not sold)", () => {
+    const save = gameWithAgents();
+    const tractor = save.agents.find((a) => a.kind === "tractor")!;
+    const plow = save.implements.find((i) => i.kind === "plow")!;
+    expect(plow.attachedTo).toBe(tractor.id);
+    sellAgent(save, tractor.id);
+    expect(save.implements.some((i) => i.id === plow.id)).toBe(true);
+    expect(plow.attachedTo).toBeUndefined();
+    expect(implementPrice("plow", "medium")).toBeGreaterThan(0);
   });
 });
 
@@ -297,25 +400,23 @@ describe("auto-manage (idle mode, player-requested)", () => {
     field.autoManage = true;
     save.fields.push(field);
 
-    // March: plowing queues immediately (no season restriction) and completes.
-    runWorld(save, 0, 2 * MINUTES_PER_DAY, 60);
+    // March: auto-manage queues the plow (no season restriction); drive until tilled.
+    let now = runUntil(save, 0, () => field.status === "tilled", 5 * MINUTES_PER_DAY);
     expect(field.status).toBe("tilled");
 
-    // Rest of March (stop a day short of April): still tilled — corn's window
-    // (Apr–May) hasn't opened yet.
-    runWorld(save, 2 * MINUTES_PER_DAY, APRIL_1 - 3 * MINUTES_PER_DAY, MINUTES_PER_DAY);
-    expect(field.status).toBe("tilled");
+    // Still March: no planting window yet, so nothing plants.
+    now = runWorld(save, now, Math.max(0, APRIL_1 - MINUTES_PER_DAY - now), MINUTES_PER_DAY);
+    expect(field.crop).toBeUndefined();
 
-    // April: window opens — auto-manage queues the plant and the tractor sows it.
-    runWorld(save, APRIL_1 - MINUTES_PER_DAY, 3 * MINUTES_PER_DAY, 60);
-    expect(field.status).toBe("planted");
+    // April: window opens — auto-manage plants corn; drive until it's in the ground.
+    now = runUntil(save, now, () => field.crop === "corn", 10 * MINUTES_PER_DAY);
     expect(field.crop).toBe("corn");
 
-    // Grow to ready, then the combine auto-harvests and the loop re-plows.
-    const ready = APRIL_1 + 2 * MINUTES_PER_DAY + gameConfig.crops.corn.growMonths * minutesPerMonth();
-    runWorld(save, ready, 3 * MINUTES_PER_DAY, 60);
+    // Let it ripen, auto-harvest, and re-plow for next season.
+    const grow = gameConfig.crops.corn.growMonths * minutesPerMonth();
+    runUntil(save, now, () => save.grain.corn > 0 && field.status === "tilled", grow + 30 * MINUTES_PER_DAY);
     expect(save.grain.corn).toBeGreaterThan(0);
-    expect(field.status).toBe("tilled"); // already re-plowed for next season
+    expect(field.status).toBe("tilled"); // re-plowed itself for the next cycle
   });
 
   it("silently waits (doesn't throw) when a step isn't affordable or in season", () => {
