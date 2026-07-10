@@ -3,8 +3,9 @@
 _Update at the end of every session (brief §13)._
 
 **Last session:** 2026-07-09 (cont'd again). Sell-field-back, a Fields tab (list +
-expected yield), rounded/soft-edged field rendering (no more sharp corners or a
-crisp white border), and an editable days-per-month pace knob. 26 tests green.
+expected yield), an editable days-per-month pace knob, and a run of field-rendering
+polish (iterated with the maintainer): texture-matched soft border + slight
+fixed-distance corner bevel. Plus middle-mouse-drag panning. 26 tests green.
 
 ---
 
@@ -143,14 +144,21 @@ slice of 5 (placeholder sale) are DONE. Next: **move the grain for real** (§12 
   status (incl. "harvesting"), acres, 🤖 auto-manage marker, and expected total
   yield range (reuses `yieldRange()`). Click a row to open that field's detail
   panel. Refreshes live while open (same ~2×/s cadence as the HUD).
-- **Rounded, natural field rendering**: `smoothPolygon()` (new, `geo/geometry.ts`)
-  applies Chaikin corner-cutting — display-only, the stored `field.boundary` used
-  for area/hit-testing/auto-manage is never touched. Used for both the canvas
-  texture's clip path (`fieldRender.ts`) and the outline polygon (`fields.ts`);
-  crop-row direction still reads off the TRUE boundary so rows don't skew.
-  Outline is now two soft-blurred layers (a wide low-opacity glow + a thin
-  translucent core, warm cream instead of solid white) instead of a crisp 2px
-  white line — reads like a natural tilled-ground edge, not a survey line.
+- **Rounded, natural field rendering** (`smoothPolygon()`, new in `geo/geometry.ts`)
+  — display-only corner-cutting; the stored `field.boundary` used for
+  area/hit-testing/auto-manage is never touched. Used for both the canvas texture
+  clip (`fieldRender.ts`) and the outline polygon (`fields.ts`); crop-row direction
+  still reads off the TRUE boundary so rows don't skew. **Tuned over several
+  maintainer rounds** to its current form:
+  - **Corner bevel** is now a FIXED ~10 m cut per corner (`maxCutMeters`, not a
+    percentage — a fraction over-rounded big fields), 2 iterations for a slight
+    bevel + gentle fillet. Knob: `maxCutMeters` (lower = sharper).
+  - **Border** is a thick, blurry, zoom-scaled feather **tinted to match the
+    field's own texture** (per-field `color` property + data-driven `["get","color"]`
+    paint) — no more white/cream line. Colour comes from `fieldEdgeColor()`, driven
+    by the shared `palette()` in `fieldRender.ts` (single source of truth for the
+    texture's base/dark/light tones, so outline and fill can't drift). Growing
+    fields' edges follow the soil→canopy lerp; ready follows the crop.
 - **Editable calendar pace** (maintainer request: lower month length toward 5
   days): `calendar.ts`'s `DAYS_PER_MONTH`/`MINUTES_PER_MONTH` consts became mutable
   module state (`getDaysPerMonth()` / `setDaysPerMonth()` / `minutesPerMonth()` —
@@ -160,6 +168,12 @@ slice of 5 (placeholder sale) are DONE. Next: **move the grain for real** (§12 
   days always — shortening a month changes how fast the CALENDAR turns, never how
   long a crop takes to grow. Persisted alongside the save (`PersistedGame.daysPerMonth`,
   optional so old saves still load and just default to 30).
+- **Middle-mouse-drag panning** (`wireMiddleMousePan` in `main.ts`): left-click is
+  taken by field select / drawing, so panning got the middle button. MapLibre has
+  no built-in middle-button pan, so we drive `panBy()` from raw pointer deltas
+  (mousedown button 1 + `preventDefault` to kill autoscroll; window-level move/up so
+  a drag off the canvas still tracks). Left-drag select, right-drag rotate, and
+  scroll-zoom are untouched.
 - Tests: 26 total (up from 18) — new `tests/fields.test.ts` (sellField), calendar
   pace test, 3 new `smoothPolygon` shape tests in `geometry.test.ts`.
 
@@ -188,13 +202,14 @@ slice of 5 (placeholder sale) are DONE. Next: **move the grain for real** (§12 
    ready in fieldRender.ts's row textures, just not wired to a time-over-distance model).
 
 ### Notes for next session
-- **This session's changes (sell field, Fields tab, rounded/blurred rendering, the
-  days-per-month dropdown) are typecheck+test verified but NOT yet visually
-  confirmed in-browser** — the maintainer asked to stop using the browser-preview
-  tool (too slow) partway through. Worth a real look next session, especially:
-  the smoothed-corner texture + soft outline actually reading well over NAIP at
-  various zooms, and the timebar not overflowing now that it has 4 buttons + 2
-  dropdowns.
+- **Verification status:** Claude stopped driving the browser-preview tool
+  (maintainer: too slow), so everything is typecheck+test verified only, WITH two
+  exceptions the maintainer eyeballed via their own screenshots: the **field
+  border/feather and corner bevel** were iterated to their liking (that's why
+  there are several render commits). Still NOT visually confirmed by anyone:
+  the **Fields tab** layout, the **sell-field** flow, the **days-per-month
+  dropdown** (+ whether the timebar overflows now with 4 buttons + 2 dropdowns),
+  and **middle-mouse panning**. Worth a pass next session.
 - **Idle auto-manage** still hasn't been played for real unattended hours; only
   unit-tested end-to-end plus one instant-toggle browser check from a prior
   session.
