@@ -51,6 +51,9 @@ export interface Field {
    * plows, plants, and harvests itself the moment each is possible, so the
    * player can walk away and the farm keeps running. */
   autoManage?: boolean;
+  /** What was actually paid for this land — refunded in full if it's sold back
+   * (maintainer request: sell-back price = purchase price, not a market rate). */
+  purchaseCost?: number;
 }
 
 /** On-farm grain bin, tons per crop. Unlimited in this slice; storage limits and

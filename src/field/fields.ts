@@ -16,12 +16,12 @@ import type { Feature, FeatureCollection } from "geojson";
 
 import { toLngLat } from "../geo/coords";
 import type { Meters } from "../geo/coords";
-import { boundsOf, padBounds, areaAcres } from "../geo/geometry";
+import { boundsOf, padBounds, areaAcres, smoothPolygon } from "../geo/geometry";
 import { gameConfig } from "../config/gameConfig";
 import type { SaveState, Field } from "../state/saveState";
 import type { OverlayEngine } from "../map/overlay";
 import { paintField } from "./fieldRender";
-import { growthProgress } from "../sim/farming";
+import { growthProgress, isHarvesting } from "../sim/farming";
 import type { SimTime } from "../sim/clock";
 
 const seq: Record<string, number> = {};
@@ -62,12 +62,52 @@ export function buyFieldFromBoundary(
   const parcelId = nextId("parcel");
   const fieldId = nextId("field");
   save.parcels.push({ id: parcelId, boundary, owned: true });
-  const field: Field = { id: fieldId, parcelId, boundary, status: "stubble" };
+  // Remember what was actually paid, so selling later refunds THAT — not a
+  // recompute at the (possibly different, once land prices become dynamic) rate.
+  const field: Field = { id: fieldId, parcelId, boundary, status: "stubble", purchaseCost: cost };
   save.fields.push(field);
   save.money -= cost;
 
   renderField(map, overlay, field, 0); // fresh stubble; growth time is irrelevant
   return { field, acres, cost };
+}
+
+export interface SellFieldResult {
+  field: Field;
+  refund: number;
+}
+
+/**
+ * Sell a field back for exactly what it cost to buy (maintainer request — not a
+ * market resale value, the literal purchase price). Whatever's growing on it is
+ * forfeited: no partial refund for inputs already paid. Removes the field, its
+ * parcel, and its map rendering; throws if it's mid-harvest (nothing to hand back
+ * a half-cut field to).
+ */
+export function sellField(map: MlMap, overlay: OverlayEngine, save: SaveState, fieldId: string): SellFieldResult {
+  const idx = save.fields.findIndex((f) => f.id === fieldId);
+  if (idx === -1) throw new Error(`Field ${fieldId} not found`);
+  const field = save.fields[idx]!;
+  if (isHarvesting(field)) {
+    throw new Error(`Can't sell ${field.id} while it's mid-harvest`);
+  }
+
+  const refund = field.purchaseCost ?? Math.round(areaAcres(field.boundary) * gameConfig.landPricePerAcre);
+  save.fields.splice(idx, 1);
+  const parcelIdx = save.parcels.findIndex((p) => p.id === field.parcelId);
+  if (parcelIdx !== -1) save.parcels.splice(parcelIdx, 1);
+  save.money += refund;
+
+  removeFieldRender(map, overlay, field);
+  return { field, refund };
+}
+
+/** Tear down a field's map presence: its overlay texture surface and outline. */
+export function removeFieldRender(map: MlMap, overlay: OverlayEngine, field: Field): void {
+  overlay.remove(field.id);
+  outlineFeatures.delete(field.id);
+  const src = map.getSource("field-outlines") as GeoJSONSource | undefined;
+  if (src) src.setData({ type: "FeatureCollection", features: [...outlineFeatures.values()] });
 }
 
 /** Render (or re-render) a field: procedural status texture + boundary outline.
@@ -89,16 +129,23 @@ export function renderField(map: MlMap, overlay: OverlayEngine, field: Field, no
 // Accumulates outline features so setData can rebuild the whole collection.
 const outlineFeatures = new Map<string, Feature>();
 
-/** Vector outline of every field boundary, so the edge reads crisply on the imagery. */
+/**
+ * Vector outline of every field boundary — rounded (smoothPolygon, matching the
+ * texture's rounded clip) and soft-edged rather than a crisp surveyor's line, so
+ * it reads as a natural tilled-ground edge instead of a UI overlay. Two stacked
+ * layers: a wide, blurred, low-opacity warm glow, then a thinner, still slightly
+ * blurred core — no hard 1px white line anywhere.
+ */
 function drawOutline(map: MlMap, field: Field): void {
   const sourceId = "field-outlines";
+  const smoothed = smoothPolygon(field.boundary);
   outlineFeatures.set(field.id, {
     type: "Feature",
     id: field.id,
     properties: { id: field.id },
     geometry: {
       type: "Polygon",
-      coordinates: [[...field.boundary, field.boundary[0]!].map((m) => toLngLat(m))],
+      coordinates: [[...smoothed, smoothed[0]!].map((m) => toLngLat(m))],
     },
   });
   const data: FeatureCollection = {
@@ -113,11 +160,28 @@ function drawOutline(map: MlMap, field: Field): void {
   }
   map.addSource(sourceId, { type: "geojson", data });
   map.addLayer({
+    id: "field-outlines-glow",
+    type: "line",
+    source: sourceId,
+    layout: { "line-join": "round", "line-cap": "round" },
+    paint: {
+      "line-color": "#fff3d6",
+      "line-width": 7,
+      "line-opacity": 0.28,
+      "line-blur": 3,
+    },
+  });
+  map.addLayer({
     id: "field-outlines",
     type: "line",
     source: sourceId,
-    layout: { "line-join": "round" },
-    paint: { "line-color": "#ffffff", "line-width": 2, "line-opacity": 0.9 },
+    layout: { "line-join": "round", "line-cap": "round" },
+    paint: {
+      "line-color": "#fdf6e3",
+      "line-width": 2.2,
+      "line-opacity": 0.6,
+      "line-blur": 1,
+    },
   });
 }
 

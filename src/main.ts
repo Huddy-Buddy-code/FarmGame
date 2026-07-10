@@ -24,13 +24,14 @@ import { addRoadsLayer } from "./map/roadsLayer";
 import { OverlayEngine } from "./map/overlay";
 import { newGame } from "./state/saveState";
 import type { SaveState, Field } from "./state/saveState";
-import { buyFieldFromBoundary, renderField, initIdCounters } from "./field/fields";
+import { buyFieldFromBoundary, renderField, initIdCounters, sellField } from "./field/fields";
 import { persistGame, loadGame, clearSavedGame } from "./state/persistence";
 import { sellGrain } from "./sim/economy";
 import { SimClock } from "./sim/clock";
 import {
   formatDate, dateOf, nextMonthStart, MONTH_NAMES, MONTH_SHORT,
-  START_MONTH, DAYS_PER_MONTH, MONTHS_PER_YEAR, MINUTES_PER_MONTH, MINUTES_PER_DAY,
+  START_MONTH, MONTHS_PER_YEAR, MINUTES_PER_DAY,
+  getDaysPerMonth, setDaysPerMonth, minutesPerMonth,
 } from "./sim/calendar";
 import {
   plant, tickFarming, growthProgress, yieldRange, startHarvest, isHarvesting,
@@ -51,6 +52,7 @@ if (loaded) {
   clock.setTime(loaded.clockNow);
   restoreHarvesting(loaded.harvestingIds);
   initIdCounters(save);
+  if (loaded.daysPerMonth) setDaysPerMonth(loaded.daysPerMonth);
 }
 
 // Only one map interaction is active at a time.
@@ -111,6 +113,7 @@ async function main() {
     wireTimeControls();
     buildCropCalendar();
     wireInventory();
+    wireFieldsTab();
     wirePersistence();
     // Re-render every field from the loaded save (textures + outlines).
     for (const f of save.fields) renderField(map, overlay, f, clock.time());
@@ -154,6 +157,7 @@ function tickWorld(prev: number) {
     lastUiRefresh = rt;
     updateHud();
     if (selectedFieldId) refreshFieldPanel();
+    refreshFieldsTab();
   }
 }
 
@@ -221,7 +225,8 @@ function updateHud() {
 
 /** 0..1 through the campaign's display year, which runs Mar 1 → end of Feb. */
 function yearFraction(t: number): number {
-  return (t % (MONTHS_PER_YEAR * MINUTES_PER_MONTH)) / (MONTHS_PER_YEAR * MINUTES_PER_MONTH);
+  const minutesPerYear = MONTHS_PER_YEAR * minutesPerMonth();
+  return (t % minutesPerYear) / minutesPerYear;
 }
 
 /** 0..1 through the current game day, midnight (0:00) = 0. */
@@ -283,13 +288,69 @@ function refreshInventory() {
 }
 
 // ---------------------------------------------------------------------------
+// Fields tab: every owned field at a glance — status, acres, expected yield.
+// Click a row to open its detail panel (where Plow/Plant/Harvest/Sell live).
+// ---------------------------------------------------------------------------
+function wireFieldsTab() {
+  $("btn-fields").addEventListener("click", () => {
+    const el = $("fieldstab");
+    const opening = el.style.display !== "block";
+    el.style.display = opening ? "block" : "none";
+    if (opening) refreshFieldsTab();
+  });
+  $("fields-close").addEventListener("click", () => ($("fieldstab").style.display = "none"));
+}
+
+/** Rebuild the fields list. Cheap no-op while the panel is hidden. */
+function refreshFieldsTab() {
+  const el = $("fieldstab");
+  if (el.style.display !== "block") return;
+
+  const rows = $("fields-rows");
+  if (save.fields.length === 0) {
+    rows.innerHTML = `<div id="fields-empty">No fields yet — 🚜 Buy Field to start your farm.</div>`;
+    return;
+  }
+
+  const now = clock.time();
+  rows.innerHTML = "";
+  for (const field of save.fields) {
+    const acres = areaAcres(field.boundary);
+    const statusLabel = isHarvesting(field) ? "harvesting" : field.status;
+
+    let icon = "🟫";
+    let yieldText = "—";
+    if (field.crop) {
+      icon = gameConfig.crops[field.crop].emoji;
+      const range = yieldRange(field, now);
+      if (range) yieldText = `${(range.low * acres).toFixed(0)}–${(range.high * acres).toFixed(0)} t`;
+    }
+
+    const row = document.createElement("div");
+    row.className = "field-row";
+    row.innerHTML = `
+      <span class="icon">${icon}</span>
+      <span class="fr-info">
+        <div class="fr-name">${prettyId(field.id)}</div>
+        <div class="fr-sub">${acres.toFixed(1)} ac · ${statusLabel}${field.autoManage ? " · 🤖" : ""}</div>
+      </span>
+      <span class="fr-yield">${yieldText}</span>`;
+    row.addEventListener("click", () => {
+      el.style.display = "none";
+      openFieldPanel(field.id);
+    });
+    rows.appendChild(row);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Persistence: auto-save + the Reset button.
 // ---------------------------------------------------------------------------
 let resetting = false;
 
 function doSave() {
   if (resetting) return; // a reset is wiping the save — don't write it back
-  persistGame({ save, clockNow: clock.time(), harvestingIds: getHarvestingIds() });
+  persistGame({ save, clockNow: clock.time(), harvestingIds: getHarvestingIds(), daysPerMonth: getDaysPerMonth() });
 }
 
 function wirePersistence() {
@@ -357,6 +418,18 @@ function wireTimeControls() {
     sel.value = "";
     runMontage(target);
   });
+
+  // Calendar pace knob: how many days make up a game month. Purely a display/
+  // pacing setting (crop grow times stay in real days — see calendar.ts) so
+  // changing it is safe mid-campaign; only the crop-calendar bands need a redraw.
+  const daysSel = $("days-per-month") as HTMLSelectElement;
+  daysSel.value = String(getDaysPerMonth());
+  daysSel.addEventListener("change", () => {
+    setDaysPerMonth(Number(daysSel.value));
+    rebuildCropCalendarGrid();
+    updateHud();
+    toast(`🗓️ Month length set to ${daysSel.value} days`);
+  });
 }
 
 /**
@@ -414,8 +487,22 @@ function restoreSpeed(paused: boolean) {
 // derived from gameConfig (plant windows + grow time) — no hand-kept data.
 // ---------------------------------------------------------------------------
 function buildCropCalendar() {
+  rebuildCropCalendarGrid();
+
+  $("btn-cropcal").addEventListener("click", () => {
+    const el = $("cropcal");
+    el.style.display = el.style.display === "block" ? "none" : "block";
+    updateHud();
+  });
+  $("cal-close").addEventListener("click", () => ($("cropcal").style.display = "none"));
+}
+
+/** Rebuild the grid from gameConfig. Also called when days-per-month changes,
+ * since the harvest bands' offset (growDays / daysPerMonth) depends on it. */
+function rebuildCropCalendarGrid() {
   const grid = $("cal-grid");
   const disp = (mo: number) => (mo - START_MONTH + MONTHS_PER_YEAR) % MONTHS_PER_YEAR;
+  const daysPerMonth = getDaysPerMonth();
 
   // Season header (the display year aligns with seasons: Mar starts spring).
   let html = `<div></div>`;
@@ -430,7 +517,7 @@ function buildCropCalendar() {
   // One lane per crop with plant + harvest bands (percent of the display year).
   for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
     const cfg = gameConfig.crops[cropId];
-    const growMonths = cfg.growDays / DAYS_PER_MONTH;
+    const growMonths = cfg.growDays / daysPerMonth;
     const plantStart = disp(cfg.plantMonths[0]!);
     const plantLen = cfg.plantMonths.length;
     // Harvest opens a grow-time after the earliest planting and closes a
@@ -450,13 +537,6 @@ function buildCropCalendar() {
   const now = document.createElement("div");
   now.id = "cal-now";
   grid.appendChild(now);
-
-  $("btn-cropcal").addEventListener("click", () => {
-    const el = $("cropcal");
-    el.style.display = el.style.display === "block" ? "none" : "block";
-    updateHud();
-  });
-  $("cal-close").addEventListener("click", () => ($("cropcal").style.display = "none"));
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +603,7 @@ function wireFieldDrawing(map: maplibregl.Map) {
       updateHud();
       toast(`🌾 Bought ${acres.toFixed(1)} ac for $${cost.toLocaleString()}`);
       openFieldPanel(field.id);
+      refreshFieldsTab();
     } catch (err) {
       toast("❌ " + (err as Error).message, 3500);
     }
@@ -557,6 +638,22 @@ function wireFieldSelection(map: maplibregl.Map) {
       toast(`🖐️ ${prettyId(field.id)} is back to manual control`);
     }
     refreshFieldPanel(true);
+  });
+
+  $("fp-sell").addEventListener("click", () => {
+    const field = save.fields.find((f) => f.id === selectedFieldId);
+    if (!field) return;
+    const refund = field.purchaseCost ?? Math.round(areaAcres(field.boundary) * gameConfig.landPricePerAcre);
+    if (!confirm(`Sell ${prettyId(field.id)} for $${refund.toLocaleString()}?`)) return;
+    try {
+      const { refund: paid } = sellField(mapRef, overlay, save, field.id);
+      updateHud();
+      toast(`💰 Sold ${prettyId(field.id)} for $${paid.toLocaleString()}`);
+      closeFieldPanel();
+      refreshFieldsTab();
+    } catch (err) {
+      toast("❌ " + (err as Error).message, 3500);
+    }
   });
 }
 
@@ -602,6 +699,12 @@ function refreshFieldPanel(force = false) {
   const badge = $("fp-status");
   badge.textContent = isHarvesting(field) ? "harvesting" : field.status;
   ($("fp-auto") as HTMLInputElement).checked = auto;
+
+  const refund = field.purchaseCost ?? Math.round(acres * gameConfig.landPricePerAcre);
+  const sellBtn = $("fp-sell") as HTMLButtonElement;
+  sellBtn.textContent = `💰 Sell Field · $${refund.toLocaleString()}`;
+  sellBtn.disabled = isHarvesting(field);
+  sellBtn.title = isHarvesting(field) ? "Can't sell while it's mid-harvest" : "";
 
   const body = $("fp-body");
   const actions = $("fp-actions");

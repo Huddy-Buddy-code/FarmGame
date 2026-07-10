@@ -17,6 +17,7 @@
  */
 
 import type { Meters } from "../geo/coords";
+import { smoothPolygon } from "../geo/geometry";
 import type { FieldStatus } from "../state/saveState";
 import type { CropId } from "../config/gameConfig";
 import type { Surface } from "../map/overlay";
@@ -32,11 +33,15 @@ export interface FieldPaintParams {
 /** Paint the field's current look into `surface`, clipped to `boundary`. */
 export function paintField(surface: Surface, boundary: Meters[], p: FieldPaintParams): void {
   const seed = p.seed ?? 1;
+  // Row direction reads off the TRUE boundary (its longest real edge); only the
+  // clip path is rounded, so smoothing doesn't skew "which way did the farmer
+  // actually plant this field."
   const angle = dominantAngle(boundary, surface);
+  const smoothed = smoothPolygon(boundary);
 
   surface.paint((ctx) => {
     ctx.save();
-    surface.tracePolygon(boundary);
+    surface.tracePolygon(smoothed);
     ctx.clip();
     const w = surface.canvas.width, h = surface.canvas.height;
 

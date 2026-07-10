@@ -17,6 +17,10 @@ export interface PersistedGame {
   save: SaveState;
   clockNow: SimTime;
   harvestingIds: string[];
+  /** Calendar pace knob (brief-adjacent, player-adjustable — see calendar.ts).
+   * Optional so saves from before this setting existed still load: absent means
+   * "use the default" rather than a corrupt save. */
+  daysPerMonth?: number;
 }
 
 export function persistGame(game: PersistedGame): void {

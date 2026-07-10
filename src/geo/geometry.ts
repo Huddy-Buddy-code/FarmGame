@@ -62,6 +62,34 @@ export function pointInPolygon([x, y]: Meters, ring: Meters[]): boolean {
   return inside;
 }
 
+/**
+ * Round a closed ring's corners for DISPLAY ONLY (Chaikin corner-cutting).
+ * Each edge is replaced by two points at 1/4 and 3/4 along it; repeating this a
+ * few times converges toward a smooth rounded outline while staying close to the
+ * original shape. Pure point-list math — no curves/canvas calls — so the exact
+ * same smoothed ring works for both the canvas texture clip and the vector
+ * outline layer (brief §4: draw in geo-space, so smooth in meters before the
+ * lng/lat render conversion, not after).
+ *
+ * Only for rendering: the true polygon (used for area, hit-testing, auto-manage)
+ * is never replaced by this — a drawn field's stored boundary stays exactly what
+ * the player clicked.
+ */
+export function smoothPolygon(ring: Meters[], iterations = 3): Meters[] {
+  let pts = ring;
+  for (let iter = 0; iter < iterations; iter++) {
+    const next: Meters[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const [x0, y0] = pts[i]!;
+      const [x1, y1] = pts[(i + 1) % pts.length]!;
+      next.push([x0 + (x1 - x0) * 0.25, y0 + (y1 - y0) * 0.25]);
+      next.push([x0 + (x1 - x0) * 0.75, y0 + (y1 - y0) * 0.75]);
+    }
+    pts = next;
+  }
+  return pts;
+}
+
 /** Convenience: area in hectares (1 ha = 10,000 m²) and acres (1 ac = 4046.8564 m²). */
 export function areaHectares(ring: Meters[]): number {
   return areaMeters(ring) / 10_000;

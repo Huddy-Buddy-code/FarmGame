@@ -2,21 +2,21 @@
 
 _Update at the end of every session (brief §13)._
 
-**Last session:** 2026-07-09 (cont'd). Realistic field textures, a Plow step in the
-field lifecycle, an Inventory/sell panel (placeholder flat price), speed-button
-tuning, and a per-field **Auto-manage toggle** that plows/plants/harvests itself —
-first real idle-game lever. 18 tests green.
+**Last session:** 2026-07-09 (cont'd again). Sell-field-back, a Fields tab (list +
+expected yield), rounded/soft-edged field rendering (no more sharp corners or a
+crisp white border), and an editable days-per-month pace knob. 26 tests green.
 
 ---
 
 ## Where we are
 
 Hard gate passed (§12.1); county packages; overlay engine live. **The farm now runs a
-real season**: buy land → plow → plant corn/soybeans → watch realistic textures
-change as it grows on the sim clock → yield range narrows → harvest over sim-days
-into the grain bin → **sell** from the Inventory panel. §12 steps 1–3 and a slice of
-5 (placeholder sale) are DONE. Next: **move the grain for real** (§12 step 4) —
-truck + real buyer + local price/fuel — which replaces the placeholder sale.
+real season**: buy land → plow → plant corn/soybeans → watch realistic (now rounded,
+soft-edged) textures change as it grows → yield range narrows → harvest over sim-days
+into the grain bin → **sell grain** from Inventory or **sell the land back** from the
+field panel. A **Fields tab** gives a fleet overview at a glance. §12 steps 1–3 and a
+slice of 5 (placeholder sale) are DONE. Next: **move the grain for real** (§12 step
+4) — truck + real buyer + local price/fuel — which replaces the placeholder sale.
 
 ## Done
 
@@ -131,6 +131,38 @@ truck + real buyer + local price/fuel — which replaces the placeholder sale.
   no text, with a marker showing time-of-day. Purely a mood/flavor readout for now —
   no gameplay reads day/night yet, but the sim clock already has the data (§4).
 
+### Slice 5 — Sell field, Fields tab, rounded/soft rendering, editable calendar pace ✅ (2026-07-09, cont'd again)
+- **Sell a field back** (`sellField()` in `src/field/fields.ts`): refunds exactly
+  `field.purchaseCost` (stored at buy time — NOT recomputed at current land price,
+  so it stays correct once pricing ever becomes dynamic). Falls back to
+  `acres × landPricePerAcre` for pre-upgrade saves that lack the field. Refuses
+  while mid-harvest (nothing sane to hand back). Removes the parcel, the field, its
+  overlay texture surface, and its outline. A persistent **💰 Sell Field** button
+  lives in the field detail panel (works regardless of status).
+- **Fields tab** (toolbar → 🌾 Fields): every owned field at a glance — icon,
+  status (incl. "harvesting"), acres, 🤖 auto-manage marker, and expected total
+  yield range (reuses `yieldRange()`). Click a row to open that field's detail
+  panel. Refreshes live while open (same ~2×/s cadence as the HUD).
+- **Rounded, natural field rendering**: `smoothPolygon()` (new, `geo/geometry.ts`)
+  applies Chaikin corner-cutting — display-only, the stored `field.boundary` used
+  for area/hit-testing/auto-manage is never touched. Used for both the canvas
+  texture's clip path (`fieldRender.ts`) and the outline polygon (`fields.ts`);
+  crop-row direction still reads off the TRUE boundary so rows don't skew.
+  Outline is now two soft-blurred layers (a wide low-opacity glow + a thin
+  translucent core, warm cream instead of solid white) instead of a crisp 2px
+  white line — reads like a natural tilled-ground edge, not a survey line.
+- **Editable calendar pace** (maintainer request: lower month length toward 5
+  days): `calendar.ts`'s `DAYS_PER_MONTH`/`MINUTES_PER_MONTH` consts became mutable
+  module state (`getDaysPerMonth()` / `setDaysPerMonth()` / `minutesPerMonth()` —
+  same pattern as `coords.ts`'s `setProjection`). A **dropdown in the time bar**
+  (5/10/15/20/25/30 days) changes it live; the crop calendar's harvest-band offset
+  (`growDays / daysPerMonth`) redraws immediately. Crop `growDays` stays in real
+  days always — shortening a month changes how fast the CALENDAR turns, never how
+  long a crop takes to grow. Persisted alongside the save (`PersistedGame.daysPerMonth`,
+  optional so old saves still load and just default to 30).
+- Tests: 26 total (up from 18) — new `tests/fields.test.ts` (sellField), calendar
+  pace test, 3 new `smoothPolygon` shape tests in `geometry.test.ts`.
+
 ### Dev convenience
 - `start-dev.bat` — double-click to install (first run) + launch the dev server and
   open the browser at http://localhost:5173.
@@ -156,16 +188,24 @@ truck + real buyer + local price/fuel — which replaces the placeholder sale.
    ready in fieldRender.ts's row textures, just not wired to a time-over-distance model).
 
 ### Notes for next session
-- **Idle auto-manage exists but hasn't been played for real hours yet.** Verified via
-  unit test (full stubble→tilled→planted→ready→harvested→tilled cycle, zero manual
-  calls) and one in-browser toggle (started a harvest instantly on click); the
-  maintainer stopped the browser-preview session before watching a full fast-speed
-  season play out unattended. Worth an actual walk-away test next time.
-- **Balance smell (partially addressed):** starting money raised to $1M this session
-  (from $100k) so land isn't as cramped. Still no debt/loan mechanism (§8) — that's
-  the more realistic long-term lever if balance needs more room.
+- **This session's changes (sell field, Fields tab, rounded/blurred rendering, the
+  days-per-month dropdown) are typecheck+test verified but NOT yet visually
+  confirmed in-browser** — the maintainer asked to stop using the browser-preview
+  tool (too slow) partway through. Worth a real look next session, especially:
+  the smoothed-corner texture + soft outline actually reading well over NAIP at
+  various zooms, and the timebar not overflowing now that it has 4 buttons + 2
+  dropdowns.
+- **Idle auto-manage** still hasn't been played for real unattended hours; only
+  unit-tested end-to-end plus one instant-toggle browser check from a prior
+  session.
+- **Balance smell (partially addressed):** starting money raised to $1M so land
+  isn't as cramped. Still no debt/loan mechanism (§8) — the more realistic
+  long-term lever if balance needs more room.
 - Auto-manage state (`Field.autoManage`) persists through save/load like everything
   else on Field — no special-casing needed, confirmed by reading the persistence code.
+- **Sell-field design note:** selling forfeits whatever crop is planted (no partial
+  refund for inputs already paid) — deliberate, keeps the mechanic simple. Revisit
+  if it feels punishing once real money pressure (contracts, debt) exists.
 
 ## Deferred / known
 - ~~In-browser visual re-check pending for Slice 0.1.~~ **Resolved this session:**

@@ -7,7 +7,10 @@ import {
   isHarvesting,
 } from "../src/sim/farming";
 import { sellGrain } from "../src/sim/economy";
-import { dateOf, formatDate, nextMonthStart, MINUTES_PER_DAY, MINUTES_PER_MONTH } from "../src/sim/calendar";
+import {
+  dateOf, formatDate, nextMonthStart, MINUTES_PER_DAY, minutesPerMonth,
+  getDaysPerMonth, setDaysPerMonth,
+} from "../src/sim/calendar";
 import { gameConfig } from "../src/config/gameConfig";
 import type { Meters } from "../src/geo/coords";
 
@@ -23,7 +26,7 @@ function freshField(status: Field["status"] = "tilled"): Field {
 }
 
 /** Campaign starts Mar 1 Yr 1; sim-time of April 1 Yr 1 (one month in). */
-const APRIL_1 = MINUTES_PER_MONTH;
+const APRIL_1 = minutesPerMonth();
 
 describe("calendar", () => {
   it("starts on March 1, Year 1", () => {
@@ -31,8 +34,8 @@ describe("calendar", () => {
   });
 
   it("rolls months and years on 30-day months", () => {
-    expect(dateOf(MINUTES_PER_MONTH).month).toBe(3); // April
-    expect(dateOf(10 * MINUTES_PER_MONTH)).toMatchObject({ year: 2, month: 0 }); // Jan Yr 2
+    expect(dateOf(minutesPerMonth()).month).toBe(3); // April
+    expect(dateOf(10 * minutesPerMonth())).toMatchObject({ year: 2, month: 0 }); // Jan Yr 2
   });
 
   it("nextMonthStart lands on the 1st, strictly in the future", () => {
@@ -42,6 +45,20 @@ describe("calendar", () => {
     // Asking for the CURRENT month gives next year's.
     const march = nextMonthStart(t, 2);
     expect(dateOf(march)).toMatchObject({ month: 2, day: 1, year: 2 });
+  });
+
+  it("days-per-month is adjustable and reshapes month length live", () => {
+    expect(getDaysPerMonth()).toBe(30);
+    setDaysPerMonth(5);
+    try {
+      expect(minutesPerMonth()).toBe(5 * MINUTES_PER_DAY);
+      // Same absolute sim-time, shorter month -> lands further into the calendar.
+      expect(dateOf(minutesPerMonth())).toMatchObject({ month: 3, day: 1 }); // April 1
+      expect(dateOf(2 * MINUTES_PER_DAY)).toMatchObject({ month: 2, day: 3 }); // Mar 3
+      expect(() => setDaysPerMonth(0)).toThrow(/>= 1/);
+    } finally {
+      setDaysPerMonth(30); // don't leak state into other tests
+    }
   });
 });
 
