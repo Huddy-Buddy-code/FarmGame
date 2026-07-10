@@ -70,6 +70,13 @@ export interface GameConfig {
     travelSpeedKmh: number;
   };
 
+  /** Capital cost of machines (brief §8 "Capital (lumpy): equipment"). Sell-back
+   * refunds the purchase price, same rule as land. */
+  equipmentPrices: {
+    tractor: number;
+    harvester: number;
+  };
+
   /** How much the visible yield range has narrowed by harvest-ready (0..1).
    * 0.85 = the band is 15% of its planting width when the crop is ready. */
   yieldRangeNarrowing: number;
@@ -112,6 +119,10 @@ export const gameConfig: GameConfig = {
     seedAcresPerHour: 18,
     harvestAcresPerHour: 9,
     travelSpeedKmh: 22,
+  },
+  equipmentPrices: {
+    tractor: 250_000, // big row-crop tractor + implements, ballpark
+    harvester: 450_000, // combine + header, ballpark
   },
   yieldRangeNarrowing: 0.85,
 };

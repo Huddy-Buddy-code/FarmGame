@@ -73,6 +73,10 @@ export interface Agent {
   state: AgentState;
   /** The task this agent is on (traveling to or working), if any. */
   taskId?: string;
+  /** What was paid for this machine — refunded in full on sell-back (same rule
+   * as land). The starting fleet gets the config price (bought with starting
+   * capital, notionally). */
+  purchaseCost?: number;
 }
 
 /** Fieldwork the player has ordered. Tasks queue up and agents (tractor for

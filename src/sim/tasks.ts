@@ -42,15 +42,71 @@ export function initTaskIds(save: SaveState): void {
   }
 }
 
+/** Kinds of machine the player can own/buy. */
+export type EquipmentKind = "tractor" | "harvester";
+
+const EQUIPMENT_NAME: Record<EquipmentKind, string> = { tractor: "Tractor", harvester: "Combine" };
+
 /** Make sure the starting fleet exists (also upgrades pre-agent saves).
  * `home` is where new machines park — the farmstead-to-be (county center v1). */
 export function ensureAgents(save: SaveState, home: Meters): void {
-  if (!save.agents.some((a) => a.kind === "tractor")) {
-    save.agents.push({ id: "tractor-1", kind: "tractor", name: "Tractor", pos: home, state: "idle" });
+  for (const kind of ["tractor", "harvester"] as const) {
+    if (!save.agents.some((a) => a.kind === kind)) {
+      save.agents.push(makeAgent(save, kind, home));
+    }
   }
-  if (!save.agents.some((a) => a.kind === "harvester")) {
-    save.agents.push({ id: "harvester-1", kind: "harvester", name: "Combine", pos: home, state: "idle" });
+  // Older saves' agents predate purchaseCost — treat them like the starting
+  // fleet (sell-back at config price).
+  for (const a of save.agents) a.purchaseCost ??= gameConfig.equipmentPrices[a.kind as EquipmentKind] ?? 0;
+}
+
+function makeAgent(save: SaveState, kind: EquipmentKind, pos: Meters): Agent {
+  let n = 1;
+  while (save.agents.some((a) => a.id === `${kind}-${n}`)) n++;
+  return {
+    id: `${kind}-${n}`,
+    kind,
+    name: n === 1 ? EQUIPMENT_NAME[kind] : `${EQUIPMENT_NAME[kind]} ${n}`,
+    pos,
+    state: "idle",
+    purchaseCost: gameConfig.equipmentPrices[kind],
+  };
+}
+
+/** Buy a new machine (brief §8 capital). It parks at `home` and starts pulling
+ * from the queue immediately. Throws if unaffordable. */
+export function buyAgent(save: SaveState, kind: EquipmentKind, home: Meters): Agent {
+  const price = gameConfig.equipmentPrices[kind];
+  if (price > save.money) {
+    throw new Error(`A ${EQUIPMENT_NAME[kind].toLowerCase()} costs $${price.toLocaleString()} — not enough cash`);
   }
+  save.money -= price;
+  const agent = makeAgent(save, kind, home);
+  save.agents.push(agent);
+  return agent;
+}
+
+/**
+ * Sell a machine back for exactly what it cost (same rule as land). Refuses if
+ * it's mid-job, or if it's the last machine of its kind while jobs that need it
+ * are still queued (they'd wait forever).
+ */
+export function sellAgent(save: SaveState, agentId: string): { agent: Agent; refund: number } {
+  const idx = save.agents.findIndex((a) => a.id === agentId);
+  if (idx === -1) throw new Error(`Machine ${agentId} not found`);
+  const agent = save.agents[idx]!;
+  if (agent.state !== "idle") {
+    throw new Error(`${agent.name} is mid-job — let it finish first`);
+  }
+  const lastOfKind = !save.agents.some((a) => a.id !== agentId && a.kind === agent.kind);
+  const kindHasWork = save.tasks.some((t) => TASK_AGENT_KIND[t.type] === agent.kind);
+  if (lastOfKind && kindHasWork) {
+    throw new Error(`Jobs are waiting for your only ${EQUIPMENT_NAME[agent.kind as EquipmentKind]?.toLowerCase() ?? agent.kind} — cancel them first`);
+  }
+  const refund = agent.purchaseCost ?? gameConfig.equipmentPrices[agent.kind as EquipmentKind] ?? 0;
+  save.agents.splice(idx, 1);
+  save.money += refund;
+  return { agent, refund };
 }
 
 /** All not-yet-finished tasks for a field (optionally of one type). */

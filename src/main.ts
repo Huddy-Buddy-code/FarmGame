@@ -39,7 +39,9 @@ import {
 import {
   ensureAgents, initTaskIds, enqueueTask, cancelTask, taskCost, tasksFor,
   isFieldHarvesting, effectiveStatus, tickTasks, autoManageAll, autoManageField,
+  buyAgent, sellAgent,
 } from "./sim/tasks";
+import type { EquipmentKind } from "./sim/tasks";
 import type { FarmTask, Agent } from "./state/saveState";
 import { gameConfig } from "./config/gameConfig";
 import type { CropId } from "./config/gameConfig";
@@ -80,6 +82,8 @@ let mode: Mode = "none";
 let overlay: OverlayEngine;
 let mapRef: maplibregl.Map;
 let selectedFieldId: string | null = null;
+/** Where new machines park (county center / farmstead-to-be), in UTM meters. */
+let homePos: Meters = [0, 0];
 
 const $ = (id: string) => document.getElementById(id)!;
 
@@ -95,8 +99,9 @@ async function main() {
 
   setProjection(m.utm.zone, m.utm.hemisphere);
   // Seed the starting fleet (tractor + combine) parked at the county center —
-  // the farmstead-to-be. Also upgrades pre-agent saves.
-  ensureAgents(save, toMeters(m.center as LngLat));
+  // the farmstead-to-be. Also upgrades pre-agent saves. New purchases park here too.
+  homePos = toMeters(m.center as LngLat);
+  ensureAgents(save, homePos);
   devStatus("status-osm", `Roads: ${county.roads.features.length} ✓`, "ok");
   $("attr").innerHTML = `${m.imagery.attribution} · ${m.roads.attribution}`;
 
@@ -137,6 +142,7 @@ async function main() {
     buildCropCalendar();
     wireInventory();
     wireFieldsTab();
+    wireEquipTab();
     wirePersistence();
     // Re-render every field from the loaded save (textures + outlines).
     for (const f of save.fields) renderField(map, overlay, f, clock.time());
@@ -226,6 +232,7 @@ function tickWorld(prev: number) {
     updateHud();
     if (selectedFieldId) refreshFieldPanel();
     refreshFieldsTab();
+    refreshEquipTab();
     refreshQueuePanel();
   }
 }
@@ -288,6 +295,13 @@ function updateAgentMarkers(): void {
       marker.setLngLat(toLngLat(agent.pos));
     }
     marker.getElement().classList.toggle("working", agent.state === "working");
+  }
+  // Tear down markers for machines that were sold.
+  for (const [id, marker] of agentMarkers) {
+    if (!save.agents.some((a) => a.id === id)) {
+      marker.remove();
+      agentMarkers.delete(id);
+    }
   }
 }
 
@@ -517,6 +531,116 @@ function refreshFieldsTab() {
       el.style.display = "none";
       openFieldPanel(field.id);
     });
+    rows.appendChild(row);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Equipment tab: the machine fleet — status at a glance, buy new machines,
+// sell idle ones back (purchase-price refund, same rule as land).
+// ---------------------------------------------------------------------------
+function wireEquipTab() {
+  $("btn-equip").addEventListener("click", () => {
+    const el = $("equiptab");
+    const opening = el.style.display !== "block";
+    el.style.display = opening ? "block" : "none";
+    if (opening) refreshEquipTab(true);
+  });
+  $("equip-close").addEventListener("click", () => ($("equiptab").style.display = "none"));
+
+  for (const kind of ["tractor", "harvester"] as EquipmentKind[]) {
+    $(`buy-${kind}`).addEventListener("click", () => {
+      try {
+        const agent = buyAgent(save, kind, homePos);
+        updateHud();
+        updateAgentMarkers();
+        refreshEquipTab(true);
+        refreshQueuePanel();
+        toast(`${AGENT_EMOJI[kind]} Bought ${agent.name} — parked at the yard, ready for work`);
+      } catch (err) {
+        toast("❌ " + (err as Error).message, 3500);
+      }
+    });
+  }
+}
+
+/** Rebuild the equipment list. Cheap no-op while the panel is hidden. */
+let lastEquipKey = "";
+function refreshEquipTab(force = false) {
+  const el = $("equiptab");
+  if (el.style.display !== "block") return;
+
+  const key = save.agents
+    .map((a) => {
+      const task = a.taskId ? save.tasks.find((t) => t.id === a.taskId) : undefined;
+      const pct = task ? Math.round((task.doneAcres / task.totalAcres) * 100) : "";
+      return `${a.id}:${a.state}:${a.taskId ?? ""}:${pct}`;
+    })
+    .join("|") + `|$${Math.round(save.money)}`;
+  if (!force && key === lastEquipKey) return;
+  lastEquipKey = key;
+
+  // Buy buttons show live affordability.
+  for (const kind of ["tractor", "harvester"] as EquipmentKind[]) {
+    const btn = $(`buy-${kind}`) as HTMLButtonElement;
+    const price = gameConfig.equipmentPrices[kind];
+    btn.innerHTML = `${AGENT_EMOJI[kind]} Buy ${kind === "tractor" ? "Tractor" : "Combine"}<br><span class="small">$${price.toLocaleString()}</span>`;
+    btn.disabled = price > save.money;
+  }
+
+  const rows = $("equip-rows");
+  rows.innerHTML = "";
+  for (const agent of save.agents) {
+    const task = agent.taskId ? save.tasks.find((t) => t.id === agent.taskId) : undefined;
+    let status = "Idle — waiting for work";
+    let pct: number | null = null;
+    if (task && agent.state === "traveling") status = `Driving to ${prettyId(task.fieldId)}…`;
+    else if (task && agent.state === "working") {
+      pct = (task.doneAcres / task.totalAcres) * 100;
+      status = `${cap(taskVerb(task))} ${prettyId(task.fieldId)}`;
+    }
+
+    const row = document.createElement("div");
+    row.className = "equip-row";
+    row.innerHTML = `
+      <span class="icon">${AGENT_EMOJI[agent.kind] ?? "🚜"}</span>
+      <span class="er-info">
+        <div class="er-name">${agent.name}</div>
+        <div class="er-status">${status}</div>
+        ${pct !== null ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
+      </span>`;
+
+    const locate = document.createElement("button");
+    locate.className = "er-btn";
+    locate.textContent = "📍";
+    locate.title = `Fly to ${agent.name}`;
+    locate.addEventListener("click", () => {
+      mapRef.flyTo({ center: toLngLat(agent.pos), zoom: Math.max(mapRef.getZoom(), 14) });
+    });
+    row.appendChild(locate);
+
+    const refund = agent.purchaseCost ?? gameConfig.equipmentPrices[agent.kind as EquipmentKind] ?? 0;
+    const sell = document.createElement("button");
+    sell.className = "er-btn";
+    sell.textContent = "💰";
+    sell.title = `Sell ${agent.name} · $${refund.toLocaleString()}`;
+    sell.disabled = agent.state !== "idle";
+    if (sell.disabled) sell.title = `${agent.name} is mid-job`;
+    sell.addEventListener("click", () => {
+      if (!confirm(`Sell ${agent.name} for $${refund.toLocaleString()}?`)) return;
+      try {
+        const { refund: paid } = sellAgent(save, agent.id);
+        updateHud();
+        updateAgentMarkers();
+        refreshEquipTab(true);
+        refreshQueuePanel();
+        toast(`💰 Sold ${agent.name} for $${paid.toLocaleString()}`);
+      } catch (err) {
+        toast("❌ " + (err as Error).message, 3500);
+      }
+    });
+    row.appendChild(sell);
+
     rows.appendChild(row);
   }
 }

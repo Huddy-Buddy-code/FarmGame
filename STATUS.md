@@ -220,6 +220,14 @@ slice of 5 (placeholder sale) are DONE. Next: **move the grain for real** (§12 
   gone; legacy `harvestingIds` in old saves migrate to queued harvest tasks on load.
 - Vite now honors a `PORT` env var (preview tooling); `.claude/launch.json` gained
   `autoPort`.
+- **Equipment tab** (bottom toolbar → 🚜 Equipment, same session): fleet
+  management panel. Lists every machine with live status/progress, 📍 fly-to on
+  the map, and 💰 sell-back (purchase-price refund, `Agent.purchaseCost` — same
+  rule as land; starting fleet counts as bought at config price). **Buy** buttons
+  add more tractors/combines (`gameConfig.equipmentPrices`: $250k / $450k) that
+  park at the county-center "yard" and immediately pull from the queue — more
+  machines = parallel fieldwork (unit-tested). Guards: can't sell a machine
+  mid-job, nor the last one of its kind while jobs that need it are queued.
 - **Browser-verified end-to-end** (preview pane, this session): drew a 28.6 ac
   field → queued plow (paid, listed, tractor drove 490 px on-screen and worked with
   progress %) → tilled at 3600× → planted corn in April (window enforcement seen:

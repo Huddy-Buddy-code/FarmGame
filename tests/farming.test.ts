@@ -7,7 +7,7 @@ import {
 } from "../src/sim/farming";
 import {
   ensureAgents, enqueueTask, cancelTask, tickTasks, autoManageAll,
-  effectiveStatus, isFieldHarvesting, taskCost,
+  effectiveStatus, isFieldHarvesting, taskCost, buyAgent, sellAgent,
 } from "../src/sim/tasks";
 import { sellGrain } from "../src/sim/economy";
 import {
@@ -234,6 +234,59 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     expect(save.grain.corn).toBe(0);
     // Selling from an empty bin is a no-op.
     expect(sellGrain(save, "corn", 10)).toEqual({ tons: 0, revenue: 0 });
+  });
+});
+
+describe("equipment: buy & sell machines (brief §8 capital)", () => {
+  it("buying charges the config price; a second machine gets a numbered name", () => {
+    const save = gameWithAgents();
+    const cash = save.money;
+    const t2 = buyAgent(save, "tractor", [0, 0]);
+    expect(save.money).toBe(cash - gameConfig.equipmentPrices.tractor);
+    expect(t2.name).toBe("Tractor 2");
+    expect(save.agents.filter((a) => a.kind === "tractor")).toHaveLength(2);
+    save.money = 0;
+    expect(() => buyAgent(save, "harvester", [0, 0])).toThrow(/cash/);
+  });
+
+  it("selling refunds the purchase price; refuses mid-job or when it's the only one with work waiting", () => {
+    const save = gameWithAgents();
+    const field = freshField("stubble");
+    save.fields.push(field);
+    enqueueTask(save, field, "plow", 0);
+    tickTasks(save, 30, 30); // tractor picks it up
+    const tractor = save.agents.find((a) => a.kind === "tractor")!;
+    expect(() => sellAgent(save, tractor.id)).toThrow(/mid-job/);
+
+    // An idle combine with no harvest work sells fine, at the purchase price.
+    const combine = save.agents.find((a) => a.kind === "harvester")!;
+    const cash = save.money;
+    const { refund } = sellAgent(save, combine.id);
+    expect(refund).toBe(gameConfig.equipmentPrices.harvester);
+    expect(save.money).toBe(cash + refund);
+    expect(save.agents.some((a) => a.kind === "harvester")).toBe(false);
+
+    // Can't sell the only tractor while plow/plant jobs still queue for it.
+    const save2 = gameWithAgents();
+    const f2 = freshField("stubble");
+    save2.fields.push(f2);
+    enqueueTask(save2, f2, "plow", 0);
+    const t = save2.agents.find((a) => a.kind === "tractor")!;
+    expect(() => sellAgent(save2, t.id)).toThrow(/only tractor/);
+  });
+
+  it("buying more machines makes work run in parallel across fields", () => {
+    const save = gameWithAgents();
+    buyAgent(save, "tractor", [0, 0]);
+    const f1 = freshField("stubble");
+    const f2: Field = { id: "field-2", parcelId: "parcel-2", boundary, status: "stubble" };
+    save.fields.push(f1, f2);
+    enqueueTask(save, f1, "plow", 0);
+    enqueueTask(save, f2, "plow", 0);
+    tickTasks(save, 30, 30);
+    const working = save.tasks.filter((t) => t.status === "active");
+    expect(working).toHaveLength(2);
+    expect(new Set(working.map((t) => t.agentId)).size).toBe(2);
   });
 });
 
