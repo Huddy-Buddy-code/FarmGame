@@ -16,7 +16,9 @@ const KEY = "farm-sim-save-v1";
 export interface PersistedGame {
   save: SaveState;
   clockNow: SimTime;
-  harvestingIds: string[];
+  /** Legacy (pre-task-queue saves): fields that were mid-harvest. New saves
+   * don't write this — in-progress work lives in save.tasks now. */
+  harvestingIds?: string[];
   /** Calendar pace knob (brief-adjacent, player-adjustable — see calendar.ts).
    * Optional so saves from before this setting existed still load: absent means
    * "use the default" rather than a corrupt save. */

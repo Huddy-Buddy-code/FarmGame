@@ -97,6 +97,27 @@ export function smoothPolygon(ring: Meters[], iterations = 2, maxCutMeters = 10,
   return pts;
 }
 
+/** Area centroid of a polygon ring (shoelace-weighted), in meters. Falls back to
+ * the vertex average for degenerate (zero-area) rings. Used as the "work here"
+ * target agents drive to (brief §9). */
+export function centroidOf(ring: Meters[]): Meters {
+  const a = signedAreaMeters(ring);
+  if (Math.abs(a) < 1e-6) {
+    let sx = 0, sy = 0;
+    for (const [x, y] of ring) { sx += x; sy += y; }
+    return [sx / ring.length, sy / ring.length];
+  }
+  let cx = 0, cy = 0;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i]!;
+    const [xj, yj] = ring[j]!;
+    const cross = xj * yi - xi * yj;
+    cx += (xi + xj) * cross;
+    cy += (yi + yj) * cross;
+  }
+  return [cx / (6 * a), cy / (6 * a)];
+}
+
 /** Convenience: area in hectares (1 ha = 10,000 m²) and acres (1 ac = 4046.8564 m²). */
 export function areaHectares(ring: Meters[]): number {
   return areaMeters(ring) / 10_000;

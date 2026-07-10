@@ -1,9 +1,15 @@
 /**
- * Farming sim (brief §12 step 3, §6, §10) — plant, grow, harvest.
+ * Farming sim (brief §12 step 3, §6, §10) — crop growth + the field-state
+ * primitives that fieldwork applies.
  *
  * Pure game logic on the save-state + sim clock: no map, no DOM, no I/O, so it's
  * unit-testable. Rendering reacts to what this module does (main.ts repaints a
  * field's overlay texture when its status changes).
+ *
+ * Plowing/planting/harvesting are no longer instant player actions: they are
+ * TASKS an agent (tractor/combine) works through over realistic sim-hours — see
+ * `tasks.ts`. This module keeps the growth model and the applyX primitives the
+ * task system calls when work completes.
  *
  * The crux mechanic (brief §6): yield is genuinely uncertain but TRANSPARENT. The
  * true yield is rolled at planting and hidden; the player sees a confidence range
@@ -14,52 +20,39 @@
 import { gameConfig } from "../config/gameConfig";
 import type { CropId } from "../config/gameConfig";
 import type { SimTime } from "./clock";
-import { MINUTES_PER_DAY, minutesPerMonth, dateOf } from "./calendar";
+import { minutesPerMonth, dateOf } from "./calendar";
 import type { SaveState, Field, FieldStatus } from "../state/saveState";
-import { areaAcres } from "../geo/geometry";
 
 /** Is `crop` plantable in the month containing `t`? */
 export function inPlantingWindow(crop: CropId, t: SimTime): boolean {
   return gameConfig.crops[crop].plantMonths.includes(dateOf(t).month);
 }
 
+/** Can this field be plowed right now (status-wise)? */
+export function canPlow(status: FieldStatus): boolean {
+  return status === "stubble" || status === "harvested";
+}
+
 /**
- * Plow (till) a field: stubble/harvested → tilled, paying the per-acre working
- * cost. Instant in this slice; the fieldwork/equipment slice (brief §10) will
- * make it take time along a tractor path.
+ * Plow effect: stubble/harvested → tilled. Money is NOT handled here — the task
+ * system charges the plow cost when the task is queued (pay-on-queue).
  */
-export function plow(save: SaveState, field: Field): void {
-  if (field.status !== "stubble" && field.status !== "harvested") {
+export function applyPlow(field: Field): void {
+  if (!canPlow(field.status)) {
     throw new Error(`${field.id} can't be plowed (status: ${field.status})`);
   }
-  const acres = areaAcres(field.boundary);
-  const cost = Math.round(acres * gameConfig.plowCostPerAcre);
-  if (cost > save.money) {
-    throw new Error(`Plowing costs $${cost.toLocaleString()} — not enough cash`);
-  }
-  save.money -= cost;
   field.status = "tilled";
 }
 
 /**
- * Plant `crop` on `field`: pay inputs per acre, roll the hidden true yield, and
- * start the growth clock. Requires a plowed (tilled) field — the §10 lifecycle.
- * Throws with a player-facing message if not allowed.
+ * Plant effect: roll the hidden true yield and start the growth clock. Requires
+ * plowed (tilled) ground — the §10 lifecycle. Inputs were paid at queue time.
  */
-export function plant(save: SaveState, field: Field, crop: CropId, now: SimTime, rand: () => number = Math.random): void {
+export function applyPlant(field: Field, crop: CropId, now: SimTime, rand: () => number = Math.random): void {
   const cfg = gameConfig.crops[crop];
   if (field.status !== "tilled") {
     throw new Error(`Plow ${field.id} before planting (status: ${field.status})`);
   }
-  if (!inPlantingWindow(crop, now)) {
-    throw new Error(`${cfg.name} can't be planted this month`);
-  }
-  const acres = areaAcres(field.boundary);
-  const cost = Math.round(acres * cfg.inputCostPerAcre);
-  if (cost > save.money) {
-    throw new Error(`Inputs cost $${cost.toLocaleString()} — not enough cash`);
-  }
-  save.money -= cost;
   field.crop = crop;
   field.plantedAt = now;
   // The gamble (brief §6): true yield lands uniformly inside ±uncertainty of base.
@@ -67,6 +60,14 @@ export function plant(save: SaveState, field: Field, crop: CropId, now: SimTime,
   field.trueYieldTonsPerAcre = cfg.baseYieldTonsPerAcre * (1 - u + rand() * 2 * u);
   field.harvestedAcres = 0;
   field.status = "planted";
+}
+
+/** Harvest-complete effect: back to bare ground, crop state cleared. */
+export function applyHarvestDone(field: Field): void {
+  field.status = "harvested";
+  field.crop = undefined;
+  field.plantedAt = undefined;
+  field.trueYieldTonsPerAcre = undefined;
 }
 
 /** Growth progress 0..1 (1 = harvest-ready). 0 if nothing is growing.
@@ -112,101 +113,15 @@ export interface TickResult {
 }
 
 /**
- * Advance all field lifecycles to `now`. Growth is derived (cheap); harvesting
- * accrues acres for any field the player has set harvesting on.
+ * Advance all field GROWTH to `now` (planted → growing → ready). Fieldwork
+ * (plow/plant/harvest) advances separately in `tickTasks` — call both each frame.
  */
-export function tickFarming(save: SaveState, now: SimTime, dtMinutes: number): TickResult {
+export function tickFarming(save: SaveState, now: SimTime): TickResult {
   const changed: Field[] = [];
   for (const field of save.fields) {
     const before = field.status;
-
-    if (harvesting.has(field.id) && field.crop && field.trueYieldTonsPerAcre !== undefined) {
-      const acres = areaAcres(field.boundary);
-      const rate = gameConfig.harvestAcresPerDay / MINUTES_PER_DAY; // acres per sim-minute
-      const cut = Math.min(acres - (field.harvestedAcres ?? 0), rate * dtMinutes);
-      field.harvestedAcres = (field.harvestedAcres ?? 0) + cut;
-      save.grain[field.crop] += cut * field.trueYieldTonsPerAcre;
-      if (field.harvestedAcres >= acres) {
-        harvesting.delete(field.id);
-        field.status = "harvested";
-        field.crop = undefined;
-        field.plantedAt = undefined;
-        field.trueYieldTonsPerAcre = undefined;
-      }
-    } else {
-      field.status = deriveStatus(field, now);
-    }
-
-    if (field.autoManage) autoManageField(save, field, now);
-
+    field.status = deriveStatus(field, now);
     if (field.status !== before) changed.push(field);
   }
   return { changed };
-}
-
-/**
- * Idle-game auto-management (player-requested, brief §7-adjacent): plow, plant,
- * and harvest a field the instant each becomes possible, so a player can walk
- * away and the farm keeps itself running. Failures (can't afford it yet, no
- * crop's window is open) are silently retried next tick — never surfaced as
- * errors, since there's no player action to blame them on.
- */
-export function autoManageField(save: SaveState, field: Field, now: SimTime): void {
-  if (isHarvesting(field)) return; // already working; let it finish on its own
-  switch (field.status) {
-    case "stubble":
-    case "harvested":
-      try {
-        plow(save, field);
-      } catch {
-        /* can't afford it yet — retry next tick */
-      }
-      break;
-    case "tilled":
-      // Policy: plant the first crop (config order) whose window is open and
-      // affordable. A placeholder choice — real crop/contract strategy is a
-      // later decision layer; turn auto-manage off to hand-pick a crop.
-      for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
-        try {
-          plant(save, field, cropId, now);
-          break;
-        } catch {
-          /* this crop's window is closed or unaffordable — try the next */
-        }
-      }
-      break;
-    case "ready":
-      try {
-        startHarvest(field, now);
-      } catch {
-        /* guard only; deriveStatus already agrees the field is ready */
-      }
-      break;
-  }
-}
-
-/** Fields currently being harvested (session-scoped; not saved — v1). */
-const harvesting = new Set<string>();
-
-/** Begin harvesting a ready field. Throws a player-facing message if not ready. */
-export function startHarvest(field: Field, now: SimTime): void {
-  if (deriveStatus(field, now) !== "ready") {
-    throw new Error(`${field.id} isn't ready to harvest yet`);
-  }
-  harvesting.add(field.id);
-}
-
-export function isHarvesting(field: Field): boolean {
-  return harvesting.has(field.id);
-}
-
-/** For persistence: which fields are mid-harvest. */
-export function getHarvestingIds(): string[] {
-  return [...harvesting];
-}
-
-/** For persistence: restore the mid-harvest set from a loaded save. */
-export function restoreHarvesting(ids: string[]): void {
-  harvesting.clear();
-  for (const id of ids) harvesting.add(id);
 }

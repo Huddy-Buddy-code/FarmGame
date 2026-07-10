@@ -60,10 +60,40 @@ export interface Field {
  * costs arrive with the storage mechanic (brief §5 lever 1). */
 export type GrainBin = Record<CropId, number>;
 
+/** What an agent is doing right now (brief §9 state machine — "drive home at
+ * night" and road routing come later; v1 is idle → drive to field → work). */
+export type AgentState = "idle" | "traveling" | "working";
+
 export interface Agent {
   id: string;
-  kind: "player" | "worker" | "tractor" | "truck";
+  kind: "player" | "worker" | "tractor" | "harvester" | "truck";
+  /** Display name for the queue panel / map label ("Tractor", "Combine"). */
+  name: string;
   pos: Meters;
+  state: AgentState;
+  /** The task this agent is on (traveling to or working), if any. */
+  taskId?: string;
+}
+
+/** Fieldwork the player has ordered. Tasks queue up and agents (tractor for
+ * plow/plant, combine for harvest) work through them one after another. */
+export type TaskType = "plow" | "plant" | "harvest";
+
+export interface FarmTask {
+  id: string;
+  type: TaskType;
+  fieldId: string;
+  /** Which crop to put in (plant tasks only). */
+  crop?: CropId;
+  totalAcres: number;
+  /** Acres worked so far (progress = doneAcres / totalAcres). */
+  doneAcres: number;
+  status: "queued" | "active";
+  /** Agent working this task, once one picks it up. */
+  agentId?: string;
+  /** What was paid when the task was queued (plow cost / seed inputs) —
+   * refunded in full if a still-queued task is canceled. */
+  costPaid: number;
 }
 
 export interface SaveState {
@@ -74,6 +104,7 @@ export interface SaveState {
   fields: Field[];
   grain: GrainBin;
   agents: Agent[];
+  tasks: FarmTask[];
   contracts: unknown[]; // shape defined when the contract slice lands (brief §6)
 }
 
@@ -86,6 +117,7 @@ export function newGame(): SaveState {
     fields: [],
     grain: { corn: 0, soybeans: 0 },
     agents: [],
+    tasks: [],
     contracts: [],
   };
 }

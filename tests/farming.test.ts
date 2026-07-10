@@ -1,11 +1,14 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { setProjection } from "../src/geo/coords";
 import { newGame } from "../src/state/saveState";
-import type { Field } from "../src/state/saveState";
+import type { Field, SaveState } from "../src/state/saveState";
 import {
-  plant, plow, tickFarming, growthProgress, yieldRange, startHarvest, deriveStatus,
-  isHarvesting,
+  tickFarming, growthProgress, yieldRange, deriveStatus, applyPlant,
 } from "../src/sim/farming";
+import {
+  ensureAgents, enqueueTask, cancelTask, tickTasks, autoManageAll,
+  effectiveStatus, isFieldHarvesting, taskCost,
+} from "../src/sim/tasks";
 import { sellGrain } from "../src/sim/economy";
 import {
   dateOf, formatDate, nextMonthStart, MINUTES_PER_DAY, minutesPerMonth,
@@ -20,9 +23,31 @@ beforeAll(() => setProjection(15, "N"));
 const side = Math.sqrt(100 * 4046.8564224);
 const boundary: Meters[] = [[0, 0], [side, 0], [side, side], [0, side]];
 
-/** Most tests want ready-to-plant ground; the plow test asks for raw stubble. */
+/** Most tests want ready-to-plant ground; the plow tests ask for raw stubble. */
 function freshField(status: Field["status"] = "tilled"): Field {
   return { id: "field-1", parcelId: "parcel-1", boundary, status };
+}
+
+/** A game with the starting fleet parked at the origin (next to the field). */
+function gameWithAgents(): SaveState {
+  const save = newGame();
+  ensureAgents(save, [0, 0]);
+  return save;
+}
+
+/** Run the world forward `minutes` from `from` in `step`-minute ticks (growth +
+ * auto-manage + agents), the same order main.ts ticks in. Returns the end time. */
+function runWorld(save: SaveState, from: number, minutes: number, step = 60): number {
+  let now = from;
+  const end = from + minutes;
+  while (now < end) {
+    const dt = Math.min(step, end - now);
+    now += dt;
+    tickFarming(save, now);
+    autoManageAll(save, now);
+    tickTasks(save, now, dt, () => 0.5);
+  }
+  return now;
 }
 
 /** Campaign starts Mar 1 Yr 1; sim-time of April 1 Yr 1 (one month in). */
@@ -62,48 +87,106 @@ describe("calendar", () => {
   });
 });
 
-describe("plow → plant → grow → harvest (brief §10, §12.3, §6)", () => {
-  it("plowing pays the working cost and tills the field; planting requires it", () => {
-    const save = newGame();
+describe("task queue + agents (brief §9, §10): plow → plant → grow → harvest", () => {
+  it("queueing a plow pays on queue; canceling a queued task refunds in full", () => {
+    const save = gameWithAgents();
     const field = freshField("stubble");
     save.fields.push(field);
-    // Can't plant unplowed ground.
-    expect(() => plant(save, field, "corn", APRIL_1, () => 0.5)).toThrow(/[Pp]low/);
     const cash = save.money;
-    plow(save, field);
-    expect(field.status).toBe("tilled");
-    expect(cash - save.money).toBe(Math.round(100 * gameConfig.plowCostPerAcre));
-    // Can't plow twice.
-    expect(() => plow(save, field)).toThrow(/status/);
+    const cost = taskCost(field, "plow");
+    const task = enqueueTask(save, field, "plow", 0);
+    expect(cash - save.money).toBe(cost);
+    expect(cost).toBe(Math.round(100 * gameConfig.plowCostPerAcre));
+    // Can't queue plowing twice.
+    expect(() => enqueueTask(save, field, "plow", 0)).toThrow(/already/);
+    cancelTask(save, task.id);
+    expect(save.money).toBe(cash);
+    expect(save.tasks).toHaveLength(0);
   });
 
-  it("planting pays inputs and rolls a true yield inside the uncertainty band", () => {
-    const save = newGame();
+  it("refuses to queue what the (effective) field state doesn't allow", () => {
+    const save = gameWithAgents();
     const field = freshField("stubble");
     save.fields.push(field);
-    plow(save, field);
-    const cash = save.money;
-    plant(save, field, "corn", APRIL_1, () => 0.5);
-    expect(save.money).toBeLessThan(cash);
+    // Can't plant unplowed ground, can't harvest bare ground.
+    expect(() => enqueueTask(save, field, "plant", APRIL_1, "corn")).toThrow(/[Pp]low/);
+    expect(() => enqueueTask(save, field, "harvest", APRIL_1)).toThrow(/ready/);
+    // But with a plow QUEUED, planting can chain behind it.
+    enqueueTask(save, field, "plow", APRIL_1);
+    expect(effectiveStatus(save, field)).toBe("tilled");
+    expect(() => enqueueTask(save, field, "plant", APRIL_1, "corn")).not.toThrow();
+  });
+
+  it("rejects planting outside the window and unaffordable work", () => {
+    const save = gameWithAgents();
+    const field = freshField();
+    save.fields.push(field);
+    expect(() => enqueueTask(save, field, "plant", 0, "soybeans")).toThrow(/month/); // March: soy is May–Jun
+    save.money = 0;
+    expect(() => enqueueTask(save, field, "plant", APRIL_1, "corn")).toThrow(/cash/);
+  });
+
+  it("the tractor drives out and plows at the configured rate (realistic hours)", () => {
+    const save = gameWithAgents();
+    const field = freshField("stubble");
+    save.fields.push(field);
+    enqueueTask(save, field, "plow", 0);
+
+    // 100 ac at plowAcresPerHour → this many minutes of work (plus a short drive).
+    const workMin = (100 / gameConfig.work.plowAcresPerHour) * 60;
+    runWorld(save, 0, workMin * 0.5, 30);
+    expect(field.status).toBe("stubble"); // halfway: still working, not magically done
+    expect(save.agents.find((a) => a.kind === "tractor")!.state).toBe("working");
+    runWorld(save, workMin * 0.5, workMin * 0.6, 30);
+    expect(field.status).toBe("tilled");
+    expect(save.tasks).toHaveLength(0);
+  });
+
+  it("a queued plant waits for the plow, then the tractor does both in order", () => {
+    const save = gameWithAgents();
+    const field = freshField("stubble");
+    save.fields.push(field);
+    enqueueTask(save, field, "plow", APRIL_1);
+    enqueueTask(save, field, "plant", APRIL_1, "corn");
+
+    const plowMin = (100 / gameConfig.work.plowAcresPerHour) * 60;
+    const plantMin = (100 / gameConfig.work.seedAcresPerHour) * 60;
+    runWorld(save, APRIL_1, (plowMin + plantMin) * 1.1, 30);
     expect(field.status).toBe("planted");
+    expect(field.crop).toBe("corn");
     const cfg = gameConfig.crops.corn;
     const t = field.trueYieldTonsPerAcre!;
     expect(t).toBeGreaterThanOrEqual(cfg.baseYieldTonsPerAcre * (1 - cfg.yieldUncertainty));
     expect(t).toBeLessThanOrEqual(cfg.baseYieldTonsPerAcre * (1 + cfg.yieldUncertainty));
   });
 
-  it("rejects planting outside the window", () => {
-    const save = newGame();
+  it("the combine harvests a ready field over sim-hours and banks acres × true yield", () => {
+    const save = gameWithAgents();
     const field = freshField();
     save.fields.push(field);
-    expect(() => plant(save, field, "soybeans", 0, () => 0.5)).toThrow(/month/); // March: soy is May–Jun
+    applyPlant(field, "corn", APRIL_1, () => 0.5);
+    const truth = field.trueYieldTonsPerAcre!;
+
+    const ready = APRIL_1 + gameConfig.crops.corn.growMonths * minutesPerMonth();
+    expect(growthProgress(field, ready)).toBe(1);
+    expect(deriveStatus(field, ready)).toBe("ready");
+    tickFarming(save, ready);
+    enqueueTask(save, field, "harvest", ready);
+
+    const harvestMin = (100 / gameConfig.work.harvestAcresPerHour) * 60;
+    runWorld(save, ready, harvestMin * 0.5, 30);
+    expect(isFieldHarvesting(save, field.id)).toBe(true);
+    expect(save.grain.corn).toBeGreaterThan(0);
+    expect(save.grain.corn).toBeLessThan(100 * truth);
+    runWorld(save, ready + harvestMin * 0.5, harvestMin * 0.6, 30);
+    expect(field.status).toBe("harvested");
+    expect(field.crop).toBeUndefined();
+    expect(save.grain.corn).toBeCloseTo(100 * truth, 0);
   });
 
   it("visible yield range narrows over the season and always contains the truth", () => {
-    const save = newGame();
     const field = freshField();
-    save.fields.push(field);
-    plant(save, field, "corn", APRIL_1, () => 0.9); // high roll, off-center
+    applyPlant(field, "corn", APRIL_1, () => 0.9); // high roll, off-center
     const truth = field.trueYieldTonsPerAcre!;
     const growMin = gameConfig.crops.corn.growMonths * minutesPerMonth();
     let prevWidth = Infinity;
@@ -120,47 +203,17 @@ describe("plow → plant → grow → harvest (brief §10, §12.3, §6)", () => 
     expect(prevWidth).toBeLessThan((atPlant.high - atPlant.low) * 0.3);
   });
 
-  it("grows to ready, harvests over days, and banks grain = acres × true yield", () => {
-    const save = newGame();
-    const field = freshField();
-    save.fields.push(field);
-    plant(save, field, "corn", APRIL_1, () => 0.5);
-
-    const ready = APRIL_1 + gameConfig.crops.corn.growMonths * minutesPerMonth();
-    expect(growthProgress(field, ready)).toBe(1);
-    expect(deriveStatus(field, ready)).toBe("ready");
-
-    const truth = field.trueYieldTonsPerAcre!;
-    startHarvest(field, ready);
-    // 100 ac at 100 ac/day = 1 day of harvesting; tick in 6 chunks.
-    let now = ready;
-    for (let i = 0; i < 6; i++) {
-      const dt = MINUTES_PER_DAY / 4;
-      now += dt;
-      tickFarming(save, now, dt);
-    }
-    expect(field.status).toBe("harvested");
-    expect(field.crop).toBeUndefined();
-    expect(save.grain.corn).toBeCloseTo(100 * truth, 0);
-  });
-
   it("growth is keyed to MONTHS: a crop ripens in the same season at any pace", () => {
-    // The bug this guards: growth used to be keyed to fixed 24h days, so shrinking
-    // the month (a pace knob) made crops take many game-months and miss their
-    // season. Keyed to months, the ripen MONTH is invariant to days-per-month.
     const grow = gameConfig.crops.corn.growMonths;
     const readyMonths = new Set<number>();
     for (const dpm of [30, 10, 5]) {
       setDaysPerMonth(dpm);
       try {
-        const save = newGame();
         const field = freshField();
-        save.fields.push(field);
         const plantedAt = minutesPerMonth(); // April 1 at this pace
-        plant(save, field, "corn", plantedAt, () => 0.5);
+        applyPlant(field, "corn", plantedAt, () => 0.5);
         const ready = plantedAt + grow * minutesPerMonth();
         expect(growthProgress(field, ready)).toBeCloseTo(1, 6);
-        // Halfway through growth it should be mid-season, never fully grown.
         expect(growthProgress(field, plantedAt + 0.5 * grow * minutesPerMonth())).toBeCloseTo(0.5, 6);
         readyMonths.add(dateOf(ready).month);
       } finally {
@@ -182,72 +235,44 @@ describe("plow → plant → grow → harvest (brief §10, §12.3, §6)", () => 
     // Selling from an empty bin is a no-op.
     expect(sellGrain(save, "corn", 10)).toEqual({ tons: 0, revenue: 0 });
   });
-
 });
 
 describe("auto-manage (idle mode, player-requested)", () => {
-  it("plows, plants, and harvests itself with no manual calls, then loops", () => {
-    const save = newGame();
+  it("queues plow, plant, and harvest itself with no manual calls, then loops", () => {
+    const save = gameWithAgents();
     const field = freshField("stubble");
     field.autoManage = true;
     save.fields.push(field);
 
-    // March 1: plowing has no season restriction, so it happens the first tick.
-    tickFarming(save, 0, 1);
+    // March: plowing queues immediately (no season restriction) and completes.
+    runWorld(save, 0, 2 * MINUTES_PER_DAY, 60);
     expect(field.status).toBe("tilled");
 
-    // Rest of March: still tilled — corn's window (Apr–May) hasn't opened yet.
-    let now = 0;
-    for (let d = 0; d < 25; d++) {
-      now += MINUTES_PER_DAY;
-      tickFarming(save, now, MINUTES_PER_DAY);
-    }
+    // Rest of March (stop a day short of April): still tilled — corn's window
+    // (Apr–May) hasn't opened yet.
+    runWorld(save, 2 * MINUTES_PER_DAY, APRIL_1 - 3 * MINUTES_PER_DAY, MINUTES_PER_DAY);
     expect(field.status).toBe("tilled");
 
-    // April 1: the window opens — auto-manage plants corn (first crop in config
-    // order whose window is open) with no plant() call from the test.
-    tickFarming(save, APRIL_1, MINUTES_PER_DAY);
+    // April: window opens — auto-manage queues the plant and the tractor sows it.
+    runWorld(save, APRIL_1 - MINUTES_PER_DAY, 3 * MINUTES_PER_DAY, 60);
     expect(field.status).toBe("planted");
     expect(field.crop).toBe("corn");
 
-    // Ready — auto-manage starts the harvest itself.
-    const growMin = gameConfig.crops.corn.growMonths * minutesPerMonth();
-    const ready = APRIL_1 + growMin;
-    tickFarming(save, ready, MINUTES_PER_DAY);
-    expect(field.status).toBe("ready");
-    expect(isHarvesting(field)).toBe(true);
-
-    // Let the harvest run to completion (100 ac / 100 ac-per-day = 1 day). The
-    // same tick that finishes the harvest also auto-plows — the loop doesn't
-    // wait a tick between "harvested" and starting the next cycle.
-    let t = ready;
-    for (let i = 0; i < 6; i++) {
-      const dt = MINUTES_PER_DAY / 4;
-      t += dt;
-      tickFarming(save, t, dt);
-    }
-    expect(field.crop).toBeUndefined();
+    // Grow to ready, then the combine auto-harvests and the loop re-plows.
+    const ready = APRIL_1 + 2 * MINUTES_PER_DAY + gameConfig.crops.corn.growMonths * minutesPerMonth();
+    runWorld(save, ready, 3 * MINUTES_PER_DAY, 60);
     expect(save.grain.corn).toBeGreaterThan(0);
-    expect(field.status).toBe("tilled");
+    expect(field.status).toBe("tilled"); // already re-plowed for next season
   });
 
   it("silently waits (doesn't throw) when a step isn't affordable or in season", () => {
-    const save = newGame();
+    const save = gameWithAgents();
     save.money = 0; // can't afford plowing
     const field = freshField("stubble");
     field.autoManage = true;
     save.fields.push(field);
-    expect(() => tickFarming(save, 0, 1)).not.toThrow();
+    expect(() => runWorld(save, 0, 60, 60)).not.toThrow();
     expect(field.status).toBe("stubble"); // still waiting, no crash
-  });
-});
-
-describe("harvest edge cases", () => {
-  it("refuses to harvest an unready field", () => {
-    const save = newGame();
-    const field = freshField();
-    save.fields.push(field);
-    plant(save, field, "corn", APRIL_1, () => 0.5);
-    expect(() => startHarvest(field, APRIL_1 + MINUTES_PER_DAY)).toThrow(/ready/);
+    expect(save.tasks).toHaveLength(0);
   });
 });

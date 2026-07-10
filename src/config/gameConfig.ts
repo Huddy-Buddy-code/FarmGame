@@ -55,8 +55,20 @@ export interface GameConfig {
   /** Cost to plow/till, per acre (fuel + wear; brief §8 variable costs). */
   plowCostPerAcre: number;
 
-  /** How fast harvesting proceeds, in acres per sim-day (one combine, v1). */
-  harvestAcresPerDay: number;
+  /** Fieldwork pacing (brief §9–§10): agents (tractor, combine) work through
+   * queued tasks at realistic rates, so task duration = acres ÷ rate. All
+   * tunable — these ARE the "how long does farming take" difficulty feel. */
+  work: {
+    /** Tractor tillage rate, acres per sim-hour (~big tractor + disk). */
+    plowAcresPerHour: number;
+    /** Tractor planting rate, acres per sim-hour (~16-row planter). */
+    seedAcresPerHour: number;
+    /** Combine harvest rate, acres per sim-hour. */
+    harvestAcresPerHour: number;
+    /** How fast agents drive between jobs, km/h (straight-line for now;
+     * real-road routing plugs in later, brief §9). */
+    travelSpeedKmh: number;
+  };
 
   /** How much the visible yield range has narrowed by harvest-ready (0..1).
    * 0.85 = the band is 15% of its planting width when the crop is ready. */
@@ -95,6 +107,11 @@ export const gameConfig: GameConfig = {
   },
 
   plowCostPerAcre: 20,
-  harvestAcresPerDay: 100,
+  work: {
+    plowAcresPerHour: 12,
+    seedAcresPerHour: 18,
+    harvestAcresPerHour: 9,
+    travelSpeedKmh: 22,
+  },
   yieldRangeNarrowing: 0.85,
 };

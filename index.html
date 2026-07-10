@@ -227,6 +227,48 @@
       .field-row .fr-yield { font-size: 12px; text-align: right; color: #8a7658; }
       #fields-empty { font-size: 13px; color: #8a7658; padding: 10px 2px; }
 
+      /* ---------- Work queue (right side): agents + queued jobs ---------- */
+      #queuepanel {
+        position: absolute; right: 12px; top: 170px; z-index: 18;
+        width: 240px; max-height: calc(100vh - 250px); overflow-y: auto;
+        padding: 12px 14px 14px;
+      }
+      #queuepanel h2 { margin: 0 0 8px; font-size: 16px; }
+      #queuepanel .qp-sub {
+        font-size: 11px; font-weight: 700; color: #8a7658;
+        text-transform: uppercase; letter-spacing: 0.04em; margin: 10px 0 4px;
+      }
+      .agent-row, .queue-row {
+        display: flex; align-items: flex-start; gap: 8px;
+        background: var(--cream-2); border: 1.5px solid var(--wood);
+        border-radius: 10px; padding: 6px 9px; margin: 5px 0;
+      }
+      .agent-row .icon, .queue-row .icon { font-size: 18px; line-height: 1.3; }
+      .agent-row.idle { opacity: 0.72; }
+      .ar-info, .qr-info { flex: 1; min-width: 0; }
+      .ar-name, .qr-name { font-weight: 700; font-size: 13px; }
+      .ar-status, .qr-sub { font-size: 11px; color: #8a7658; }
+      .queue-row.active { border-color: var(--green-dark); }
+      .qr-cancel {
+        border: none; background: none; padding: 0 2px; font-size: 13px;
+        color: #8a7658; line-height: 1.4;
+      }
+      .qr-cancel:hover { color: var(--red); background: none; }
+      .queue-empty { font-size: 12px; color: #8a7658; padding: 6px 2px; }
+      #queuepanel .progress { height: 7px; margin: 4px 0 1px; }
+
+      /* Agent dots on the map (brief §9 "GPS dots", emoji edition). */
+      .agent-dot {
+        font-size: 20px; line-height: 1; cursor: default;
+        background: var(--cream); border: 2px solid var(--wood);
+        border-radius: 999px; padding: 3px 4px; box-shadow: var(--shadow);
+      }
+      .agent-dot.working { border-color: var(--green-dark); animation: chug 0.9s infinite; }
+      @keyframes chug {
+        0%, 100% { transform: translateY(0) rotate(-2deg); }
+        50% { transform: translateY(-2px) rotate(2deg); }
+      }
+
       /* ---------- Toast + montage ---------- */
       #toast {
         position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%);
@@ -345,6 +387,14 @@
       <div class="sell-row">
         <button id="fp-sell" style="width: 100%">💰 Sell Field</button>
       </div>
+    </div>
+
+    <div id="queuepanel" class="panel">
+      <h2>📋 Work Queue</h2>
+      <div class="qp-sub">Machines</div>
+      <div id="agents-rows"></div>
+      <div class="qp-sub">Jobs</div>
+      <div id="queue-rows"></div>
     </div>
 
     <div id="toast" class="panel"></div>

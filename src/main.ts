@@ -34,9 +34,13 @@ import {
   getDaysPerMonth, setDaysPerMonth, minutesPerMonth,
 } from "./sim/calendar";
 import {
-  plant, tickFarming, growthProgress, yieldRange, startHarvest, isHarvesting,
-  inPlantingWindow, getHarvestingIds, restoreHarvesting, plow, autoManageField,
+  tickFarming, growthProgress, yieldRange, inPlantingWindow, canPlow,
 } from "./sim/farming";
+import {
+  ensureAgents, initTaskIds, enqueueTask, cancelTask, taskCost, tasksFor,
+  isFieldHarvesting, effectiveStatus, tickTasks, autoManageAll, autoManageField,
+} from "./sim/tasks";
+import type { FarmTask, Agent } from "./state/saveState";
 import { gameConfig } from "./config/gameConfig";
 import type { CropId } from "./config/gameConfig";
 
@@ -50,9 +54,23 @@ const save: SaveState = loaded?.save ?? newGame();
 const clock = new SimClock();
 if (loaded) {
   clock.setTime(loaded.clockNow);
-  restoreHarvesting(loaded.harvestingIds);
   initIdCounters(save);
   if (loaded.daysPerMonth) setDaysPerMonth(loaded.daysPerMonth);
+  // Pre-task-queue saves: give them the new arrays, and turn any legacy
+  // mid-harvest markers into queued harvest tasks so the combine resumes them.
+  save.tasks ??= [];
+  save.agents ??= [];
+  initTaskIds(save);
+  for (const id of loaded.harvestingIds ?? []) {
+    const f = save.fields.find((x) => x.id === id);
+    if (f && !tasksFor(save, id, "harvest").length) {
+      save.tasks.push({
+        id: `task-legacy-${id}`, type: "harvest", fieldId: id,
+        totalAcres: areaAcres(f.boundary), doneAcres: f.harvestedAcres ?? 0,
+        status: "queued", costPaid: 0,
+      });
+    }
+  }
 }
 
 // Only one map interaction is active at a time.
@@ -76,6 +94,9 @@ async function main() {
   const m = county.manifest;
 
   setProjection(m.utm.zone, m.utm.hemisphere);
+  // Seed the starting fleet (tractor + combine) parked at the county center —
+  // the farmstead-to-be. Also upgrades pre-agent saves.
+  ensureAgents(save, toMeters(m.center as LngLat));
   devStatus("status-osm", `Roads: ${county.roads.features.length} ✓`, "ok");
   $("attr").innerHTML = `${m.imagery.attribution} · ${m.roads.attribution}`;
 
@@ -119,6 +140,8 @@ async function main() {
     wirePersistence();
     // Re-render every field from the loaded save (textures + outlines).
     for (const f of save.fields) renderField(map, overlay, f, clock.time());
+    updateAgentMarkers();
+    refreshQueuePanel();
     clock.play(); // the world breathes from the start (idle-game 1×)
     requestAnimationFrame(gameLoop);
   });
@@ -179,23 +202,31 @@ function gameLoop(ts: number) {
   requestAnimationFrame(gameLoop);
 }
 
-/** Advance farming from the clock's previous time to now; repaint changed fields. */
+/** Advance farming + fieldwork from the clock's previous time to now; repaint
+ * changed fields, move the machines, and toast what the agents did. */
 function tickWorld(prev: number) {
   const now = clock.time();
   const dt = now - prev;
   if (dt <= 0) return;
-  const { changed } = tickFarming(save, now, dt);
-  for (const f of changed) renderField(mapRef, overlay, f, now);
-  repaintGrowthStages(now, changed);
-  for (const f of changed) if (f.autoManage) toastAutoAction(f);
+  const { changed } = tickFarming(save, now);
+  // Auto-managed fields queue their next job BEFORE agents tick, so freshly
+  // queued work can start the same tick.
+  autoManageAll(save, now);
+  const work = tickTasks(save, now, dt);
+  const allChanged = [...changed, ...work.changed];
+  for (const f of allChanged) renderField(mapRef, overlay, f, now);
+  repaintGrowthStages(now, allChanged);
+  for (const ev of work.events) toastTaskEvent(ev.task, ev.agent, ev.kind);
+  updateAgentMarkers();
   // Refresh UI ~2×/s (or instantly when a status flipped). Rebuilding the field
   // panel every frame would recreate its buttons under the player's cursor.
   const rt = performance.now();
-  if (changed.length || rt - lastUiRefresh > 500) {
+  if (allChanged.length || work.events.length || rt - lastUiRefresh > 500) {
     lastUiRefresh = rt;
     updateHud();
     if (selectedFieldId) refreshFieldPanel();
     refreshFieldsTab();
+    refreshQueuePanel();
   }
 }
 
@@ -217,27 +248,128 @@ function repaintGrowthStages(now: number, alreadyPainted: { id: string }[]) {
   }
 }
 
-/** Toast feedback when an auto-managed field advances on its own, so a player
- * who wanders back to the tab can see what happened while they were away. */
-function toastAutoAction(field: Field): void {
-  const name = prettyId(field.id);
-  switch (field.status) {
-    case "tilled":
-      toast(`🤖 Auto-plowed ${name}`);
-      break;
-    case "planted":
-      if (field.crop) {
-        const cfg = gameConfig.crops[field.crop];
-        toast(`🤖 Auto-planted ${cfg.emoji} ${cfg.name} on ${name}`);
-      }
-      break;
-    case "ready":
-      if (isHarvesting(field)) toast(`🤖 Auto-harvest started on ${name}`);
-      break;
-    case "harvested":
-      toast(`🤖 Auto-harvested ${name}`);
-      break;
+// ---------------------------------------------------------------------------
+// Agents on the map + the work-queue panel (right side).
+// ---------------------------------------------------------------------------
+const AGENT_EMOJI: Record<string, string> = { tractor: "🚜", harvester: "🌾" };
+
+/** Human verb for a task, present participle ("plowing Field 1"). */
+function taskVerb(task: FarmTask): string {
+  if (task.type === "plow") return "plowing";
+  if (task.type === "plant") {
+    const c = task.crop ? gameConfig.crops[task.crop] : null;
+    return c ? `planting ${c.name.toLowerCase()}` : "planting";
   }
+  return "harvesting";
+}
+
+function toastTaskEvent(task: FarmTask, agent: Agent, kind: "started" | "finished"): void {
+  const emoji = AGENT_EMOJI[agent.kind] ?? "🚜";
+  const where = prettyId(task.fieldId);
+  if (kind === "started") toast(`${emoji} ${agent.name} is heading out — ${taskVerb(task)} ${where}`);
+  else toast(`✅ ${agent.name} finished ${taskVerb(task)} ${where}`);
+}
+
+/** One marker per agent, moved (not recreated) every frame. */
+const agentMarkers = new Map<string, maplibregl.Marker>();
+
+function updateAgentMarkers(): void {
+  if (!mapRef) return;
+  for (const agent of save.agents) {
+    let marker = agentMarkers.get(agent.id);
+    if (!marker) {
+      const el = document.createElement("div");
+      el.className = "agent-dot";
+      el.textContent = AGENT_EMOJI[agent.kind] ?? "🚜";
+      el.title = agent.name;
+      marker = new maplibregl.Marker({ element: el }).setLngLat(toLngLat(agent.pos)).addTo(mapRef);
+      agentMarkers.set(agent.id, marker);
+    } else {
+      marker.setLngLat(toLngLat(agent.pos));
+    }
+    marker.getElement().classList.toggle("working", agent.state === "working");
+  }
+}
+
+/** Rebuild the right-hand queue panel: each agent's status, then queued jobs. */
+let lastQueueKey = "";
+function refreshQueuePanel(): void {
+  // Skip DOM churn when nothing visible changed (1% progress buckets animate).
+  const key = save.agents
+    .map((a) => `${a.id}:${a.state}:${a.taskId ?? ""}`)
+    .concat(save.tasks.map((t) => `${t.id}:${t.status}:${Math.round((t.doneAcres / t.totalAcres) * 100)}`))
+    .join("|");
+  if (key === lastQueueKey) return;
+  lastQueueKey = key;
+
+  const agentsEl = $("agents-rows");
+  agentsEl.innerHTML = "";
+  for (const agent of save.agents) {
+    const task = agent.taskId ? save.tasks.find((t) => t.id === agent.taskId) : undefined;
+    let status = "Idle — waiting for work";
+    let pct: number | null = null;
+    if (task && agent.state === "traveling") status = `Driving to ${prettyId(task.fieldId)}…`;
+    else if (task && agent.state === "working") {
+      pct = (task.doneAcres / task.totalAcres) * 100;
+      status = `${cap(taskVerb(task))} ${prettyId(task.fieldId)}`;
+    }
+    const row = document.createElement("div");
+    row.className = "agent-row" + (agent.state === "idle" ? " idle" : "");
+    row.innerHTML = `
+      <span class="icon">${AGENT_EMOJI[agent.kind] ?? "🚜"}</span>
+      <span class="ar-info">
+        <div class="ar-name">${agent.name}</div>
+        <div class="ar-status">${status}</div>
+        ${pct !== null ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
+      </span>`;
+    agentsEl.appendChild(row);
+  }
+
+  const rows = $("queue-rows");
+  rows.innerHTML = "";
+  if (save.tasks.length === 0) {
+    rows.innerHTML = `<div class="queue-empty">No jobs queued — plow, plant, or harvest a field.</div>`;
+    return;
+  }
+  const TASK_ICON: Record<string, string> = { plow: "🚜", plant: "🌱", harvest: "🌾" };
+  for (const task of save.tasks) {
+    const pct = (task.doneAcres / task.totalAcres) * 100;
+    const icon = task.type === "plant" && task.crop ? gameConfig.crops[task.crop].emoji : TASK_ICON[task.type];
+    const row = document.createElement("div");
+    row.className = "queue-row" + (task.status === "active" ? " active" : "");
+    row.innerHTML = `
+      <span class="icon">${icon}</span>
+      <span class="qr-info">
+        <div class="qr-name">${cap(taskVerb(task))} · ${prettyId(task.fieldId)}</div>
+        <div class="qr-sub">${task.totalAcres.toFixed(0)} ac · ${
+          task.status === "active" ? `${pct.toFixed(0)}% done` : "waiting"
+        }</div>
+        ${task.status === "active" ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
+      </span>`;
+    if (task.status === "queued") {
+      const btn = document.createElement("button");
+      btn.className = "qr-cancel";
+      btn.textContent = "✕";
+      btn.title = task.costPaid > 0 ? `Cancel and refund $${task.costPaid.toLocaleString()}` : "Cancel";
+      btn.addEventListener("click", () => {
+        try {
+          cancelTask(save, task.id);
+          updateHud();
+          refreshQueuePanel();
+          if (selectedFieldId) refreshFieldPanel(true);
+          toast(task.costPaid > 0 ? `↩️ Canceled — $${task.costPaid.toLocaleString()} refunded` : "↩️ Canceled");
+        } catch (err) {
+          toast("❌ " + (err as Error).message, 3500);
+        }
+      });
+      row.appendChild(btn);
+    }
+    rows.appendChild(row);
+  }
+}
+
+function cap(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -357,7 +489,12 @@ function refreshFieldsTab() {
   rows.innerHTML = "";
   for (const field of save.fields) {
     const acres = areaAcres(field.boundary);
-    const statusLabel = isHarvesting(field) ? "harvesting" : field.status;
+    const pending = tasksFor(save, field.id);
+    const statusLabel = isFieldHarvesting(save, field.id)
+      ? "harvesting"
+      : pending.length > 0
+        ? `${field.status} · ${pending.length} job${pending.length > 1 ? "s" : ""} queued`
+        : field.status;
 
     let icon = "🟫";
     let yieldText = "—";
@@ -391,7 +528,7 @@ let resetting = false;
 
 function doSave() {
   if (resetting) return; // a reset is wiping the save — don't write it back
-  persistGame({ save, clockNow: clock.time(), harvestingIds: getHarvestingIds(), daysPerMonth: getDaysPerMonth() });
+  persistGame({ save, clockNow: clock.time(), daysPerMonth: getDaysPerMonth() });
 }
 
 function wirePersistence() {
@@ -715,6 +852,20 @@ function fieldMsg(text: string) {
   $("fp-msg").textContent = text;
 }
 
+/** Queue a task from a panel button, with shared feedback plumbing. */
+function queueFromPanel(field: Field, type: "plow" | "plant" | "harvest", crop?: CropId): void {
+  try {
+    const task = enqueueTask(save, field, type, clock.time(), crop);
+    updateHud();
+    fieldMsg("");
+    toast(`📋 ${cap(taskVerb(task))} ${prettyId(field.id)} added to the queue`);
+    refreshQueuePanel();
+    refreshFieldPanel(true);
+  } catch (err) {
+    fieldMsg((err as Error).message);
+  }
+}
+
 /** Rebuild the panel contents from the selected field's current state. */
 let lastPanelKey = "";
 function refreshFieldPanel(force = false) {
@@ -722,15 +873,21 @@ function refreshFieldPanel(force = false) {
   if (!field) return closeFieldPanel();
   const now = clock.time();
   const acres = areaAcres(field.boundary);
+  const pending = tasksFor(save, field.id);
+  const activeTask = pending.find((t) => t.status === "active");
+  const harvestingNow = isFieldHarvesting(save, field.id);
+  // What the field WILL be once queued work finishes — buttons offer the NEXT
+  // step, so plow + plant can be queued back-to-back.
+  const eff = effectiveStatus(save, field);
 
   // Skip the rebuild when nothing visible changed — replacing buttons under the
-  // player's cursor twice a second makes them unclickable. Growth/harvest progress
+  // player's cursor twice a second makes them unclickable. Growth/task progress
   // is bucketed to 1% so live bars still animate.
   const auto = !!field.autoManage;
   const key = [
-    field.id, field.status, isHarvesting(field), auto,
+    field.id, field.status, eff, auto,
+    pending.map((t) => `${t.type}${t.status}${Math.round((t.doneAcres / t.totalAcres) * 100)}`).join(","),
     Math.round(growthProgress(field, now) * 100),
-    Math.round(((field.harvestedAcres ?? 0) / acres) * 100),
     dateOf(now).month, // planting windows open/close on month boundaries
     Math.round(save.money), // affordability of input costs
   ].join("|");
@@ -740,55 +897,57 @@ function refreshFieldPanel(force = false) {
   $("fp-title").textContent = "🌾 " + prettyId(field.id);
   $("fp-sub").textContent = `${acres.toFixed(1)} acres`;
   const badge = $("fp-status");
-  badge.textContent = isHarvesting(field) ? "harvesting" : field.status;
+  badge.textContent = activeTask ? taskVerb(activeTask) : field.status;
   ($("fp-auto") as HTMLInputElement).checked = auto;
 
   const refund = field.purchaseCost ?? Math.round(acres * gameConfig.landPricePerAcre);
   const sellBtn = $("fp-sell") as HTMLButtonElement;
   sellBtn.textContent = `💰 Sell Field · $${refund.toLocaleString()}`;
-  sellBtn.disabled = isHarvesting(field);
-  sellBtn.title = isHarvesting(field) ? "Can't sell while it's mid-harvest" : "";
+  sellBtn.disabled = !!activeTask;
+  sellBtn.title = activeTask ? "Can't sell while a machine is working it" : "";
 
   const body = $("fp-body");
   const actions = $("fp-actions");
   body.innerHTML = "";
   actions.innerHTML = "";
 
-  if (field.status === "stubble" || field.status === "harvested") {
+  // --- Queued/active work on this field ---
+  for (const t of pending) {
+    const pct = Math.round((t.doneAcres / t.totalAcres) * 100);
+    body.insertAdjacentHTML(
+      "beforeend",
+      `<div class="small" style="margin-top:6px">📋 ${cap(taskVerb(t))} — ${
+        t.status === "active" ? `${pct}% done` : "waiting in queue"
+      }</div>` + (t.status === "active" ? `<div class="progress"><div class="fill" style="width:${pct}%"></div></div>` : ""),
+    );
+  }
+
+  if (canPlow(eff)) {
     // --- Plow first (§10 lifecycle: stubble → tilled → planted) ---
-    const cost = Math.round(acres * gameConfig.plowCostPerAcre);
+    const cost = taskCost(field, "plow");
     if (auto) {
-      body.innerHTML = `<div class="auto-note">🤖 Waiting to plow (needs $${cost.toLocaleString()})…</div>`;
+      body.insertAdjacentHTML("beforeend", `<div class="auto-note">🤖 Will queue plowing (needs $${cost.toLocaleString()})…</div>`);
     } else {
-      body.innerHTML = `<div class="small" style="margin-top:8px">Plow to prepare for planting.</div>`;
+      body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">Plow to prepare for planting.</div>`);
       const btn = document.createElement("button");
       btn.className = "primary";
-      btn.innerHTML = `🚜 Plow <span class="small">$${cost.toLocaleString()}</span>`;
-      btn.addEventListener("click", () => {
-        try {
-          plow(save, field);
-          renderField(mapRef, overlay, field, clock.time());
-          updateHud();
-          fieldMsg("");
-          toast("🚜 Field plowed!");
-          refreshFieldPanel(true);
-        } catch (err) {
-          fieldMsg((err as Error).message);
-        }
-      });
+      btn.innerHTML = `🚜 Queue Plow <span class="small">$${cost.toLocaleString()}</span>`;
+      btn.addEventListener("click", () => queueFromPanel(field, "plow"));
       actions.appendChild(btn);
     }
-  } else if (field.status === "tilled") {
+  }
+
+  if (eff === "tilled") {
     if (auto) {
-      body.innerHTML = `<div class="auto-note">🤖 Waiting for a planting window…</div>`;
+      body.insertAdjacentHTML("beforeend", `<div class="auto-note">🤖 Waiting for a planting window…</div>`);
     } else {
-      // --- Plant chooser ---
-      body.innerHTML = `<div class="small" style="margin-top:8px">Plant a crop:</div>`;
+      // --- Plant chooser (queues a task for the tractor) ---
+      body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">Plant a crop:</div>`);
       const row = document.createElement("div");
       row.className = "cropbtns";
       for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
         const cfg = gameConfig.crops[cropId];
-        const cost = Math.round(acres * cfg.inputCostPerAcre);
+        const cost = taskCost(field, "plant", cropId);
         const btn = document.createElement("button");
         const open = inPlantingWindow(cropId, now);
         btn.innerHTML = `${cfg.emoji} ${cfg.name}<br><span class="small">$${cost.toLocaleString()}</span>`;
@@ -797,18 +956,7 @@ function refreshFieldPanel(force = false) {
           btn.title = `Plant in ${cfg.plantMonths.map((mo) => MONTH_SHORT[mo]).join("–")}`;
           btn.style.opacity = "0.45";
         }
-        btn.addEventListener("click", () => {
-          try {
-            plant(save, field, cropId, now);
-            renderField(mapRef, overlay, field, clock.time());
-            updateHud();
-            fieldMsg("");
-            toast(`${cfg.emoji} ${cfg.name} planted!`);
-            refreshFieldPanel();
-          } catch (err) {
-            fieldMsg((err as Error).message);
-          }
-        });
+        btn.addEventListener("click", () => queueFromPanel(field, "plant", cropId));
         row.appendChild(btn);
       }
       body.appendChild(row);
@@ -817,14 +965,16 @@ function refreshFieldPanel(force = false) {
         .join("   ");
       body.insertAdjacentHTML("beforeend", `<div class="small">${windows}</div>`);
     }
-  } else if (field.crop) {
+  }
+
+  if (field.crop) {
     // --- Growing / ready / harvesting ---
     const cfg = gameConfig.crops[field.crop];
     const progress = growthProgress(field, now);
     const range = yieldRange(field, now);
 
     let html = `<div style="margin-top:8px">${cfg.emoji} <b>${cfg.name}</b></div>`;
-    if (!isHarvesting(field)) {
+    if (!harvestingNow) {
       html += `<div class="small">Growth</div>
         <div class="progress"><div class="fill" style="width:${(progress * 100).toFixed(0)}%"></div></div>`;
     }
@@ -836,30 +986,16 @@ function refreshFieldPanel(force = false) {
         <div class="rangebar"><div class="band" style="left:${l}%;width:${Math.max(2, w)}%"></div></div>
         <div class="small">${(range.low * acres).toFixed(0)}–${(range.high * acres).toFixed(0)} t total</div>`;
     }
-    if (isHarvesting(field)) {
-      const done = ((field.harvestedAcres ?? 0) / acres) * 100;
-      html += `<div class="small" style="margin-top:6px">Harvesting… 🚜</div>
-        <div class="progress"><div class="fill" style="width:${done.toFixed(0)}%"></div></div>`;
-    }
-    body.innerHTML = html;
+    body.insertAdjacentHTML("beforeend", html);
 
-    if (field.status === "ready" && !isHarvesting(field)) {
+    if (field.status === "ready" && tasksFor(save, field.id, "harvest").length === 0) {
       if (auto) {
-        body.insertAdjacentHTML("beforeend", `<div class="auto-note">🤖 Harvesting will start automatically…</div>`);
+        body.insertAdjacentHTML("beforeend", `<div class="auto-note">🤖 Harvest will be queued automatically…</div>`);
       } else {
         const btn = document.createElement("button");
         btn.className = "primary";
-        btn.textContent = "🚜 Harvest";
-        btn.addEventListener("click", () => {
-          try {
-            startHarvest(field, clock.time());
-            fieldMsg("");
-            toast("🚜 Harvest started!");
-            refreshFieldPanel();
-          } catch (err) {
-            fieldMsg((err as Error).message);
-          }
-        });
+        btn.textContent = "🌾 Queue Harvest";
+        btn.addEventListener("click", () => queueFromPanel(field, "harvest"));
         actions.appendChild(btn);
       }
     }

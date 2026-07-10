@@ -9,7 +9,7 @@ import type { Field } from "../src/state/saveState";
 import { gameConfig } from "../src/config/gameConfig";
 import { sellField } from "../src/field/fields";
 import type { OverlayEngine } from "../src/map/overlay";
-import { startHarvest } from "../src/sim/farming";
+import { ensureAgents, enqueueTask, tickTasks } from "../src/sim/tasks";
 
 beforeAll(() => setProjection(15, "N"));
 
@@ -51,15 +51,28 @@ describe("sellField (maintainer request: sell back for the purchase price)", () 
     expect(refund).toBe(Math.round(areaAcres(boundary) * gameConfig.landPricePerAcre));
   });
 
-  it("refuses to sell a field that's mid-harvest", () => {
+  it("refuses to sell a field a machine is actively working, but refunds queued work", () => {
     const save = newGame();
+    ensureAgents(save, [0, 0]);
     const field: Field = {
       id: "field-1", parcelId: "parcel-1", boundary, status: "ready",
-      crop: "corn", trueYieldTonsPerAcre: 5, harvestedAcres: 0,
+      crop: "corn", plantedAt: 0, trueYieldTonsPerAcre: 5, harvestedAcres: 0,
     };
     save.fields.push(field);
-    startHarvest(field, 0);
-    expect(() => sellField(fakeMap(), fakeOverlay(), save, "field-1")).toThrow(/harvest/);
+    enqueueTask(save, field, "harvest", 0);
+    // Tick long enough for the combine to arrive and start cutting.
+    tickTasks(save, 60, 60);
+    expect(() => sellField(fakeMap(), fakeOverlay(), save, "field-1")).toThrow(/working/);
+
+    // A merely QUEUED plow on another field cancels + refunds on sale.
+    const f2: Field = { id: "field-2", parcelId: "parcel-2", boundary, status: "stubble", purchaseCost: 1000 };
+    save.fields.push(f2);
+    save.parcels.push({ id: "parcel-2", boundary, owned: true });
+    const cashBefore = save.money;
+    const task = enqueueTask(save, f2, "plow", 0);
+    expect(save.money).toBe(cashBefore - task.costPaid);
+    sellField(fakeMap(), fakeOverlay(), save, "field-2");
+    expect(save.money).toBe(cashBefore + 1000); // plow refunded + land refunded
   });
 
   it("throws for an id that isn't an owned field", () => {

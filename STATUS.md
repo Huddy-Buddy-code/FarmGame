@@ -2,11 +2,11 @@
 
 _Update at the end of every session (brief §13)._
 
-**Last session:** 2026-07-09 (cont'd again). Sell-field-back, a Fields tab (list +
-expected yield), an editable days-per-month pace knob (+ growth re-keyed to MONTHS so
-crops stay in-season at any pace), field-rendering polish (texture-matched soft
-border + slight fixed-distance corner bevel), and middle-mouse-drag panning. 27 tests
-green.
+**Last session:** 2026-07-10. **The work-queue + agents slice**: plowing, planting,
+and harvesting are now TASKS that queue in a right-hand Work Queue panel, performed
+over realistic sim-hours by two discrete agents — a 🚜 Tractor (plow/plant) and a
+🌾 Combine (harvest) — that drive to fields as dots on the map. Pay-on-queue with
+full refund on cancel. 28 tests green; full loop browser-verified end-to-end.
 
 ---
 
@@ -183,6 +183,50 @@ slice of 5 (placeholder sale) are DONE. Next: **move the grain for real** (§12 
 - Tests: 27 total (up from 18) — new `tests/fields.test.ts` (sellField), calendar
   pace test, month-keyed-growth invariance test, 3 new `smoothPolygon` shape tests.
 
+### Slice 6 — Work queue + agents (tractor & combine) ✅ (2026-07-10)
+- **Fieldwork is no longer instant** (closes the "plow/harvest are instant" gap
+  noted last session): plow/plant/harvest are `FarmTask`s in `save.tasks`, worked
+  through by agents in `save.agents` — both persisted, so refreshing mid-job resumes
+  it. New module `src/sim/tasks.ts` (pure/testable like farming.ts).
+- **Agents (brief §9 state machine, v1):** one Tractor (plow + plant) and one
+  Combine harvester (harvest), seeded at the county center (`ensureAgents`).
+  idle → drive to field (straight-line at `work.travelSpeedKmh`; road routing
+  later) → work → pick up the next startable task, all within one tick if time
+  compression allows. Rendered as emoji dot markers on the map (bounce while
+  working).
+- **Realistic durations** (all in `gameConfig.work`): plow 12 ac/hr, seed 18 ac/hr,
+  harvest 9 ac/hr, travel 22 km/h. `harvestAcresPerDay` is gone; task duration =
+  acres ÷ rate. Harvested grain banks continuously as the combine cuts.
+- **Pay-on-queue** (design decision): queueing charges immediately (plow cost /
+  seed inputs); canceling a still-QUEUED task refunds in full. Tasks actively being
+  worked can't be canceled; selling a field auto-refunds its queued tasks but
+  refuses while a machine is on it (`releaseFieldTasks`).
+- **Chained queueing:** validation runs against `effectiveStatus()` (what the field
+  WILL be after its pending tasks), so plow + plant queue back-to-back; a plant task
+  behind a plow simply isn't "startable" until the ground is actually tilled.
+  Planting-window check happens at queue time (committed even if the window closes
+  while the tractor catches up).
+- **Work Queue panel** (right side, always visible): MACHINES section (each agent's
+  status — idle / driving to X / working X with live progress bar) + JOBS section
+  (every task: icon, field, acres, waiting/percent-done, ✕ cancel-with-refund on
+  queued ones). Field panel and Fields tab show queued/active work too; the field
+  panel's action buttons became "Queue Plow / plant chooser / Queue Harvest".
+- **Auto-manage now routes through the queue** (`autoManageField` moved to
+  tasks.ts): it *enqueues* the next lifecycle step instead of doing it instantly —
+  consistent with everything going through agents. Same silent-retry semantics.
+- **farming.ts slimmed** to growth + primitives: `applyPlow/applyPlant/
+  applyHarvestDone` (called by the task system on completion), `tickFarming` only
+  derives growth status now. Old `plow/plant/startHarvest/harvesting`-set API is
+  gone; legacy `harvestingIds` in old saves migrate to queued harvest tasks on load.
+- Vite now honors a `PORT` env var (preview tooling); `.claude/launch.json` gained
+  `autoPort`.
+- **Browser-verified end-to-end** (preview pane, this session): drew a 28.6 ac
+  field → queued plow (paid, listed, tractor drove 490 px on-screen and worked with
+  progress %) → tilled at 3600× → planted corn in April (window enforcement seen:
+  buttons disabled in March/August) → skip-montage to August → combine harvested
+  189 t banking live → chained plow re-queue → cancel refunded $573 → reload
+  restored grain/date/agents with zero console errors.
+
 ### Dev convenience
 - `start-dev.bat` — double-click to install (first run) + launch the dev server and
   open the browser at http://localhost:5173.
@@ -203,9 +247,11 @@ slice of 5 (placeholder sale) are DONE. Next: **move the grain for real** (§12 
    signals exist, this is the natural place to make it a real decision instead of a
    fixed order — surface a per-field "preferred crop" setting, or leave it as a
    deliberately dumb default players can override by switching auto-manage off.
-3. (Optional) county-picker UI; a real fieldwork/equipment pass (plow/harvest are
-   instant right now — tractor-path sweeps + the overlay's progressive reveal are
-   ready in fieldRender.ts's row textures, just not wired to a time-over-distance model).
+3. (Optional) county-picker UI; deepen the fieldwork pass — agents + realistic task
+   durations landed (Slice 6), but the tractor still "teleports work" across the
+   field: the overlay's **progressive texture reveal along a swept path** (§10) and
+   road-following travel (routing.ts) are the natural next steps. Equipment
+   condition→efficiency (§8) hooks in here too.
 
 ### Notes for next session
 - **Verification status:** Claude stopped driving the browser-preview tool

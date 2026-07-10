@@ -21,7 +21,8 @@ import { gameConfig } from "../config/gameConfig";
 import type { SaveState, Field } from "../state/saveState";
 import type { OverlayEngine } from "../map/overlay";
 import { paintField, fieldEdgeColor } from "./fieldRender";
-import { growthProgress, isHarvesting } from "../sim/farming";
+import { growthProgress } from "../sim/farming";
+import { releaseFieldTasks } from "../sim/tasks";
 import type { SimTime } from "../sim/clock";
 
 const seq: Record<string, number> = {};
@@ -88,9 +89,8 @@ export function sellField(map: MlMap, overlay: OverlayEngine, save: SaveState, f
   const idx = save.fields.findIndex((f) => f.id === fieldId);
   if (idx === -1) throw new Error(`Field ${fieldId} not found`);
   const field = save.fields[idx]!;
-  if (isHarvesting(field)) {
-    throw new Error(`Can't sell ${field.id} while it's mid-harvest`);
-  }
+  // Refund any still-queued work; throws if a machine is actively on the field.
+  releaseFieldTasks(save, field.id);
 
   const refund = field.purchaseCost ?? Math.round(areaAcres(field.boundary) * gameConfig.landPricePerAcre);
   save.fields.splice(idx, 1);
