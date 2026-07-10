@@ -615,6 +615,7 @@ function wireFieldDrawing(map: maplibregl.Map) {
   $("btn-field").addEventListener("click", () => {
     mode = "field";
     clearDraft();
+    $("fieldstab").style.display = "none"; // get the panel out of the way to draw
     map.doubleClickZoom.disable();
     toast("🚜 Click to place corners — double-click to close the field");
   });
