@@ -44,6 +44,18 @@
         z-index: 19; width: 380px; padding: 3px 10px 5px;
         border-radius: 10px;
       }
+      #yearbar .daybar {
+        height: 8px; border-radius: 999px; overflow: hidden;
+        border: 1.5px solid var(--wood); position: relative; margin-bottom: 4px;
+        /* Midnight at both ends, noon in the middle: night -> dawn -> day -> dusk -> night. */
+        background: linear-gradient(to right,
+          #17203f 0%, #17203f 10%, #4e6690 18%, #f3a35c 26%, #cdeaff 36%,
+          #cdeaff 64%, #f3a35c 74%, #4e6690 82%, #17203f 90%, #17203f 100%);
+      }
+      #yearbar .daybar .marker {
+        position: absolute; top: -3px; bottom: -3px; width: 3px; border-radius: 2px;
+        background: #fff; box-shadow: 0 0 0 1.5px var(--ink);
+      }
       #yearbar .seasons { display: flex; height: 10px; border-radius: 999px; overflow: hidden; border: 1.5px solid var(--wood); position: relative; }
       #yearbar .seg { flex: 1; }
       #yearbar .seg.spring { background: #a8d178; }
@@ -59,7 +71,7 @@
 
       /* ---------- Time controls ---------- */
       #timebar {
-        position: absolute; top: 102px; left: 50%; transform: translateX(-50%);
+        position: absolute; top: 117px; left: 50%; transform: translateX(-50%);
         z-index: 20; display: flex; align-items: center; gap: 6px; padding: 6px 10px;
       }
       button {
@@ -226,6 +238,9 @@
     </div>
 
     <div id="yearbar" class="panel">
+      <div class="daybar">
+        <div class="marker" id="day-marker"></div>
+      </div>
       <div class="seasons">
         <div class="seg spring"></div><div class="seg summer"></div>
         <div class="seg fall"></div><div class="seg winter"></div>

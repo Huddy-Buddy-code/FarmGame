@@ -30,7 +30,7 @@ import { sellGrain } from "./sim/economy";
 import { SimClock } from "./sim/clock";
 import {
   formatDate, dateOf, nextMonthStart, MONTH_NAMES, MONTH_SHORT,
-  START_MONTH, DAYS_PER_MONTH, MONTHS_PER_YEAR, MINUTES_PER_MONTH,
+  START_MONTH, DAYS_PER_MONTH, MONTHS_PER_YEAR, MINUTES_PER_MONTH, MINUTES_PER_DAY,
 } from "./sim/calendar";
 import {
   plant, tickFarming, growthProgress, yieldRange, startHarvest, isHarvesting,
@@ -213,11 +213,20 @@ function updateHud() {
   // The calendar grid has a 110px label column; the lanes take the rest.
   const calNow = document.getElementById("cal-now");
   if (calNow) calNow.style.left = `calc(${(110 * (1 - f)).toFixed(1)}px + ${(f * 100).toFixed(2)}%)`;
+
+  // Day-position marker: fraction of the current 24h day elapsed (midnight = 0).
+  const df = dayFraction(clock.time());
+  $("day-marker").style.left = `calc(${(df * 100).toFixed(2)}% - 1px)`;
 }
 
 /** 0..1 through the campaign's display year, which runs Mar 1 → end of Feb. */
 function yearFraction(t: number): number {
   return (t % (MONTHS_PER_YEAR * MINUTES_PER_MONTH)) / (MONTHS_PER_YEAR * MINUTES_PER_MONTH);
+}
+
+/** 0..1 through the current game day, midnight (0:00) = 0. */
+function dayFraction(t: number): number {
+  return (t % MINUTES_PER_DAY) / MINUTES_PER_DAY;
 }
 
 function toast(text: string, ms = 2600) {

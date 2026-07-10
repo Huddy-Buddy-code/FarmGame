@@ -126,6 +126,10 @@ truck + real buyer + local price/fuel — which replaces the placeholder sale.
   derived from gameConfig, with a "you are here" line. **Year bar** under the HUD:
   season-themed strip (🌱☀️🍂❄️) with a position marker.
 - Starting money raised to $1,000,000 (was $100k — too little land was affordable).
+- **Day progress bar**, stacked directly above the year bar in the same panel: a
+  night→dawn→day→dusk→night gradient (midnight at both ends, noon in the middle),
+  no text, with a marker showing time-of-day. Purely a mood/flavor readout for now —
+  no gameplay reads day/night yet, but the sim clock already has the data (§4).
 
 ### Dev convenience
 - `start-dev.bat` — double-click to install (first run) + launch the dev server and
