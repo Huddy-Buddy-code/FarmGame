@@ -14,7 +14,7 @@
 import { gameConfig } from "../config/gameConfig";
 import type { CropId } from "../config/gameConfig";
 import type { SimTime } from "./clock";
-import { MINUTES_PER_DAY, dateOf } from "./calendar";
+import { MINUTES_PER_DAY, minutesPerMonth, dateOf } from "./calendar";
 import type { SaveState, Field, FieldStatus } from "../state/saveState";
 import { areaAcres } from "../geo/geometry";
 
@@ -69,10 +69,12 @@ export function plant(save: SaveState, field: Field, crop: CropId, now: SimTime,
   field.status = "planted";
 }
 
-/** Growth progress 0..1 (1 = harvest-ready). 0 if nothing is growing. */
+/** Growth progress 0..1 (1 = harvest-ready). 0 if nothing is growing.
+ * Keyed to game-MONTHS (via minutesPerMonth), so the same crop ripens in the same
+ * number of months — and thus the same season — whatever the days-per-month pace. */
 export function growthProgress(field: Field, now: SimTime): number {
   if (field.plantedAt === undefined || !field.crop) return 0;
-  const growMinutes = gameConfig.crops[field.crop].growDays * MINUTES_PER_DAY;
+  const growMinutes = gameConfig.crops[field.crop].growMonths * minutesPerMonth();
   return Math.min(1, (now - field.plantedAt) / growMinutes);
 }
 

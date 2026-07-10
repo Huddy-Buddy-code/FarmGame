@@ -105,7 +105,7 @@ describe("plow → plant → grow → harvest (brief §10, §12.3, §6)", () => 
     save.fields.push(field);
     plant(save, field, "corn", APRIL_1, () => 0.9); // high roll, off-center
     const truth = field.trueYieldTonsPerAcre!;
-    const growMin = gameConfig.crops.corn.growDays * MINUTES_PER_DAY;
+    const growMin = gameConfig.crops.corn.growMonths * minutesPerMonth();
     let prevWidth = Infinity;
     for (const p of [0, 0.25, 0.5, 0.75, 1]) {
       const r = yieldRange(field, APRIL_1 + p * growMin)!;
@@ -126,7 +126,7 @@ describe("plow → plant → grow → harvest (brief §10, §12.3, §6)", () => 
     save.fields.push(field);
     plant(save, field, "corn", APRIL_1, () => 0.5);
 
-    const ready = APRIL_1 + gameConfig.crops.corn.growDays * MINUTES_PER_DAY;
+    const ready = APRIL_1 + gameConfig.crops.corn.growMonths * minutesPerMonth();
     expect(growthProgress(field, ready)).toBe(1);
     expect(deriveStatus(field, ready)).toBe("ready");
 
@@ -142,6 +142,32 @@ describe("plow → plant → grow → harvest (brief §10, §12.3, §6)", () => 
     expect(field.status).toBe("harvested");
     expect(field.crop).toBeUndefined();
     expect(save.grain.corn).toBeCloseTo(100 * truth, 0);
+  });
+
+  it("growth is keyed to MONTHS: a crop ripens in the same season at any pace", () => {
+    // The bug this guards: growth used to be keyed to fixed 24h days, so shrinking
+    // the month (a pace knob) made crops take many game-months and miss their
+    // season. Keyed to months, the ripen MONTH is invariant to days-per-month.
+    const grow = gameConfig.crops.corn.growMonths;
+    const readyMonths = new Set<number>();
+    for (const dpm of [30, 10, 5]) {
+      setDaysPerMonth(dpm);
+      try {
+        const save = newGame();
+        const field = freshField();
+        save.fields.push(field);
+        const plantedAt = minutesPerMonth(); // April 1 at this pace
+        plant(save, field, "corn", plantedAt, () => 0.5);
+        const ready = plantedAt + grow * minutesPerMonth();
+        expect(growthProgress(field, ready)).toBeCloseTo(1, 6);
+        // Halfway through growth it should be mid-season, never fully grown.
+        expect(growthProgress(field, plantedAt + 0.5 * grow * minutesPerMonth())).toBeCloseTo(0.5, 6);
+        readyMonths.add(dateOf(ready).month);
+      } finally {
+        setDaysPerMonth(30);
+      }
+    }
+    expect(readyMonths.size).toBe(1); // same calendar month whatever the pace
   });
 
   it("sells grain from the bin at the flat price, clamped to what's stored", () => {
@@ -185,7 +211,7 @@ describe("auto-manage (idle mode, player-requested)", () => {
     expect(field.crop).toBe("corn");
 
     // Ready — auto-manage starts the harvest itself.
-    const growMin = gameConfig.crops.corn.growDays * MINUTES_PER_DAY;
+    const growMin = gameConfig.crops.corn.growMonths * minutesPerMonth();
     const ready = APRIL_1 + growMin;
     tickFarming(save, ready, MINUTES_PER_DAY);
     expect(field.status).toBe("ready");

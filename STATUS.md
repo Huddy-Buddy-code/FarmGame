@@ -3,9 +3,10 @@
 _Update at the end of every session (brief §13)._
 
 **Last session:** 2026-07-09 (cont'd again). Sell-field-back, a Fields tab (list +
-expected yield), an editable days-per-month pace knob, and a run of field-rendering
-polish (iterated with the maintainer): texture-matched soft border + slight
-fixed-distance corner bevel. Plus middle-mouse-drag panning. 26 tests green.
+expected yield), an editable days-per-month pace knob (+ growth re-keyed to MONTHS so
+crops stay in-season at any pace), field-rendering polish (texture-matched soft
+border + slight fixed-distance corner bevel), and middle-mouse-drag panning. 27 tests
+green.
 
 ---
 
@@ -163,19 +164,24 @@ slice of 5 (placeholder sale) are DONE. Next: **move the grain for real** (§12 
   days): `calendar.ts`'s `DAYS_PER_MONTH`/`MINUTES_PER_MONTH` consts became mutable
   module state (`getDaysPerMonth()` / `setDaysPerMonth()` / `minutesPerMonth()` —
   same pattern as `coords.ts`'s `setProjection`). A **dropdown in the time bar**
-  (5/10/15/20/25/30 days) changes it live; the crop calendar's harvest-band offset
-  (`growDays / daysPerMonth`) redraws immediately. Crop `growDays` stays in real
-  days always — shortening a month changes how fast the CALENDAR turns, never how
-  long a crop takes to grow. Persisted alongside the save (`PersistedGame.daysPerMonth`,
-  optional so old saves still load and just default to 30).
+  (5/10/15/20/25/30 days) changes it live. Persisted alongside the save
+  (`PersistedGame.daysPerMonth`, optional so old saves still load, default 30).
+- **Crop growth keyed to MONTHS, not days** (follow-up fix): originally growth used
+  a fixed 24h day (`growDays`), so shrinking the month made a crop take many
+  game-months and miss its season (110 days = 22 months at 5 days/month). Config is
+  now `growMonths` (corn 3.7, soy 3.3) and `growthProgress()` uses `minutesPerMonth()`,
+  so the pace knob rescales the WHOLE loop together — seasons AND crops speed up in
+  lockstep, harvest still lands in the same month at any pace (unit-tested invariant).
+  Harvest RATE stays acres-per-real-day (`harvestAcresPerDay`) — a combine's
+  throughput, correctly independent of calendar labelling.
 - **Middle-mouse-drag panning** (`wireMiddleMousePan` in `main.ts`): left-click is
   taken by field select / drawing, so panning got the middle button. MapLibre has
   no built-in middle-button pan, so we drive `panBy()` from raw pointer deltas
   (mousedown button 1 + `preventDefault` to kill autoscroll; window-level move/up so
   a drag off the canvas still tracks). Left-drag select, right-drag rotate, and
   scroll-zoom are untouched.
-- Tests: 26 total (up from 18) — new `tests/fields.test.ts` (sellField), calendar
-  pace test, 3 new `smoothPolygon` shape tests in `geometry.test.ts`.
+- Tests: 27 total (up from 18) — new `tests/fields.test.ts` (sellField), calendar
+  pace test, month-keyed-growth invariance test, 3 new `smoothPolygon` shape tests.
 
 ### Dev convenience
 - `start-dev.bat` — double-click to install (first run) + launch the dev server and

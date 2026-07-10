@@ -457,14 +457,15 @@ function wireTimeControls() {
     runMontage(target);
   });
 
-  // Calendar pace knob: how many days make up a game month. Purely a display/
-  // pacing setting (crop grow times stay in real days — see calendar.ts) so
-  // changing it is safe mid-campaign; only the crop-calendar bands need a redraw.
+  // Calendar pace knob: how many real days make up a game month. Everything the
+  // player cares about (crop growth, harvest-band positions) is keyed to MONTHS,
+  // so this cleanly rescales the whole farming loop — a shorter month = faster
+  // seasons AND proportionally faster crops, staying in sync. Safe mid-campaign;
+  // just refresh the HUD markers (year/day fractions depend on month length).
   const daysSel = $("days-per-month") as HTMLSelectElement;
   daysSel.value = String(getDaysPerMonth());
   daysSel.addEventListener("change", () => {
     setDaysPerMonth(Number(daysSel.value));
-    rebuildCropCalendarGrid();
     updateHud();
     toast(`🗓️ Month length set to ${daysSel.value} days`);
   });
@@ -535,12 +536,12 @@ function buildCropCalendar() {
   $("cal-close").addEventListener("click", () => ($("cropcal").style.display = "none"));
 }
 
-/** Rebuild the grid from gameConfig. Also called when days-per-month changes,
- * since the harvest bands' offset (growDays / daysPerMonth) depends on it. */
+/** Rebuild the grid from gameConfig. Bands are month-based (crop growMonths), so
+ * they're independent of the days-per-month pace knob — calendar-accurate at any
+ * pace, which is the whole point of keying growth to months. */
 function rebuildCropCalendarGrid() {
   const grid = $("cal-grid");
   const disp = (mo: number) => (mo - START_MONTH + MONTHS_PER_YEAR) % MONTHS_PER_YEAR;
-  const daysPerMonth = getDaysPerMonth();
 
   // Season header (the display year aligns with seasons: Mar starts spring).
   let html = `<div></div>`;
@@ -555,7 +556,7 @@ function rebuildCropCalendarGrid() {
   // One lane per crop with plant + harvest bands (percent of the display year).
   for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
     const cfg = gameConfig.crops[cropId];
-    const growMonths = cfg.growDays / daysPerMonth;
+    const growMonths = cfg.growMonths;
     const plantStart = disp(cfg.plantMonths[0]!);
     const plantLen = cfg.plantMonths.length;
     // Harvest opens a grow-time after the earliest planting and closes a

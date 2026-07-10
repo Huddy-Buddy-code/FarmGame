@@ -8,12 +8,11 @@
  * delivery, contracts) simple. Seasons are 3 months each, aligned to the farm year.
  *
  * Days-per-month is a **player-adjustable pace knob** (maintainer request,
- * 2026-07-09), not balance data — it changes how fast the calendar turns, not crop
- * biology. `growDays` (gameConfig) is always real days, so shortening the month
- * doesn't shorten how long a crop takes to grow — only how many "months" that spans
- * and how quickly planting windows open/close. Mutable module state, same pattern
- * as `coords.ts`'s `setProjection`: read live via `minutesPerMonth()`, never cache
- * the old constant.
+ * 2026-07-09), not balance data. Crop growth is keyed to game-MONTHS (`growMonths`
+ * in gameConfig), so shortening the month rescales the WHOLE farming loop together:
+ * seasons AND crops speed up in lockstep, harvest still lands in the right season.
+ * Mutable module state, same pattern as `coords.ts`'s `setProjection`: read live via
+ * `minutesPerMonth()`, never cache the old constant.
  *
  * A campaign starts on March 1, Year 1 — pre-planting, so the player's first
  * decision (what to plant in April/May) is in front of them, not behind them.
