@@ -20,7 +20,7 @@ import { boundsOf, padBounds, areaAcres, smoothPolygon } from "../geo/geometry";
 import { gameConfig } from "../config/gameConfig";
 import type { SaveState, Field } from "../state/saveState";
 import type { OverlayEngine } from "../map/overlay";
-import { paintField } from "./fieldRender";
+import { paintField, fieldEdgeColor } from "./fieldRender";
 import { growthProgress, isHarvesting } from "../sim/farming";
 import type { SimTime } from "../sim/clock";
 
@@ -116,33 +116,37 @@ export function renderField(map: MlMap, overlay: OverlayEngine, field: Field, no
   // Pad the surface a touch so the outline stroke isn't clipped at the edge.
   const bounds = padBounds(boundsOf(field.boundary), 4);
   const surface = overlay.createSurface(field.id, bounds);
-  // Seed the texture from the field id so repaints stay stable across a session.
-  paintField(surface, field.boundary, {
+  const paint = {
     status: field.status,
     crop: field.crop,
     progress: growthProgress(field, now),
     seed: hashSeed(field.id),
-  });
-  drawOutline(map, field);
+  };
+  // Seed the texture from the field id so repaints stay stable across a session.
+  paintField(surface, field.boundary, paint);
+  // Feather the boundary in a colour that MATCHES the texture (not white).
+  drawOutline(map, field, fieldEdgeColor(paint));
 }
 
 // Accumulates outline features so setData can rebuild the whole collection.
 const outlineFeatures = new Map<string, Feature>();
 
 /**
- * Vector outline of every field boundary — rounded (smoothPolygon, matching the
- * texture's rounded clip) and soft-edged rather than a crisp surveyor's line, so
- * it reads as a natural tilled-ground edge instead of a UI overlay. Two stacked
- * layers: a wide, blurred, low-opacity warm glow, then a thinner, still slightly
- * blurred core — no hard 1px white line anywhere.
+ * Field boundary as a THICK, BLURRY feather tinted to match the field's own
+ * texture (via the `color` feature property + a data-driven paint expression),
+ * NOT a contrasting white line. The blur softens the blocky raster edge of the
+ * texture canvas into the surrounding imagery, so instead of a crisp survey line
+ * tracing every 1 m stair-step, you get a natural field-margin fade. Rounded first
+ * (smoothPolygon, matching the texture clip). Width scales with zoom so the feather
+ * reads consistently whether you're zoomed to the county or a single field.
  */
-function drawOutline(map: MlMap, field: Field): void {
+function drawOutline(map: MlMap, field: Field, color: string): void {
   const sourceId = "field-outlines";
   const smoothed = smoothPolygon(field.boundary);
   outlineFeatures.set(field.id, {
     type: "Feature",
     id: field.id,
-    properties: { id: field.id },
+    properties: { id: field.id, color },
     geometry: {
       type: "Polygon",
       coordinates: [[...smoothed, smoothed[0]!].map((m) => toLngLat(m))],
@@ -159,16 +163,18 @@ function drawOutline(map: MlMap, field: Field): void {
     return;
   }
   map.addSource(sourceId, { type: "geojson", data });
+  // Widths/blur scale with zoom so the feather is a sensible on-screen thickness
+  // whether you're viewing the whole county or a single field.
   map.addLayer({
     id: "field-outlines-glow",
     type: "line",
     source: sourceId,
     layout: { "line-join": "round", "line-cap": "round" },
     paint: {
-      "line-color": "#fff3d6",
-      "line-width": 7,
-      "line-opacity": 0.28,
-      "line-blur": 3,
+      "line-color": ["get", "color"],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 12, 6, 16, 14, 19, 40],
+      "line-opacity": 0.55,
+      "line-blur": ["interpolate", ["linear"], ["zoom"], 12, 3, 16, 8, 19, 22],
     },
   });
   map.addLayer({
@@ -177,10 +183,10 @@ function drawOutline(map: MlMap, field: Field): void {
     source: sourceId,
     layout: { "line-join": "round", "line-cap": "round" },
     paint: {
-      "line-color": "#fdf6e3",
-      "line-width": 2.2,
-      "line-opacity": 0.6,
-      "line-blur": 1,
+      "line-color": ["get", "color"],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 12, 2, 16, 5, 19, 14],
+      "line-opacity": 0.7,
+      "line-blur": ["interpolate", ["linear"], ["zoom"], 12, 1.5, 16, 4, 19, 10],
     },
   });
 }

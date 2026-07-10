@@ -45,33 +45,27 @@ export function paintField(surface: Surface, boundary: Meters[], p: FieldPaintPa
     ctx.clip();
     const w = surface.canvas.width, h = surface.canvas.height;
 
+    const { base, dark, light } = palette(p);
+    ground(ctx, w, h, seed, base, dark, light);
+
     switch (p.status) {
       case "stubble":
-        ground(ctx, w, h, seed, "#b1a179", "#98875f", "#c2b28a");
         rows(ctx, w, h, angle, 3, "#c8b98f", 1, 0.16); // faint combine passes
         break;
 
       case "tilled":
-        // Fresh-turned soil: dark, with clear plow furrows.
-        ground(ctx, w, h, seed, "#6f5c44", "#5d4c37", "#7f6b50");
+        // Fresh-turned soil: clear plow furrows.
         rows(ctx, w, h, angle, 2.5, "#54432f", 1.1, 0.35);
         rows(ctx, w, h, angle, 2.5, "#837056", 0.7, 0.25, 1.25); // lit furrow edges
         break;
 
-      case "planted": {
-        // Seeded soil: a touch lighter than tilled, faint green rows emerging.
-        ground(ctx, w, h, seed, "#7c6a50", "#6a5a43", "#8c795d");
+      case "planted":
+        // Seeded soil: faint green rows emerging.
         rows(ctx, w, h, angle, 3, "#5d7444", 1, 0.3);
         break;
-      }
 
       case "growing": {
         const t = clamp01(((p.progress ?? 0) - 0.15) / 0.85); // 0 at emergence → 1 at ready
-        // Base ground closes over: soil → green canopy.
-        const base = lerpColor("#7c6a50", "#4f6b39", smooth(t));
-        const dark = lerpColor("#6a5a43", "#42592f", smooth(t));
-        const light = lerpColor("#8c795d", "#5d7c44", smooth(t));
-        ground(ctx, w, h, seed, base, dark, light);
         // Young crop: crisp green rows that thicken, then dissolve into canopy.
         const rowAlpha = t < 0.5 ? 0.55 : 0.55 - (t - 0.5) * 0.8; // fade as canopy closes
         rows(ctx, w, h, angle, 3, "#4a6a35", 1 + t * 1.6, Math.max(0.12, rowAlpha));
@@ -80,21 +74,13 @@ export function paintField(surface: Surface, boundary: Meters[], p: FieldPaintPa
         break;
       }
 
-      case "ready": {
-        // Mature, drying crop — corn goes golden-tan, soybeans ochre.
-        const [base, dark, light] =
-          p.crop === "soybeans"
-            ? ["#a3924f", "#8a7a3e", "#b5a563"]
-            : ["#b09a58", "#977f43", "#c2ad6d"];
-        ground(ctx, w, h, seed, base!, dark!, light!);
-        canopyMottle(ctx, w, h, seed + 7, dark!, light!, 0.8);
-        rows(ctx, w, h, angle, 3, dark!, 0.8, 0.18);
+      case "ready":
+        canopyMottle(ctx, w, h, seed + 7, dark, light, 0.8);
+        rows(ctx, w, h, angle, 3, dark, 0.8, 0.18);
         break;
-      }
 
       case "harvested":
-        // Cut stubble: pale straw with strong parallel cut lines + chaff rows.
-        ground(ctx, w, h, seed, "#b3a375", "#9a8a5e", "#c4b489");
+        // Cut stubble: strong parallel cut lines + chaff rows.
         rows(ctx, w, h, angle, 3, "#93835a", 1.2, 0.3);
         rows(ctx, w, h, angle, 9, "#c9ba90", 2.2, 0.28, 4.5); // windrowed chaff lines
         break;
@@ -102,6 +88,44 @@ export function paintField(surface: Surface, boundary: Meters[], p: FieldPaintPa
 
     ctx.restore();
   });
+}
+
+/**
+ * The base/dark/light tones for a field's current look. Single source of truth so
+ * the boundary outline (fields.ts) can tint itself to MATCH the texture instead of
+ * a contrasting white line. `growing` lerps soil→canopy with progress; `ready`
+ * shifts per crop — the outline follows both.
+ */
+function palette(p: FieldPaintParams): { base: string; dark: string; light: string } {
+  switch (p.status) {
+    case "stubble":
+      return { base: "#b1a179", dark: "#98875f", light: "#c2b28a" };
+    case "tilled":
+      return { base: "#6f5c44", dark: "#5d4c37", light: "#7f6b50" };
+    case "planted":
+      return { base: "#7c6a50", dark: "#6a5a43", light: "#8c795d" };
+    case "growing": {
+      const t = clamp01(((p.progress ?? 0) - 0.15) / 0.85);
+      return {
+        base: lerpColor("#7c6a50", "#4f6b39", smooth(t)),
+        dark: lerpColor("#6a5a43", "#42592f", smooth(t)),
+        light: lerpColor("#8c795d", "#5d7c44", smooth(t)),
+      };
+    }
+    case "ready":
+      return p.crop === "soybeans"
+        ? { base: "#a3924f", dark: "#8a7a3e", light: "#b5a563" }
+        : { base: "#b09a58", dark: "#977f43", light: "#c2ad6d" };
+    case "harvested":
+      return { base: "#b3a375", dark: "#9a8a5e", light: "#c4b489" };
+  }
+}
+
+/** The colour to feather a field's boundary with so the edge blends into (not
+ * fights) the texture — a touch darker than the base, reading as a field margin. */
+export function fieldEdgeColor(p: FieldPaintParams): string {
+  const { base, dark } = palette(p);
+  return lerpColor(base, dark, 0.5);
 }
 
 // --- texture building blocks ------------------------------------------------
