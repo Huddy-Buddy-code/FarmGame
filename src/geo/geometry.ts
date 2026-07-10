@@ -63,27 +63,29 @@ export function pointInPolygon([x, y]: Meters, ring: Meters[]): boolean {
 }
 
 /**
- * Round a closed ring's corners for DISPLAY ONLY (Chaikin corner-cutting).
- * Each edge is replaced by two points at 1/4 and 3/4 along it; repeating this a
- * few times converges toward a smooth rounded outline while staying close to the
- * original shape. Pure point-list math — no curves/canvas calls — so the exact
- * same smoothed ring works for both the canvas texture clip and the vector
- * outline layer (brief §4: draw in geo-space, so smooth in meters before the
- * lng/lat render conversion, not after).
+ * Lightly bevel + round a closed ring's corners for DISPLAY ONLY (corner-cutting).
+ * Each edge is replaced by two points a small fraction `cut` in from its ends, so
+ * only the region right around each corner is affected and the long straight edges
+ * stay straight — a subtle chamfer, not a blob. A second iteration turns the flat
+ * bevel into a gentle fillet. Pure point-list math — no curves/canvas calls — so
+ * the same ring works for both the canvas texture clip and the vector outline
+ * (brief §4: smooth in meters before the lng/lat render conversion, not after).
  *
- * Only for rendering: the true polygon (used for area, hit-testing, auto-manage)
- * is never replaced by this — a drawn field's stored boundary stays exactly what
- * the player clicked.
+ * `cut` is the fraction of each edge taken off near a corner (0.1 = 10%); keep it
+ * small so edges read as straight. Only for rendering: the true polygon (area,
+ * hit-testing, auto-manage) is never replaced — a drawn field's stored boundary
+ * stays exactly what the player clicked.
  */
-export function smoothPolygon(ring: Meters[], iterations = 3): Meters[] {
+export function smoothPolygon(ring: Meters[], iterations = 2, cut = 0.1): Meters[] {
+  const c = Math.min(0.5, Math.max(0, cut));
   let pts = ring;
   for (let iter = 0; iter < iterations; iter++) {
     const next: Meters[] = [];
     for (let i = 0; i < pts.length; i++) {
       const [x0, y0] = pts[i]!;
       const [x1, y1] = pts[(i + 1) % pts.length]!;
-      next.push([x0 + (x1 - x0) * 0.25, y0 + (y1 - y0) * 0.25]);
-      next.push([x0 + (x1 - x0) * 0.75, y0 + (y1 - y0) * 0.75]);
+      next.push([x0 + (x1 - x0) * c, y0 + (y1 - y0) * c]);
+      next.push([x0 + (x1 - x0) * (1 - c), y0 + (y1 - y0) * (1 - c)]);
     }
     pts = next;
   }
