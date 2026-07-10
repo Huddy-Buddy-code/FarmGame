@@ -115,12 +115,13 @@ truck + real buyer + local price/fuel — which replaces the placeholder sale.
   order) whose window is open the instant it's tilled, and starts harvest the
   instant it's ready — all silently retried next tick if unaffordable/out of season
   (never throws). Runs inside `tickFarming()`, so it works at any speed including
-  600×. Manual action buttons hide while a field is auto-managed; toasts narrate
+  the fastest. Manual action buttons hide while a field is auto-managed; toasts narrate
   what happened (useful after leaving the tab). Unit-tested end-to-end: a fresh
   stubble field plows → waits out the off-season → plants on the window's first day
   → harvests → re-plows itself, with zero manual calls.
-- **Speed buttons**: now pause/1×/60×/600× (was 5×/10×) — 600× runs a sim-day in
-  ~2.4 real minutes, meant to pair with auto-manage for real walk-away play.
+- **Speed buttons**: pause/1×/60×/3600× with exact real-time meanings — 1× is
+  literal real time, 60× is 1 real second = 1 game minute, 3600× is 1 real second =
+  1 game hour. Meant to pair with auto-manage for real walk-away play.
 - **Crop Calendar** panel (toolbar): FS-style planting/harvest bands per crop,
   derived from gameConfig, with a "you are here" line. **Year bar** under the HUD:
   season-themed strip (🌱☀️🍂❄️) with a position marker.
@@ -154,8 +155,8 @@ truck + real buyer + local price/fuel — which replaces the placeholder sale.
 - **Idle auto-manage exists but hasn't been played for real hours yet.** Verified via
   unit test (full stubble→tilled→planted→ready→harvested→tilled cycle, zero manual
   calls) and one in-browser toggle (started a harvest instantly on click); the
-  maintainer stopped the browser-preview session before watching a full 600× season
-  play out unattended. Worth an actual walk-away test next time.
+  maintainer stopped the browser-preview session before watching a full fast-speed
+  season play out unattended. Worth an actual walk-away test next time.
 - **Balance smell (partially addressed):** starting money raised to $1M this session
   (from $100k) so land isn't as cramped. Still no debt/loan mechanism (§8) — that's
   the more realistic long-term lever if balance needs more room.

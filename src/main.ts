@@ -6,8 +6,9 @@
  * grow on the sim clock, harvest into the grain bin.
  *
  * Time model (design decision, 2026-07-09): 1× is LITERAL real time — the game can
- * sit in a tab like an idle game. 5×/10× buttons for watching things move, and
- * "Skip to month" (with a short montage) is the main lever for jumping seasons.
+ * sit in a tab like an idle game. 60× (1 real second = 1 game minute) and 3600×
+ * (1 real second = 1 game hour) speed it up, and "Skip to month" (with a short
+ * montage) is the main lever for jumping seasons.
  */
 
 import maplibregl from "maplibre-gl";
@@ -299,9 +300,13 @@ function wirePersistence() {
 }
 
 // ---------------------------------------------------------------------------
-// Time controls: pause / 1× / 10× / 60× + skip-to-month montage.
+// Time controls: pause / 1× / 60× / 3600× + skip-to-month montage.
 // ---------------------------------------------------------------------------
-/** 1× = literal real time: 1 sim-minute per real minute. */
+/** 1× = literal real time: 1 sim-minute per real minute. Multiples of this base
+ * give the other speeds their exact "1 real second = N game time" meaning:
+ *   60×   → 1 real second = 1 game minute
+ *   3600× → 1 real second = 1 game hour
+ */
 const BASE_COMPRESSION = 1 / 60;
 
 function wireTimeControls() {
@@ -309,7 +314,7 @@ function wireTimeControls() {
     ["spd-pause", null],
     ["spd-1", 1],
     ["spd-60", 60],
-    ["spd-600", 600],
+    ["spd-3600", 3600],
   ];
   for (const [id, mult] of speeds) {
     $(id).addEventListener("click", () => {
@@ -389,7 +394,7 @@ function runMontage(target: number) {
 /** Put compression + play state back to whatever the speed buttons say. */
 function restoreSpeed(paused: boolean) {
   const active = document.querySelector("#timebar button.active")?.id ?? "spd-1";
-  const mult = active === "spd-600" ? 600 : active === "spd-60" ? 60 : 1;
+  const mult = active === "spd-3600" ? 3600 : active === "spd-60" ? 60 : 1;
   clock.setCompression(BASE_COMPRESSION * mult);
   if (active === "spd-pause" || paused) clock.pause();
   else clock.play();
