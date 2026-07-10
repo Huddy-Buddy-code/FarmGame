@@ -47,6 +47,10 @@ export interface Field {
   trueYieldTonsPerAcre?: number;
   /** Acres harvested so far (harvest runs over sim-days, brief §10). */
   harvestedAcres?: number;
+  /** Idle-game mode (brief §7-adjacent, player-requested): when true, the field
+   * plows, plants, and harvests itself the moment each is possible, so the
+   * player can walk away and the farm keeps running. */
+  autoManage?: boolean;
 }
 
 /** On-farm grain bin, tons per crop. Unlimited in this slice; storage limits and

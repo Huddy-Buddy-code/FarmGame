@@ -22,7 +22,7 @@ import { naipSource } from "./map/naip";
 import { addRoadsLayer } from "./map/roadsLayer";
 import { OverlayEngine } from "./map/overlay";
 import { newGame } from "./state/saveState";
-import type { SaveState } from "./state/saveState";
+import type { SaveState, Field } from "./state/saveState";
 import { buyFieldFromBoundary, renderField, initIdCounters } from "./field/fields";
 import { persistGame, loadGame, clearSavedGame } from "./state/persistence";
 import { sellGrain } from "./sim/economy";
@@ -33,7 +33,7 @@ import {
 } from "./sim/calendar";
 import {
   plant, tickFarming, growthProgress, yieldRange, startHarvest, isHarvesting,
-  inPlantingWindow, getHarvestingIds, restoreHarvesting, plow,
+  inPlantingWindow, getHarvestingIds, restoreHarvesting, plow, autoManageField,
 } from "./sim/farming";
 import { gameConfig } from "./config/gameConfig";
 import type { CropId } from "./config/gameConfig";
@@ -145,6 +145,7 @@ function tickWorld(prev: number) {
   const { changed } = tickFarming(save, now, dt);
   for (const f of changed) renderField(mapRef, overlay, f, now);
   repaintGrowthStages(now, changed);
+  for (const f of changed) if (f.autoManage) toastAutoAction(f);
   // Refresh UI ~2×/s (or instantly when a status flipped). Rebuilding the field
   // panel every frame would recreate its buttons under the player's cursor.
   const rt = performance.now();
@@ -170,6 +171,29 @@ function repaintGrowthStages(now: number, alreadyPainted: { id: string }[]) {
       paintedStage.set(f.id, bucket);
       renderField(mapRef, overlay, f, now);
     }
+  }
+}
+
+/** Toast feedback when an auto-managed field advances on its own, so a player
+ * who wanders back to the tab can see what happened while they were away. */
+function toastAutoAction(field: Field): void {
+  const name = prettyId(field.id);
+  switch (field.status) {
+    case "tilled":
+      toast(`🤖 Auto-plowed ${name}`);
+      break;
+    case "planted":
+      if (field.crop) {
+        const cfg = gameConfig.crops[field.crop];
+        toast(`🤖 Auto-planted ${cfg.emoji} ${cfg.name} on ${name}`);
+      }
+      break;
+    case "ready":
+      if (isHarvesting(field)) toast(`🤖 Auto-harvest started on ${name}`);
+      break;
+    case "harvested":
+      toast(`🤖 Auto-harvested ${name}`);
+      break;
   }
 }
 
@@ -503,6 +527,23 @@ function wireFieldSelection(map: maplibregl.Map) {
     else closeFieldPanel();
   });
   $("fp-close").addEventListener("click", closeFieldPanel);
+
+  ($("fp-auto") as HTMLInputElement).addEventListener("change", (e) => {
+    const field = save.fields.find((f) => f.id === selectedFieldId);
+    if (!field) return;
+    field.autoManage = (e.target as HTMLInputElement).checked;
+    if (field.autoManage) {
+      // Act immediately rather than waiting for the next tick, so flipping the
+      // switch feels responsive.
+      autoManageField(save, field, clock.time());
+      renderField(mapRef, overlay, field, clock.time());
+      updateHud();
+      toast(`🤖 ${prettyId(field.id)} will manage itself — plow, plant, harvest`);
+    } else {
+      toast(`🖐️ ${prettyId(field.id)} is back to manual control`);
+    }
+    refreshFieldPanel(true);
+  });
 }
 
 function openFieldPanel(fieldId: string) {
@@ -531,8 +572,9 @@ function refreshFieldPanel(force = false) {
   // Skip the rebuild when nothing visible changed — replacing buttons under the
   // player's cursor twice a second makes them unclickable. Growth/harvest progress
   // is bucketed to 1% so live bars still animate.
+  const auto = !!field.autoManage;
   const key = [
-    field.id, field.status, isHarvesting(field),
+    field.id, field.status, isHarvesting(field), auto,
     Math.round(growthProgress(field, now) * 100),
     Math.round(((field.harvestedAcres ?? 0) / acres) * 100),
     dateOf(now).month, // planting windows open/close on month boundaries
@@ -545,6 +587,7 @@ function refreshFieldPanel(force = false) {
   $("fp-sub").textContent = `${acres.toFixed(1)} acres`;
   const badge = $("fp-status");
   badge.textContent = isHarvesting(field) ? "harvesting" : field.status;
+  ($("fp-auto") as HTMLInputElement).checked = auto;
 
   const body = $("fp-body");
   const actions = $("fp-actions");
@@ -554,58 +597,66 @@ function refreshFieldPanel(force = false) {
   if (field.status === "stubble" || field.status === "harvested") {
     // --- Plow first (§10 lifecycle: stubble → tilled → planted) ---
     const cost = Math.round(acres * gameConfig.plowCostPerAcre);
-    body.innerHTML = `<div class="small" style="margin-top:8px">Plow to prepare for planting.</div>`;
-    const btn = document.createElement("button");
-    btn.className = "primary";
-    btn.innerHTML = `🚜 Plow <span class="small">$${cost.toLocaleString()}</span>`;
-    btn.addEventListener("click", () => {
-      try {
-        plow(save, field);
-        renderField(mapRef, overlay, field, clock.time());
-        updateHud();
-        fieldMsg("");
-        toast("🚜 Field plowed!");
-        refreshFieldPanel(true);
-      } catch (err) {
-        fieldMsg((err as Error).message);
-      }
-    });
-    actions.appendChild(btn);
-  } else if (field.status === "tilled") {
-    // --- Plant chooser ---
-    body.innerHTML = `<div class="small" style="margin-top:8px">Plant a crop:</div>`;
-    const row = document.createElement("div");
-    row.className = "cropbtns";
-    for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
-      const cfg = gameConfig.crops[cropId];
-      const cost = Math.round(acres * cfg.inputCostPerAcre);
+    if (auto) {
+      body.innerHTML = `<div class="auto-note">🤖 Waiting to plow (needs $${cost.toLocaleString()})…</div>`;
+    } else {
+      body.innerHTML = `<div class="small" style="margin-top:8px">Plow to prepare for planting.</div>`;
       const btn = document.createElement("button");
-      const open = inPlantingWindow(cropId, now);
-      btn.innerHTML = `${cfg.emoji} ${cfg.name}<br><span class="small">$${cost.toLocaleString()}</span>`;
-      if (!open) {
-        btn.disabled = true;
-        btn.title = `Plant in ${cfg.plantMonths.map((mo) => MONTH_SHORT[mo]).join("–")}`;
-        btn.style.opacity = "0.45";
-      }
+      btn.className = "primary";
+      btn.innerHTML = `🚜 Plow <span class="small">$${cost.toLocaleString()}</span>`;
       btn.addEventListener("click", () => {
         try {
-          plant(save, field, cropId, now);
+          plow(save, field);
           renderField(mapRef, overlay, field, clock.time());
           updateHud();
           fieldMsg("");
-          toast(`${cfg.emoji} ${cfg.name} planted!`);
-          refreshFieldPanel();
+          toast("🚜 Field plowed!");
+          refreshFieldPanel(true);
         } catch (err) {
           fieldMsg((err as Error).message);
         }
       });
-      row.appendChild(btn);
+      actions.appendChild(btn);
     }
-    body.appendChild(row);
-    const windows = (Object.keys(gameConfig.crops) as CropId[])
-      .map((c) => `${gameConfig.crops[c].emoji} ${gameConfig.crops[c].plantMonths.map((mo) => MONTH_SHORT[mo]).join("–")}`)
-      .join("   ");
-    body.insertAdjacentHTML("beforeend", `<div class="small">${windows}</div>`);
+  } else if (field.status === "tilled") {
+    if (auto) {
+      body.innerHTML = `<div class="auto-note">🤖 Waiting for a planting window…</div>`;
+    } else {
+      // --- Plant chooser ---
+      body.innerHTML = `<div class="small" style="margin-top:8px">Plant a crop:</div>`;
+      const row = document.createElement("div");
+      row.className = "cropbtns";
+      for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
+        const cfg = gameConfig.crops[cropId];
+        const cost = Math.round(acres * cfg.inputCostPerAcre);
+        const btn = document.createElement("button");
+        const open = inPlantingWindow(cropId, now);
+        btn.innerHTML = `${cfg.emoji} ${cfg.name}<br><span class="small">$${cost.toLocaleString()}</span>`;
+        if (!open) {
+          btn.disabled = true;
+          btn.title = `Plant in ${cfg.plantMonths.map((mo) => MONTH_SHORT[mo]).join("–")}`;
+          btn.style.opacity = "0.45";
+        }
+        btn.addEventListener("click", () => {
+          try {
+            plant(save, field, cropId, now);
+            renderField(mapRef, overlay, field, clock.time());
+            updateHud();
+            fieldMsg("");
+            toast(`${cfg.emoji} ${cfg.name} planted!`);
+            refreshFieldPanel();
+          } catch (err) {
+            fieldMsg((err as Error).message);
+          }
+        });
+        row.appendChild(btn);
+      }
+      body.appendChild(row);
+      const windows = (Object.keys(gameConfig.crops) as CropId[])
+        .map((c) => `${gameConfig.crops[c].emoji} ${gameConfig.crops[c].plantMonths.map((mo) => MONTH_SHORT[mo]).join("–")}`)
+        .join("   ");
+      body.insertAdjacentHTML("beforeend", `<div class="small">${windows}</div>`);
+    }
   } else if (field.crop) {
     // --- Growing / ready / harvesting ---
     const cfg = gameConfig.crops[field.crop];
@@ -633,20 +684,24 @@ function refreshFieldPanel(force = false) {
     body.innerHTML = html;
 
     if (field.status === "ready" && !isHarvesting(field)) {
-      const btn = document.createElement("button");
-      btn.className = "primary";
-      btn.textContent = "🚜 Harvest";
-      btn.addEventListener("click", () => {
-        try {
-          startHarvest(field, clock.time());
-          fieldMsg("");
-          toast("🚜 Harvest started!");
-          refreshFieldPanel();
-        } catch (err) {
-          fieldMsg((err as Error).message);
-        }
-      });
-      actions.appendChild(btn);
+      if (auto) {
+        body.insertAdjacentHTML("beforeend", `<div class="auto-note">🤖 Harvesting will start automatically…</div>`);
+      } else {
+        const btn = document.createElement("button");
+        btn.className = "primary";
+        btn.textContent = "🚜 Harvest";
+        btn.addEventListener("click", () => {
+          try {
+            startHarvest(field, clock.time());
+            fieldMsg("");
+            toast("🚜 Harvest started!");
+            refreshFieldPanel();
+          } catch (err) {
+            fieldMsg((err as Error).message);
+          }
+        });
+        actions.appendChild(btn);
+      }
     }
   }
 }

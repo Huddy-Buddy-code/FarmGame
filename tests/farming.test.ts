@@ -4,6 +4,7 @@ import { newGame } from "../src/state/saveState";
 import type { Field } from "../src/state/saveState";
 import {
   plant, plow, tickFarming, growthProgress, yieldRange, startHarvest, deriveStatus,
+  isHarvesting,
 } from "../src/sim/farming";
 import { sellGrain } from "../src/sim/economy";
 import { dateOf, formatDate, nextMonthStart, MINUTES_PER_DAY, MINUTES_PER_MONTH } from "../src/sim/calendar";
@@ -139,6 +140,66 @@ describe("plow → plant → grow → harvest (brief §10, §12.3, §6)", () => 
     expect(sellGrain(save, "corn", 10)).toEqual({ tons: 0, revenue: 0 });
   });
 
+});
+
+describe("auto-manage (idle mode, player-requested)", () => {
+  it("plows, plants, and harvests itself with no manual calls, then loops", () => {
+    const save = newGame();
+    const field = freshField("stubble");
+    field.autoManage = true;
+    save.fields.push(field);
+
+    // March 1: plowing has no season restriction, so it happens the first tick.
+    tickFarming(save, 0, 1);
+    expect(field.status).toBe("tilled");
+
+    // Rest of March: still tilled — corn's window (Apr–May) hasn't opened yet.
+    let now = 0;
+    for (let d = 0; d < 25; d++) {
+      now += MINUTES_PER_DAY;
+      tickFarming(save, now, MINUTES_PER_DAY);
+    }
+    expect(field.status).toBe("tilled");
+
+    // April 1: the window opens — auto-manage plants corn (first crop in config
+    // order whose window is open) with no plant() call from the test.
+    tickFarming(save, APRIL_1, MINUTES_PER_DAY);
+    expect(field.status).toBe("planted");
+    expect(field.crop).toBe("corn");
+
+    // Ready — auto-manage starts the harvest itself.
+    const growMin = gameConfig.crops.corn.growDays * MINUTES_PER_DAY;
+    const ready = APRIL_1 + growMin;
+    tickFarming(save, ready, MINUTES_PER_DAY);
+    expect(field.status).toBe("ready");
+    expect(isHarvesting(field)).toBe(true);
+
+    // Let the harvest run to completion (100 ac / 100 ac-per-day = 1 day). The
+    // same tick that finishes the harvest also auto-plows — the loop doesn't
+    // wait a tick between "harvested" and starting the next cycle.
+    let t = ready;
+    for (let i = 0; i < 6; i++) {
+      const dt = MINUTES_PER_DAY / 4;
+      t += dt;
+      tickFarming(save, t, dt);
+    }
+    expect(field.crop).toBeUndefined();
+    expect(save.grain.corn).toBeGreaterThan(0);
+    expect(field.status).toBe("tilled");
+  });
+
+  it("silently waits (doesn't throw) when a step isn't affordable or in season", () => {
+    const save = newGame();
+    save.money = 0; // can't afford plowing
+    const field = freshField("stubble");
+    field.autoManage = true;
+    save.fields.push(field);
+    expect(() => tickFarming(save, 0, 1)).not.toThrow();
+    expect(field.status).toBe("stubble"); // still waiting, no crash
+  });
+});
+
+describe("harvest edge cases", () => {
   it("refuses to harvest an unready field", () => {
     const save = newGame();
     const field = freshField();

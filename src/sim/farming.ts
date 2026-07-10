@@ -135,9 +135,52 @@ export function tickFarming(save: SaveState, now: SimTime, dtMinutes: number): T
       field.status = deriveStatus(field, now);
     }
 
+    if (field.autoManage) autoManageField(save, field, now);
+
     if (field.status !== before) changed.push(field);
   }
   return { changed };
+}
+
+/**
+ * Idle-game auto-management (player-requested, brief §7-adjacent): plow, plant,
+ * and harvest a field the instant each becomes possible, so a player can walk
+ * away and the farm keeps itself running. Failures (can't afford it yet, no
+ * crop's window is open) are silently retried next tick — never surfaced as
+ * errors, since there's no player action to blame them on.
+ */
+export function autoManageField(save: SaveState, field: Field, now: SimTime): void {
+  if (isHarvesting(field)) return; // already working; let it finish on its own
+  switch (field.status) {
+    case "stubble":
+    case "harvested":
+      try {
+        plow(save, field);
+      } catch {
+        /* can't afford it yet — retry next tick */
+      }
+      break;
+    case "tilled":
+      // Policy: plant the first crop (config order) whose window is open and
+      // affordable. A placeholder choice — real crop/contract strategy is a
+      // later decision layer; turn auto-manage off to hand-pick a crop.
+      for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
+        try {
+          plant(save, field, cropId, now);
+          break;
+        } catch {
+          /* this crop's window is closed or unaffordable — try the next */
+        }
+      }
+      break;
+    case "ready":
+      try {
+        startHarvest(field, now);
+      } catch {
+        /* guard only; deriveStatus already agrees the field is ready */
+      }
+      break;
+  }
 }
 
 /** Fields currently being harvested (session-scoped; not saved — v1). */
