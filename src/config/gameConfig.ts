@@ -43,7 +43,10 @@ export interface CropConfig {
   /** GAME-MONTHS from planting to harvest-ready. Keyed to months (not days) so the
    * crop stays synced to the calendar/seasons at any month length: shorten the
    * days-per-month pace knob and growth speeds up proportionally, harvest still
-   * lands in the same season. (~3.7 months ≈ a real corn season.) */
+   * lands in the same season. MUST be a WHOLE number: growth is measured from the
+   * START of the planting month, so the crop ripens on the 1st of a month exactly
+   * `growMonths` later — the day you actually seeded (2nd, 3rd…) doesn't matter
+   * (maintainer request, 2026-07-10). */
   growMonths: number;
   /** Placeholder flat sale price, $/ton. Replaced by the real market (buyers,
    * local demand, hauling) in the economy slice (brief §5) — this just lets the
@@ -115,7 +118,7 @@ export const gameConfig: GameConfig = {
       baseYieldTonsPerAcre: 5.5, // ~200 bu/ac
       yieldUncertainty: 0.3,
       plantMonths: [3, 4], // Apr–May
-      growMonths: 3.7, // ~110 days at 30-day months → ripe by Aug
+      growMonths: 4, // whole months → planted in Apr, ready the 1st of Aug
       sellPricePerTon: 180,
     },
     soybeans: {
@@ -125,7 +128,7 @@ export const gameConfig: GameConfig = {
       baseYieldTonsPerAcre: 1.6, // ~60 bu/ac
       yieldUncertainty: 0.3,
       plantMonths: [4, 5], // May–Jun
-      growMonths: 3.3, // ~100 days at 30-day months → ripe by Sep
+      growMonths: 4, // whole months → planted in May, ready the 1st of Sep
       sellPricePerTon: 390,
     },
   },

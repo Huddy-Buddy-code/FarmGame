@@ -72,11 +72,19 @@ export function applyHarvestDone(field: Field): void {
 
 /** Growth progress 0..1 (1 = harvest-ready). 0 if nothing is growing.
  * Keyed to game-MONTHS (via minutesPerMonth), so the same crop ripens in the same
- * number of months — and thus the same season — whatever the days-per-month pace. */
+ * number of months — and thus the same season — whatever the days-per-month pace.
+ *
+ * Growth is measured from the START of the planting MONTH, not the exact plant
+ * instant (maintainer request): since growMonths is a whole number, the crop hits
+ * progress 1 on the 1st of the month `growMonths` later, no matter which day it
+ * was actually seeded. Harvest thus becomes available on a month boundary, mirror-
+ * ing how planting windows open on the 1st. */
 export function growthProgress(field: Field, now: SimTime): number {
   if (field.plantedAt === undefined || !field.crop) return 0;
-  const growMinutes = gameConfig.crops[field.crop].growMonths * minutesPerMonth();
-  return Math.min(1, (now - field.plantedAt) / growMinutes);
+  const mpm = minutesPerMonth();
+  const growMinutes = gameConfig.crops[field.crop].growMonths * mpm;
+  const plantMonthStart = Math.floor(field.plantedAt / mpm) * mpm;
+  return Math.min(1, (now - plantMonthStart) / growMinutes);
 }
 
 /**

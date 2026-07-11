@@ -221,6 +221,20 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     expect(prevWidth).toBeLessThan((atPlant.high - atPlant.low) * 0.3);
   });
 
+  it("ripens on the 1st of the month regardless of which day it was seeded", () => {
+    const field = freshField();
+    // Seed mid-April (day 15) — the day shouldn't matter.
+    applyPlant(field, "corn", minutesPerMonth() + 14 * MINUTES_PER_DAY, () => 0.5);
+    const grow = gameConfig.crops.corn.growMonths; // whole months
+    const readyTime = minutesPerMonth() * (1 + grow); // start of April + grow months
+    expect(dateOf(readyTime)).toMatchObject({ month: 7, day: 1 }); // Aug 1
+    // A day before the boundary it isn't ready; on the boundary it is.
+    expect(growthProgress(field, readyTime - MINUTES_PER_DAY)).toBeLessThan(1);
+    expect(deriveStatus(field, readyTime - MINUTES_PER_DAY)).not.toBe("ready");
+    expect(growthProgress(field, readyTime)).toBeGreaterThanOrEqual(1);
+    expect(deriveStatus(field, readyTime)).toBe("ready");
+  });
+
   it("growth is keyed to MONTHS: a crop ripens in the same season at any pace", () => {
     const grow = gameConfig.crops.corn.growMonths;
     const readyMonths = new Set<number>();
