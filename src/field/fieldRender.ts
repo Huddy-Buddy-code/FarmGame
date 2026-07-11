@@ -117,8 +117,8 @@ export function drawFieldTexture(
     ctx.globalCompositeOperation = "destination-out";
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
-    const featherPx = 9; // inward fade width (≈ metres at 1 m/px)
-    const passes = 8;
+    const featherPx = 3; // inward fade width (≈ metres at 1 m/px) — a tight, crisp margin
+    const passes = 6;
     for (let k = 0; k < passes; k++) {
       ctx.globalAlpha = 0.3;
       ctx.lineWidth = 2 * featherPx * (1 - k / passes) + 1.5; // wide → narrow

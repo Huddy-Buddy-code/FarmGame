@@ -175,9 +175,9 @@ function drawOutline(map: MlMap, field: Field, color: string): void {
     layout: { "line-join": "round", "line-cap": "round" },
     paint: {
       "line-color": ["get", "color"],
-      "line-width": ["interpolate", ["linear"], ["zoom"], 12, 1.5, 16, 3, 19, 7],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.75, 16, 1.5, 19, 4],
       "line-opacity": 0.3,
-      "line-blur": ["interpolate", ["linear"], ["zoom"], 12, 2, 16, 4, 19, 8],
+      "line-blur": ["interpolate", ["linear"], ["zoom"], 12, 1, 16, 2, 19, 5],
     },
   });
 }
