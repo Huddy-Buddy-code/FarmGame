@@ -83,6 +83,15 @@ function sizedName(base: string, size: EquipmentSize, n: number): string {
   return n === 1 ? sized : `${sized} ${n}`;
 }
 
+/** A display name not already taken — "Medium Tractor", then "Medium Tractor 2",
+ * 3, … — so names stay unique even after machines are bought and sold. */
+function uniqueName(taken: string[], base: string): string {
+  if (!taken.includes(base)) return base;
+  let n = 2;
+  while (taken.includes(`${base} ${n}`)) n++;
+  return `${base} ${n}`;
+}
+
 /** Make sure the starting fleet exists (also upgrades pre-agent saves): a medium
  * tractor + medium combine, plus a medium plow hitched to the tractor so plowing
  * works out of the box. `home` is where machines park (county center v1). */
@@ -107,17 +116,25 @@ export function ensureAgents(save: SaveState, home: Meters): void {
     if (tractor) impl.attachedTo = tractor.id;
     save.implements.push(impl);
   }
+  // De-dup display names (older saves numbered by live count, which could collide
+  // once a machine had been sold — e.g. two "Medium Tractor 2"). Keep the first,
+  // renumber later clashes.
+  const taken = new Set<string>();
+  for (const a of save.agents) {
+    if (taken.has(a.name)) a.name = uniqueName([...taken], a.name.replace(/ \d+$/, ""));
+    taken.add(a.name);
+  }
 }
 
 function makeAgent(save: SaveState, kind: EquipmentKind, size: EquipmentSize, pos: Meters): Agent {
   let n = 1;
   while (save.agents.some((a) => a.id === `${kind}-${n}`)) n++;
-  // Name numbers within a size class, so the first Large is just "Large Tractor".
-  const nth = save.agents.filter((a) => a.kind === kind && a.size === size).length + 1;
+  // Unique display name within the fleet ("Medium Tractor", "Medium Tractor 2"…).
+  const base = `${SIZE_LABEL[size]} ${EQUIPMENT_NAME[kind]}`;
   return {
     id: `${kind}-${n}`,
     kind,
-    name: sizedName(EQUIPMENT_NAME[kind], size, nth),
+    name: uniqueName(save.agents.map((a) => a.name), base),
     size,
     pos,
     state: "idle",

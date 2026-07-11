@@ -277,6 +277,7 @@
       .equip-row .er-info { flex: 1; min-width: 0; }
       .equip-row .er-name { font-weight: 700; }
       .equip-row .er-status { font-size: 12px; color: #8a7658; }
+      .equip-row .er-sub { font-size: 11px; color: #a08a68; margin-top: 1px; }
       .equip-row .progress { height: 7px; margin: 4px 0 1px; }
       .er-btn { padding: 4px 8px; font-size: 14px; }
       .er-btn:disabled { opacity: 0.4; cursor: default; }
@@ -413,10 +414,13 @@
     <div id="equiptab" class="panel">
       <button class="close" id="equip-close">✕</button>
       <h2>🚜 Equipment</h2>
-      <div class="sub">Tractors pull implements (their size or smaller); the combine works alone</div>
-      <div id="equip-shop"></div>
-      <div class="equip-heading">Your fleet</div>
-      <div id="equip-rows"></div>
+      <div class="sub">Machines you drive · implements you attach</div>
+      <button id="equip-buy-toggle" class="primary" style="width:100%; margin-bottom:6px;">＋ Buy equipment</button>
+      <div id="equip-shop" style="display:none"></div>
+      <div class="equip-heading">Machines</div>
+      <div id="equip-machines"></div>
+      <div class="equip-heading">Implements</div>
+      <div id="equip-implements"></div>
     </div>
 
     <div id="inventory" class="panel">

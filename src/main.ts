@@ -46,7 +46,7 @@ import {
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
 } from "./sim/tasks";
 import type { EquipmentKind } from "./sim/tasks";
-import type { FarmTask, Agent, FieldStatus } from "./state/saveState";
+import type { FarmTask, Agent, Implement, FieldStatus } from "./state/saveState";
 import { gameConfig } from "./config/gameConfig";
 import type { CropId, EquipmentSize } from "./config/gameConfig";
 
@@ -746,6 +746,15 @@ function wireEquipTab() {
     if (opening) refreshEquipTab(true);
   });
   $("equip-close").addEventListener("click", () => ($("equiptab").style.display = "none"));
+
+  // The shop is tucked behind a toggle so the panel defaults to the fleet.
+  $("equip-buy-toggle").addEventListener("click", () => {
+    const shop = $("equip-shop");
+    const open = shop.style.display !== "block";
+    shop.style.display = open ? "block" : "none";
+    $("equip-buy-toggle").textContent = open ? "✕ Close shop" : "＋ Buy equipment";
+    if (open) buildEquipShop();
+  });
 }
 
 /** Refresh after any fleet change: HUD cash, map dots, panels. */
@@ -785,8 +794,10 @@ function refreshEquipTab(force = false) {
   if (!force && key === lastEquipKey) return;
   lastEquipKey = key;
 
-  buildEquipShop();
-  buildEquipFleet();
+  // Only rebuild the shop if it's currently open (affordability may have changed).
+  if ($("equip-shop").style.display === "block") buildEquipShop();
+  buildEquipMachines();
+  buildEquipImplements();
 }
 
 /** The "buy" shop: tractors & plows in each size, plus the combine. */
@@ -853,13 +864,21 @@ function buyButton(label: string, price: number, onBuy: () => void): HTMLButtonE
   return btn;
 }
 
-/** The owned fleet: tractors (with a plow selector), the combine, and yard plows. */
-function buildEquipFleet(): void {
-  const rows = $("equip-rows");
+/** MACHINES you drive: tractors + the combine. A tractor shows the plow it's
+ * carrying as a subtitle; attaching is done from the Implements area below. */
+function buildEquipMachines(): void {
+  const rows = $("equip-machines");
   rows.innerHTML = "";
-
   for (const agent of save.agents) {
     const { text, pct } = agentStatusText(agent);
+    const carried =
+      agent.kind === "tractor"
+        ? save.implements.find((i) => i.attachedTo === agent.id)
+        : undefined;
+    const sub = agent.kind === "tractor"
+      ? `<div class="er-sub">🔧 ${carried ? implementName(save, carried) : "no implement"}</div>`
+      : "";
+
     const row = document.createElement("div");
     row.className = "equip-row";
     row.innerHTML = `
@@ -867,11 +886,9 @@ function buildEquipFleet(): void {
       <span class="er-info">
         <div class="er-name">${agent.name}</div>
         <div class="er-status">${text}</div>
+        ${sub}
         ${pct !== null ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
       </span>`;
-
-    // Tractors get a plow selector (hitch/unhitch).
-    if (agent.kind === "tractor") row.appendChild(plowSelector(agent));
 
     row.appendChild(locateButton(agent.name, agent.pos));
 
@@ -886,22 +903,38 @@ function buildEquipFleet(): void {
     );
     rows.appendChild(row);
   }
+}
 
-  // Plows parked in the yard (unattached) — attached ones show on their tractor.
-  for (const impl of save.implements) {
-    if (impl.attachedTo) continue;
+/** IMPLEMENTS you attach: every plow, with a selector to hitch it to a tractor
+ * (or park it in the yard) and a sell button. */
+function buildEquipImplements(): void {
+  const rows = $("equip-implements");
+  rows.innerHTML = "";
+  const plows = save.implements.filter((i) => i.kind === "plow");
+  if (plows.length === 0) {
+    rows.innerHTML = `<div id="fields-empty">No implements — buy a plow so a tractor can till.</div>`;
+    return;
+  }
+  for (const impl of plows) {
     const ft = gameConfig.equipment.plow[impl.size].widthFt;
+    const host = impl.attachedTo ? save.agents.find((a) => a.id === impl.attachedTo) : undefined;
+    const where = host ? `On ${host.name}` : "In the yard";
     const refund = impl.purchaseCost ?? implementPrice(impl.kind, impl.size);
+
     const row = document.createElement("div");
     row.className = "equip-row implement";
     row.innerHTML = `
       <span class="icon">🔧</span>
       <span class="er-info">
         <div class="er-name">${implementName(save, impl)}</div>
-        <div class="er-status">In the yard · ${ft} ft wide</div>
+        <div class="er-status">${where} · ${ft} ft wide</div>
       </span>`;
+
+    row.appendChild(hitchSelector(impl));
+
+    const busy = !!host && host.state !== "idle";
     row.appendChild(
-      iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, () => {
+      iconButton("💰", busy ? `${host!.name} is using this` : `Sell · $${refund.toLocaleString()}`, busy, () => {
         if (!confirm(`Sell ${implementName(save, impl)} for $${refund.toLocaleString()}?`)) return;
         const { refund: paid } = sellImplement(save, impl.id);
         afterFleetChange();
@@ -912,34 +945,32 @@ function buildEquipFleet(): void {
   }
 }
 
-/** A <select> to hitch/unhitch a plow on `tractor` (its size class or smaller). */
-function plowSelector(tractor: Agent): HTMLElement {
+/** A <select> on the implement side to hitch it to a compatible idle tractor, or
+ * unhitch it to the yard. Tractors must be able to pull this size and be idle. */
+function hitchSelector(impl: Implement): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "er-hitch";
-  const attached = save.implements.find((i) => i.attachedTo === tractor.id && i.kind === "plow");
-  const options = save.implements.filter(
-    (i) => i.kind === "plow" && tractor.size && canPull(tractor.size, i.size) && (!i.attachedTo || i.id === attached?.id),
-  );
+  const host = impl.attachedTo ? save.agents.find((a) => a.id === impl.attachedTo) : undefined;
   const sel = document.createElement("select");
   sel.className = "hitch-select";
-  sel.disabled = tractor.state !== "idle";
-  sel.title = tractor.state !== "idle" ? "Can't change implements mid-job" : "Hitch a plow";
-  const none = new Option("— no plow —", "");
-  none.selected = !attached;
-  sel.add(none);
-  for (const impl of options) {
-    const ft = gameConfig.equipment.plow[impl.size].widthFt;
-    const o = new Option(`${implementName(save, impl)} (${ft}ft)`, impl.id);
-    if (impl.id === attached?.id) o.selected = true;
+  // Can't re-hitch while the current host is mid-job.
+  sel.disabled = !!host && host.state !== "idle";
+  sel.title = sel.disabled ? "That tractor is mid-job" : "Attach to a tractor";
+
+  const yard = new Option("— in the yard —", "");
+  yard.selected = !host;
+  sel.add(yard);
+  for (const t of save.agents) {
+    if (t.kind !== "tractor" || !t.size || !canPull(t.size, impl.size)) continue;
+    if (t.state !== "idle" && t.id !== host?.id) continue; // only idle tractors (or the current host)
+    const o = new Option(t.name, t.id);
+    if (t.id === host?.id) o.selected = true;
     sel.add(o);
   }
   sel.addEventListener("change", () => {
     try {
-      if (sel.value === "") {
-        if (attached) detachImplement(save, attached.id);
-      } else {
-        attachImplement(save, tractor.id, sel.value);
-      }
+      if (sel.value === "") detachImplement(save, impl.id);
+      else attachImplement(save, sel.value, impl.id);
       afterFleetChange();
     } catch (err) {
       toast("❌ " + (err as Error).message, 3500);
