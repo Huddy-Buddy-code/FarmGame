@@ -624,15 +624,24 @@ function toast(text: string, ms = 2600) {
 }
 
 // ---------------------------------------------------------------------------
+// The four bottom-toolbar panels are MUTUALLY EXCLUSIVE — opening one closes any
+// other. Clicking the active panel's own button closes it (toggle).
+// ---------------------------------------------------------------------------
+const TOOLBAR_PANELS = ["fieldstab", "equiptab", "cropcal", "inventory"];
+function toggleToolbarPanel(id: string, onOpen?: () => void): void {
+  const opening = $(id).style.display !== "block";
+  for (const p of TOOLBAR_PANELS) $(p).style.display = "none";
+  if (opening) {
+    $(id).style.display = "block";
+    onOpen?.();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Inventory: grain storage + the v0 flat-price sale (real market comes later).
 // ---------------------------------------------------------------------------
 function wireInventory() {
-  $("btn-inventory").addEventListener("click", () => {
-    const el = $("inventory");
-    const opening = el.style.display !== "block";
-    el.style.display = opening ? "block" : "none";
-    if (opening) refreshInventory();
-  });
+  $("btn-inventory").addEventListener("click", () => toggleToolbarPanel("inventory", refreshInventory));
   $("inv-close").addEventListener("click", () => ($("inventory").style.display = "none"));
 }
 
@@ -673,12 +682,7 @@ function refreshInventory() {
 // Click a row to open its detail panel (where Plow/Plant/Harvest/Sell live).
 // ---------------------------------------------------------------------------
 function wireFieldsTab() {
-  $("btn-fields").addEventListener("click", () => {
-    const el = $("fieldstab");
-    const opening = el.style.display !== "block";
-    el.style.display = opening ? "block" : "none";
-    if (opening) refreshFieldsTab();
-  });
+  $("btn-fields").addEventListener("click", () => toggleToolbarPanel("fieldstab", refreshFieldsTab));
   $("fields-close").addEventListener("click", () => ($("fieldstab").style.display = "none"));
 }
 
@@ -739,12 +743,7 @@ const SIZES: EquipmentSize[] = ["small", "medium", "large"];
 const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
 
 function wireEquipTab() {
-  $("btn-equip").addEventListener("click", () => {
-    const el = $("equiptab");
-    const opening = el.style.display !== "block";
-    el.style.display = opening ? "block" : "none";
-    if (opening) refreshEquipTab(true);
-  });
+  $("btn-equip").addEventListener("click", () => toggleToolbarPanel("equiptab", () => refreshEquipTab(true)));
   $("equip-close").addEventListener("click", () => ($("equiptab").style.display = "none"));
 
   // The shop is tucked behind a toggle so the panel defaults to the fleet.
@@ -1140,11 +1139,7 @@ function restoreSpeed(paused: boolean) {
 function buildCropCalendar() {
   rebuildCropCalendarGrid();
 
-  $("btn-cropcal").addEventListener("click", () => {
-    const el = $("cropcal");
-    el.style.display = el.style.display === "block" ? "none" : "block";
-    updateHud();
-  });
+  $("btn-cropcal").addEventListener("click", () => toggleToolbarPanel("cropcal", updateHud));
   $("cal-close").addEventListener("click", () => ($("cropcal").style.display = "none"));
 }
 
