@@ -141,10 +141,12 @@ function palette(p: FieldPaintParams): { base: string; dark: string; light: stri
 }
 
 /** The colour to feather a field's boundary with so the edge blends into (not
- * fights) the texture — a touch darker than the base, reading as a field margin. */
+ * fights) the texture — only slightly darker than the base, so the halo reads as
+ * a soft field margin rather than a dark drawn line where it laps over the green
+ * surroundings. */
 export function fieldEdgeColor(p: FieldPaintParams): string {
   const { base, dark } = palette(p);
-  return lerpColor(base, dark, 0.5);
+  return lerpColor(base, dark, 0.3);
 }
 
 // --- texture building blocks ------------------------------------------------
