@@ -106,6 +106,26 @@ export function drawFieldTexture(
     }
 
     ctx.restore();
+
+    // Feather the hard clip edge into transparency. The texture was clipped to a
+    // crisp raster boundary; against the green imagery that reads as a dark line
+    // no overlaid halo can fully hide. Stacked `destination-out` strokes along the
+    // boundary — widest first, each erasing a little — carve a soft inward alpha
+    // ramp: ~transparent at the very edge, full texture a few metres in, so the
+    // field melts into the imagery like a real field margin.
+    ctx.save();
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    const featherPx = 9; // inward fade width (≈ metres at 1 m/px)
+    const passes = 8;
+    for (let k = 0; k < passes; k++) {
+      ctx.globalAlpha = 0.3;
+      ctx.lineWidth = 2 * featherPx * (1 - k / passes) + 1.5; // wide → narrow
+      tracePolygon(ctx, smoothed, toPixel);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 }
 
