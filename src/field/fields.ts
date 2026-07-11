@@ -165,24 +165,9 @@ function drawOutline(map: MlMap, field: Field, color: string): void {
   map.addSource(sourceId, { type: "geojson", data });
   // Widths/blur scale with zoom so the feather is a sensible on-screen thickness
   // whether you're viewing the whole county or a single field.
-  // A soft outer HALO does most of the work: wide and heavily blurred so, even at
-  // the county/whole-field overview zoom, the boundary reads as a hazy field
-  // margin rather than a drawn line. Blur is kept >= the width so there is no
-  // crisp core at any zoom.
-  map.addLayer({
-    id: "field-outlines-glow",
-    type: "line",
-    source: sourceId,
-    layout: { "line-join": "round", "line-cap": "round" },
-    paint: {
-      "line-color": ["get", "color"],
-      "line-width": ["interpolate", ["linear"], ["zoom"], 12, 9, 16, 22, 19, 52],
-      "line-opacity": 0.4,
-      "line-blur": ["interpolate", ["linear"], ["zoom"], 12, 10, 16, 22, 19, 48],
-    },
-  });
-  // A faint inner pass just deepens the margin a touch — low opacity and blurred
-  // enough that it never reads as a hard edge on its own.
+  // The texture now feathers its OWN edge into the imagery (see fieldRender), so
+  // this is just a single faint, tight accent that gives the margin a touch of
+  // definition — NOT a wide glowing halo. Kept small at every zoom.
   map.addLayer({
     id: "field-outlines",
     type: "line",
@@ -190,9 +175,9 @@ function drawOutline(map: MlMap, field: Field, color: string): void {
     layout: { "line-join": "round", "line-cap": "round" },
     paint: {
       "line-color": ["get", "color"],
-      "line-width": ["interpolate", ["linear"], ["zoom"], 12, 3, 16, 7, 19, 16],
-      "line-opacity": 0.32,
-      "line-blur": ["interpolate", ["linear"], ["zoom"], 12, 4, 16, 9, 19, 18],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 12, 1.5, 16, 3, 19, 7],
+      "line-opacity": 0.3,
+      "line-blur": ["interpolate", ["linear"], ["zoom"], 12, 2, 16, 4, 19, 8],
     },
   });
 }
