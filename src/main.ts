@@ -32,7 +32,7 @@ import { persistGame, loadGame, clearSavedGame } from "./state/persistence";
 import { sellGrain } from "./sim/economy";
 import { SimClock } from "./sim/clock";
 import {
-  formatDate, dateOf, nextMonthStart, MONTH_NAMES, MONTH_SHORT,
+  formatDate, dateOf, MONTH_NAMES, MONTH_SHORT,
   START_MONTH, MONTHS_PER_YEAR, MINUTES_PER_DAY,
   getDaysPerMonth, setDaysPerMonth, minutesPerMonth,
 } from "./sim/calendar";
@@ -332,15 +332,20 @@ function updateAgentMarkers(): void {
   for (const agent of save.agents) {
     let marker = agentMarkers.get(agent.id);
     if (!marker) {
-      // Outer dot = chrome + bounce; inner glyph rotates to the driving heading,
-      // so the two transforms don't fight (bounce animates the outer element).
+      // IMPORTANT: MapLibre positions the marker by writing `transform` on the
+      // ROOT element, so none of our CSS may touch the root's transform. The
+      // bounce and the heading rotation therefore live on nested children:
+      //   .agent-dot (root, MapLibre's transform) > .agent-bob (bounce) > .agent-glyph (heading)
       const el = document.createElement("div");
       el.className = "agent-dot";
       el.title = agent.name;
+      const bob = document.createElement("span");
+      bob.className = "agent-bob";
       const glyph = document.createElement("span");
       glyph.className = "agent-glyph";
       glyph.innerHTML = (AGENT_ICON[agent.kind] ?? tractorIconSvg)(20);
-      el.appendChild(glyph);
+      bob.appendChild(glyph);
+      el.appendChild(bob);
       marker = new maplibregl.Marker({ element: el }).setLngLat(toLngLat(agent.pos)).addTo(mapRef);
       agentMarkers.set(agent.id, marker);
     } else {
@@ -1024,22 +1029,12 @@ function wireTimeControls() {
   }
   clock.setCompression(BASE_COMPRESSION);
 
-  // Skip-to-month dropdown: always offers the next 12 month-starts.
-  const sel = $("skip-month") as HTMLSelectElement;
-  const rebuild = () => {
-    const cur = dateOf(clock.time()).month;
-    sel.options.length = 1;
-    for (let i = 1; i <= 12; i++) {
-      const mo = (cur + i) % 12;
-      sel.add(new Option(`${MONTH_SHORT[mo]} 1`, String(mo)));
-    }
-  };
-  rebuild();
-  sel.addEventListener("focus", rebuild);
-  sel.addEventListener("change", () => {
-    if (sel.value === "") return;
-    const target = nextMonthStart(clock.time(), Number(sel.value));
-    sel.value = "";
+  // Skip to the END of the current month (= the start of the next one), via the
+  // same fully-simulated montage. Simpler than picking a month: one press moves
+  // the season forward a step.
+  $("skip-month").addEventListener("click", () => {
+    const mpm = minutesPerMonth();
+    const target = (Math.floor(clock.time() / mpm) + 1) * mpm; // start of next month
     runMontage(target);
   });
 

@@ -315,8 +315,12 @@
         background: var(--cream); border: 2px solid var(--wood);
         border-radius: 999px; padding: 3px 4px; box-shadow: var(--shadow);
       }
+      /* Bounce + heading rotation live on CHILDREN — never the root, whose
+         transform MapLibre owns for positioning (touching it hides the marker). */
+      .agent-dot .agent-bob { display: inline-flex; }
       .agent-dot .agent-glyph { display: inline-flex; transition: transform 0.12s linear; }
-      .agent-dot.working { border-color: var(--green-dark); animation: chug 0.9s infinite; }
+      .agent-dot.working { border-color: var(--green-dark); }
+      .agent-dot.working .agent-bob { animation: chug 0.9s infinite; }
       @keyframes chug {
         0%, 100% { transform: translateY(0) rotate(-2deg); }
         50% { transform: translateY(-2px) rotate(2deg); }
@@ -379,9 +383,7 @@
       <button id="spd-1" class="active" title="Real time — 1 real second = 1 game second">1×</button>
       <button id="spd-60" title="1 real second = 1 game minute">60×</button>
       <button id="spd-3600" title="1 real second = 1 game hour">3600×</button>
-      <select id="skip-month" title="Skip ahead to the 1st of a month">
-        <option value="">⏭ Skip to…</option>
-      </select>
+      <button id="skip-month" title="Fast-forward to the end of the current month">⏭ Skip to end of month</button>
       <select id="days-per-month" title="Days in a game month — shorten it to cycle through seasons faster">
         <option value="5">5 days/mo</option>
         <option value="10">10 days/mo</option>
