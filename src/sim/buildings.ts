@@ -8,6 +8,7 @@
  */
 
 import { gameConfig } from "../config/gameConfig";
+import type { CropId } from "../config/gameConfig";
 import type { BuildingKind, Building, SaveState } from "../state/saveState";
 import type { Meters } from "../geo/coords";
 
@@ -58,10 +59,27 @@ export function sellBuilding(save: SaveState, buildingId: string): { building: B
   return { building, refund };
 }
 
-/** Total grain storage across all owned Silos, tons. 0 if none built. */
+/** Total grain storage across every owned Silo, tons, regardless of crop
+ * assignment — the farm's total silo footprint. */
 export function siloCapacityTons(save: SaveState): number {
   const n = save.buildings.filter((b) => b.kind === "silo").length;
   return n * gameConfig.buildings.silo.capacityTons;
+}
+
+/** Grain storage assigned to `crop`, tons — only silos dedicated to that crop
+ * count. A silo holds no capacity for anything until it's assigned. */
+export function siloCapacityForCrop(save: SaveState, crop: CropId): number {
+  const n = save.buildings.filter((b) => b.kind === "silo" && b.assignedCrop === crop).length;
+  return n * gameConfig.buildings.silo.capacityTons;
+}
+
+/** Assign (or clear, with `undefined`) which crop a Silo is dedicated to.
+ * Throws if the building isn't a silo. */
+export function assignSiloCrop(save: SaveState, buildingId: string, crop: CropId | undefined): void {
+  const building = save.buildings.find((b) => b.id === buildingId);
+  if (!building) throw new Error(`Building ${buildingId} not found`);
+  if (building.kind !== "silo") throw new Error(`${BUILDING_NAME[building.kind]} can't be assigned a crop`);
+  building.assignedCrop = crop;
 }
 
 /** Total bale storage across all owned Bale Barns + Bale Areas. Computed for

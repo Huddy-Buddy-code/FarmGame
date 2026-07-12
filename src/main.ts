@@ -29,7 +29,8 @@ import { drawFieldTexture } from "./field/fieldRender";
 import { updateBuildingMarkers, BUILDING_ICON } from "./field/buildingRender";
 import {
   buyBuildingAt, sellBuilding, buildingPrice, initBuildingIdCounters,
-  BUILDING_NAME, siloCapacityTons, baleCapacity, barnSlotTotal, nearestFarmYard,
+  BUILDING_NAME, siloCapacityForCrop, assignSiloCrop,
+  baleCapacity, barnSlotTotal, nearestFarmYard,
 } from "./sim/buildings";
 import { distanceAtWork } from "./sim/coverage";
 import type { CoveragePath } from "./sim/coverage";
@@ -832,6 +833,7 @@ function refreshInventory() {
   for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
     const cfg = gameConfig.crops[cropId];
     const tons = save.grain[cropId];
+    const capacity = siloCapacityForCrop(save, cropId);
     const row = document.createElement("div");
     row.className = "inv-row";
     row.innerHTML = `
@@ -855,7 +857,28 @@ function refreshInventory() {
     });
     row.appendChild(btn);
     rows.appendChild(row);
+    rows.appendChild(siloCapacityBar(cfg, tons, capacity));
   }
+}
+
+/** A silo-capacity status bar for one crop: fills left→right, "X.X / Y t".
+ * Color shifts gold → amber → red as it nears full; reads "No silo assigned"
+ * (no fill) when the farm hasn't dedicated a silo to this crop yet. */
+function siloCapacityBar(cfg: (typeof gameConfig.crops)[CropId], tons: number, capacity: number): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "silo-bar";
+  if (capacity <= 0) {
+    wrap.innerHTML = `<div class="silo-bar-empty">🛢️ No silo assigned to ${cfg.name.toLowerCase()} — build or assign one to track capacity</div>`;
+    return wrap;
+  }
+  const pct = Math.min(100, (tons / capacity) * 100);
+  const level = pct >= 95 ? "full" : pct >= 75 ? "high" : "ok";
+  wrap.innerHTML = `
+    <div class="silo-bar-track">
+      <div class="silo-bar-fill ${level}" style="width:${pct.toFixed(1)}%"></div>
+      <div class="silo-bar-label">${tons.toFixed(1)} / ${capacity.toLocaleString()} t</div>
+    </div>`;
+  return wrap;
 }
 
 // ---------------------------------------------------------------------------
@@ -1680,8 +1703,12 @@ function refreshBuildingMarkers(): void {
  * config, plus the farm-wide total across every building of that kind. */
 function buildingCapacityText(building: Building): string {
   switch (building.kind) {
-    case "silo":
-      return `Grain capacity: ${gameConfig.buildings.silo.capacityTons.toLocaleString()} t · farm total ${siloCapacityTons(save).toLocaleString()} t`;
+    case "silo": {
+      const per = gameConfig.buildings.silo.capacityTons.toLocaleString();
+      if (!building.assignedCrop) return `Holds ${per} t once assigned a crop below.`;
+      const cfg = gameConfig.crops[building.assignedCrop];
+      return `Holds ${per} t of ${cfg.name.toLowerCase()} · farm total ${siloCapacityForCrop(save, building.assignedCrop).toLocaleString()} t`;
+    }
     case "baleBarn":
       return `Bale capacity: ${gameConfig.buildings.baleBarn.capacityBales.toLocaleString()} · farm total ${baleCapacity(save).toLocaleString()}`;
     case "baleArea":
@@ -1702,6 +1729,25 @@ function onBuildingClick(building: Building): void {
   el.innerHTML = `
     <div class="bp-title">${BUILDING_ICON[building.kind]} ${BUILDING_NAME[building.kind]}</div>
     <div class="bp-cap">${buildingCapacityText(building)}</div>`;
+
+  if (building.kind === "silo") {
+    const select = document.createElement("select");
+    select.className = "bp-crop-select";
+    select.innerHTML =
+      `<option value="">— assign a crop —</option>` +
+      (Object.keys(gameConfig.crops) as CropId[])
+        .map((c) => `<option value="${c}">${gameConfig.crops[c].emoji} ${gameConfig.crops[c].name}</option>`)
+        .join("");
+    select.value = building.assignedCrop ?? "";
+    select.addEventListener("change", () => {
+      assignSiloCrop(save, building.id, (select.value || undefined) as CropId | undefined);
+      refreshInventory();
+      popup.remove();
+      onBuildingClick(building); // re-open with updated capacity text
+    });
+    el.appendChild(select);
+  }
+
   const sellBtn = document.createElement("button");
   sellBtn.className = "shop-buy";
   sellBtn.textContent = `Sell · $${refund.toLocaleString()}`;

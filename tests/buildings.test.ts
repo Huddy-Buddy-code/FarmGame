@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { newGame } from "../src/state/saveState";
 import { gameConfig } from "../src/config/gameConfig";
 import {
-  buyBuildingAt, sellBuilding, buildingPrice, siloCapacityTons, baleCapacity,
-  barnSlotTotal, nearestFarmYard, nearestOfKind,
+  buyBuildingAt, sellBuilding, buildingPrice, siloCapacityTons, siloCapacityForCrop,
+  assignSiloCrop, baleCapacity, barnSlotTotal, nearestFarmYard, nearestOfKind,
 } from "../src/sim/buildings";
 
 describe("buildings (maintainer request, 2026-07-12): placeable storage + rally point", () => {
@@ -89,5 +89,59 @@ describe("buildings (maintainer request, 2026-07-12): placeable storage + rally 
     const save = newGame();
     buyBuildingAt(save, "silo", [0, 0]);
     expect(nearestFarmYard(save, [0, 0])).toBeUndefined();
+  });
+});
+
+describe("silo crop assignment (maintainer request, 2026-07-12)", () => {
+  it("an unassigned silo contributes no capacity to any crop", () => {
+    const save = newGame();
+    buyBuildingAt(save, "silo", [0, 0]);
+    expect(siloCapacityForCrop(save, "corn")).toBe(0);
+    expect(siloCapacityForCrop(save, "soybeans")).toBe(0);
+  });
+
+  it("assigning a silo to a crop gives that crop (and only that crop) capacity", () => {
+    const save = newGame();
+    const silo = buyBuildingAt(save, "silo", [0, 0]);
+    assignSiloCrop(save, silo.id, "corn");
+    expect(siloCapacityForCrop(save, "corn")).toBe(gameConfig.buildings.silo.capacityTons);
+    expect(siloCapacityForCrop(save, "soybeans")).toBe(0);
+  });
+
+  it("multiple silos assigned to the same crop stack their capacity", () => {
+    const save = newGame();
+    const a = buyBuildingAt(save, "silo", [0, 0]);
+    const b = buyBuildingAt(save, "silo", [1, 1]);
+    assignSiloCrop(save, a.id, "corn");
+    assignSiloCrop(save, b.id, "corn");
+    expect(siloCapacityForCrop(save, "corn")).toBe(gameConfig.buildings.silo.capacityTons * 2);
+  });
+
+  it("re-assigning moves a silo's capacity from the old crop to the new one", () => {
+    const save = newGame();
+    const silo = buyBuildingAt(save, "silo", [0, 0]);
+    assignSiloCrop(save, silo.id, "corn");
+    assignSiloCrop(save, silo.id, "soybeans");
+    expect(siloCapacityForCrop(save, "corn")).toBe(0);
+    expect(siloCapacityForCrop(save, "soybeans")).toBe(gameConfig.buildings.silo.capacityTons);
+  });
+
+  it("clearing an assignment (undefined) drops the silo's capacity from that crop", () => {
+    const save = newGame();
+    const silo = buyBuildingAt(save, "silo", [0, 0]);
+    assignSiloCrop(save, silo.id, "corn");
+    assignSiloCrop(save, silo.id, undefined);
+    expect(siloCapacityForCrop(save, "corn")).toBe(0);
+  });
+
+  it("throws assigning a crop to a non-silo building", () => {
+    const save = newGame();
+    const yard = buyBuildingAt(save, "farmYard", [0, 0]);
+    expect(() => assignSiloCrop(save, yard.id, "corn")).toThrow(/silo|can't/i);
+  });
+
+  it("throws assigning a crop to a building that doesn't exist", () => {
+    const save = newGame();
+    expect(() => assignSiloCrop(save, "bld-999", "corn")).toThrow(/not found/);
   });
 });

@@ -106,6 +106,10 @@ export interface Building {
   kind: BuildingKind;
   /** UTM-meter placement point. */
   pos: Meters;
+  /** Silo-only: which crop's grain this silo is dedicated to (chosen by the
+   * player on click). A silo holds no capacity until assigned — grain
+   * capacity is tracked per crop, not pooled across crops. */
+  assignedCrop?: CropId;
 }
 
 /** What an agent is doing right now (brief §9 state machine — "drive home at
