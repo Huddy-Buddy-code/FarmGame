@@ -97,6 +97,17 @@ export interface Field {
  * costs arrive with the storage mechanic (brief §5 lever 1). */
 export type GrainBin = Record<CropId, number>;
 
+/** Placeable farm structures (maintainer request, 2026-07-12). A single point,
+ * not a polygon like `Field` — see `sim/buildings.ts`. */
+export type BuildingKind = "silo" | "baleBarn" | "baleArea" | "tractorBarn" | "implementBarn" | "farmYard";
+
+export interface Building {
+  id: string;
+  kind: BuildingKind;
+  /** UTM-meter placement point. */
+  pos: Meters;
+}
+
 /** What an agent is doing right now (brief §9 state machine — "drive home at
  * night" and road routing come later; v1 is idle → drive to field → work). */
 export type AgentState = "idle" | "traveling" | "working";
@@ -205,6 +216,8 @@ export interface SaveState {
   parcels: Parcel[];
   fields: Field[];
   grain: GrainBin;
+  /** Placed buildings (silos, barns, farm yard). */
+  buildings: Building[];
   agents: Agent[];
   /** Attachable implements owned by the farm (plows now; more later). */
   implements: Implement[];
@@ -223,6 +236,7 @@ export function newGame(): SaveState {
     parcels: [],
     fields: [],
     grain: { corn: 0, soybeans: 0 },
+    buildings: [],
     agents: [],
     implements: [],
     tasks: [],

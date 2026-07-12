@@ -43,6 +43,24 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   if sold now.
 - **95/95 tests passing** (added 5 rotation-planner tests). Typecheck clean.
 
+## Latest changes (2026-07-12, buildings)
+
+- **Farm buildings added:** Silo, Bale Storage Barn, Bale Storage Area, Tractor
+  Barn, Implement Barn, Farm Yard — placeable via a click-to-place button in
+  the Equipment panel's new "Buildings" group, single map click drops it and
+  pays `gameConfig.buildings[kind].price`. Click a building's marker for a
+  popup with capacity info + a sell button (full refund, same rule as
+  land/equipment).
+- **Scope note (deliberate cut):** capacity numbers (silo tons, bale-storage
+  counts, barn slots) are computed (`src/sim/buildings.ts`) and shown in the
+  UI, but nothing yet BLOCKS on them — harvest still banks into the unlimited
+  grain bin, bales still sit in-field untouched, and equipment still parks
+  wherever a job finishes (no drive-to-barn/yard state exists in `tasks.ts`
+  to hook into). New equipment purchases DO spawn at the nearest Farm Yard
+  if one's built (falls back to the old county-center spot otherwise). Wiring
+  the actual caps/homing is a follow-up pass.
+- New save-state array `buildings: Building[]`; migrates old saves to `[]`.
+
 ## Latest changes (2026-07-12)
 
 - **Rotation planner UX:** auto-manage is now a plan designer — 1–5 rows per year,

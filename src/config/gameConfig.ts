@@ -168,6 +168,28 @@ export interface GameConfig {
     refinanceFee: number;
   };
 
+  /** Placeable farm structures (maintainer request, 2026-07-12): storage and a
+   * rally point. This slice adds them as purchasable/sellable map fixtures with
+   * their capacity numbers defined here — WIRING those numbers into gameplay
+   * (grain/bale caps that block harvesting/baling, barn slot limits that gate
+   * where equipment parks) is a follow-up pass. Sell-back refunds full price,
+   * same rule as land/equipment. */
+  buildings: {
+    /** Grain storage, tons. */
+    silo: { price: number; capacityTons: number };
+    /** Indoor bale storage — pricier, presumably weatherproof (flavor; no
+     * mechanical difference yet). */
+    baleBarn: { price: number; capacityBales: number };
+    /** Outdoor bale storage — cheaper. */
+    baleArea: { price: number; capacityBales: number };
+    /** Parks tractors/harvesters. `slots` = max machines. */
+    tractorBarn: { price: number; slots: number };
+    /** Parks unattached implements. `slots` = max implements. */
+    implementBarn: { price: number; slots: number };
+    /** The farm's rally point — no capacity, just a place on the map. */
+    farmYard: { price: number };
+  };
+
   // --- Economy, fuel, contracts, condition, etc. get added here slice-by-
   //     slice as those systems are built (brief §5, §8). ---
 }
@@ -257,6 +279,14 @@ export const gameConfig: GameConfig = {
     baleTons: 1,
     balePricePerBale: 45,
     baleTieMinutes: 0.17, // ≈ 10 s at 1×
+  },
+  buildings: {
+    silo: { price: 90_000, capacityTons: 200 },
+    baleBarn: { price: 70_000, capacityBales: 300 },
+    baleArea: { price: 25_000, capacityBales: 300 },
+    tractorBarn: { price: 60_000, slots: 3 },
+    implementBarn: { price: 40_000, slots: 4 },
+    farmYard: { price: 15_000 },
   },
   yieldRangeNarrowing: 0.85,
   loan: {

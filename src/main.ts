@@ -23,9 +23,14 @@ import { naipSource } from "./map/naip";
 import { addRoadsLayer } from "./map/roadsLayer";
 import { OverlayEngine } from "./map/overlay";
 import { newGame } from "./state/saveState";
-import type { SaveState, Field } from "./state/saveState";
+import type { SaveState, Field, Building, BuildingKind } from "./state/saveState";
 import { buyFieldFromBoundary, renderField, initIdCounters, sellField, hashSeed } from "./field/fields";
 import { drawFieldTexture } from "./field/fieldRender";
+import { updateBuildingMarkers, BUILDING_ICON } from "./field/buildingRender";
+import {
+  buyBuildingAt, sellBuilding, buildingPrice, initBuildingIdCounters,
+  BUILDING_NAME, siloCapacityTons, baleCapacity, barnSlotTotal, nearestFarmYard,
+} from "./sim/buildings";
 import { distanceAtWork } from "./sim/coverage";
 import type { CoveragePath } from "./sim/coverage";
 import { persistGame, loadGame, clearSavedGame } from "./state/persistence";
@@ -72,6 +77,8 @@ if (loaded) {
   save.tasks ??= [];
   save.agents ??= [];
   save.implements ??= [];
+  save.buildings ??= [];
+  initBuildingIdCounters(save);
   // Pre-finance saves: start the open borrowing year at whatever campaign
   // year the save was loaded at (tickLoans self-corrects instantly either
   // way, since a year with $0 pending never creates a loan).
@@ -90,7 +97,7 @@ if (loaded) {
 }
 
 // Only one map interaction is active at a time.
-type Mode = "none" | "field";
+type Mode = "none" | "field" | `building:${BuildingKind}`;
 let mode: Mode = "none";
 
 let overlay: OverlayEngine;
@@ -151,6 +158,7 @@ async function main() {
     addRoadsLayer(map, county.roads);
     overlay = new OverlayEngine(map);
     wireFieldDrawing(map);
+    wireBuildingPlacement(map);
     wireFieldSelection(map);
     wireTimeControls();
     buildCropCalendar();
@@ -162,6 +170,7 @@ async function main() {
     // Re-render every field from the loaded save (textures + outlines).
     for (const f of save.fields) renderField(map, overlay, f, clock.time());
     updateAgentMarkers();
+    refreshBuildingMarkers();
     refreshQueuePanel();
     clock.play(); // the world breathes from the start (idle-game 1×)
     requestAnimationFrame(gameLoop);
@@ -1129,7 +1138,7 @@ function buildEquipShop(): void {
     const price = agentPrice("tractor", size);
     tractors.appendChild(
       buyButton(`${SIZE_LABEL[size]}`, price, () => {
-        const a = buyAgent(save, "tractor", size, homePos);
+        const a = buyAgent(save, "tractor", size, spawnPos());
         afterFleetChange();
         toast(`Bought ${a.name} — parked at the yard`);
       }),
@@ -1200,11 +1209,31 @@ function buildEquipShop(): void {
   const cprice = gameConfig.equipment.harvester.price;
   combine.appendChild(
     buyButton("Combine", cprice, () => {
-      const a = buyAgent(save, "harvester", "medium", homePos);
+      const a = buyAgent(save, "harvester", "medium", spawnPos());
       afterFleetChange();
       toast(`Bought ${a.name} — parked at the yard`);
     }),
   );
+
+  // Buildings: click-to-place fixtures (silo/barns/yard), not instant buys —
+  // the button just arms placement mode; the map click pays and drops it.
+  const buildings = group("Buildings", "🏗️");
+  const BUILDING_LIST: BuildingKind[] = ["silo", "baleBarn", "baleArea", "tractorBarn", "implementBarn", "farmYard"];
+  for (const kind of BUILDING_LIST) {
+    buildings.appendChild(
+      buyButton(`${BUILDING_ICON[kind]} ${BUILDING_NAME[kind]}`, buildingPrice(kind), () => {
+        mode = `building:${kind}`;
+        $("equiptab").style.display = "none";
+        toast(`🏗️ Click the map to place your ${BUILDING_NAME[kind]}`);
+      }),
+    );
+  }
+}
+
+/** Where a newly bought machine parks: the nearest Farm Yard if the farm has
+ * built one, else the county-center fallback used before buildings existed. */
+function spawnPos(): Meters {
+  return nearestFarmYard(save, homePos)?.pos ?? homePos;
 }
 
 function buyButton(label: string, price: number, onBuy: () => void): HTMLButtonElement {
@@ -1620,6 +1649,77 @@ function wireFieldDrawing(map: maplibregl.Map) {
 
 // ---------------------------------------------------------------------------
 // Field selection + the cozy side panel.
+/** One-click placement for buildings (mode = `building:<kind>`, set from the
+ * Equipment panel's Buildings group). Unlike field drawing there's no draft —
+ * the first click buys and drops it, then resets to "none" whether or not
+ * the purchase succeeded (so a misclick/insufficient funds doesn't strand
+ * the player in placement mode). */
+function wireBuildingPlacement(map: maplibregl.Map) {
+  map.on("click", (e) => {
+    if (!mode.startsWith("building:")) return;
+    const kind = mode.slice("building:".length) as BuildingKind;
+    mode = "none";
+    const pos = toMeters([e.lngLat.lng, e.lngLat.lat]);
+    try {
+      buyBuildingAt(save, kind, pos);
+      updateHud();
+      refreshBuildingMarkers();
+      toast(`🏗️ Built ${BUILDING_NAME[kind]} for $${buildingPrice(kind).toLocaleString()}`);
+    } catch (err) {
+      toast("❌ " + (err as Error).message, 3500);
+    }
+  });
+}
+
+function refreshBuildingMarkers(): void {
+  if (!mapRef) return;
+  updateBuildingMarkers(mapRef, save.buildings, onBuildingClick);
+}
+
+/** What a building's popup shows below its name — capacity numbers from
+ * config, plus the farm-wide total across every building of that kind. */
+function buildingCapacityText(building: Building): string {
+  switch (building.kind) {
+    case "silo":
+      return `Grain capacity: ${gameConfig.buildings.silo.capacityTons.toLocaleString()} t · farm total ${siloCapacityTons(save).toLocaleString()} t`;
+    case "baleBarn":
+      return `Bale capacity: ${gameConfig.buildings.baleBarn.capacityBales.toLocaleString()} · farm total ${baleCapacity(save).toLocaleString()}`;
+    case "baleArea":
+      return `Bale capacity: ${gameConfig.buildings.baleArea.capacityBales.toLocaleString()} · farm total ${baleCapacity(save).toLocaleString()}`;
+    case "tractorBarn":
+      return `Tractor slots: ${gameConfig.buildings.tractorBarn.slots} · farm total ${barnSlotTotal(save, "tractorBarn")}`;
+    case "implementBarn":
+      return `Implement slots: ${gameConfig.buildings.implementBarn.slots} · farm total ${barnSlotTotal(save, "implementBarn")}`;
+    case "farmYard":
+      return "Rally point — new equipment parks here";
+  }
+}
+
+function onBuildingClick(building: Building): void {
+  const refund = buildingPrice(building.kind);
+  const el = document.createElement("div");
+  el.className = "building-popup";
+  el.innerHTML = `
+    <div class="bp-title">${BUILDING_ICON[building.kind]} ${BUILDING_NAME[building.kind]}</div>
+    <div class="bp-cap">${buildingCapacityText(building)}</div>`;
+  const sellBtn = document.createElement("button");
+  sellBtn.className = "shop-buy";
+  sellBtn.textContent = `Sell · $${refund.toLocaleString()}`;
+  sellBtn.addEventListener("click", () => {
+    if (!confirm(`Sell ${BUILDING_NAME[building.kind]} for $${refund.toLocaleString()}?`)) return;
+    sellBuilding(save, building.id);
+    updateHud();
+    refreshBuildingMarkers();
+    toast(`💰 Sold ${BUILDING_NAME[building.kind]} for $${refund.toLocaleString()}`);
+    popup.remove();
+  });
+  el.appendChild(sellBtn);
+  const popup = new maplibregl.Popup({ closeButton: true, offset: 16 })
+    .setLngLat(toLngLat(building.pos))
+    .setDOMContent(el)
+    .addTo(mapRef);
+}
+
 // ---------------------------------------------------------------------------
 function wireFieldSelection(map: maplibregl.Map) {
   map.on("click", (e) => {

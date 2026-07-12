@@ -427,6 +427,18 @@
       .agent-dot.working .agent-bob { animation: chug 0.9s infinite; }
       /* Bales dropped in the field — decorative, must not eat field clicks. */
       .bale-dot { line-height: 0; pointer-events: none; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35)); }
+
+      /* Buildings (silo/barns/yard) — a bigger, squarer dot than agents so
+         they read as fixed structures rather than moving machines. */
+      .building-dot {
+        font-size: 22px; line-height: 1; cursor: pointer;
+        background: var(--cream); border: 2px solid var(--wood);
+        border-radius: 8px; padding: 4px 5px; box-shadow: var(--shadow);
+      }
+      .building-popup { font-size: 13px; min-width: 160px; }
+      .building-popup .bp-title { font-weight: 700; margin-bottom: 4px; }
+      .building-popup .bp-cap { color: #8a7658; margin-bottom: 8px; }
+      .building-popup .shop-buy { width: 100%; }
       @keyframes chug {
         0%, 100% { transform: translateY(0) rotate(-2deg); }
         50% { transform: translateY(-2px) rotate(2deg); }
