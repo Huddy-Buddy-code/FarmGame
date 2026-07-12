@@ -43,6 +43,29 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   if sold now.
 - **95/95 tests passing** (added 5 rotation-planner tests). Typecheck clean.
 
+## Latest changes (2026-07-13, harvester self-heal)
+
+- **Bug fixed:** a harvester that finished a field with grain still onboard
+  but no silo yet built would get permanently stuck — its one-shot
+  `ensureUnloadTask` call fired at that exact moment and never again, so
+  building a silo *afterward* did nothing; the combine just sat there
+  forever holding grain with no task.
+- **Fix:** an idle harvester with grain onboard and no Unload Harvester trip
+  coming now re-checks EVERY tick, not just at the moment the grain first
+  banked. `Agent.lastFieldId`/`lastCrop` remember where/what a hopper came
+  from so a trip can still be routed long after the harvest task itself (and
+  `field.crop`) are gone. Legacy saves from before this tracking existed
+  fall back to a same-crop-silo guess (`guessLeftoverCrop`) — only acts when
+  exactly one crop has a silo assigned, otherwise leaves it alone rather
+  than guessing wrong.
+- Also fixed two related gaps this surfaced: the field-vanished guard and
+  the task-pickup query both required `fieldId` to resolve to a real field,
+  which an Unload Harvester task doesn't need (its `fieldId` is display-only) —
+  both now skip that requirement for this task type.
+- 4 new tests in `tests/harvestUnload.test.ts` covering the stuck-then-
+  recovers case, the legacy single-silo guess, and the ambiguous-crop
+  (deliberately-doesn't-guess) case.
+
 ## Latest changes (2026-07-13, unload trigger)
 
 - **"Unload Harvester" now queues as soon as the combine has ANY grain

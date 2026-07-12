@@ -176,12 +176,14 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     assignSiloCrop(save, silo.id, "corn");
     save.grain.corn = 200; // already at capacity
     buyImplement(save, "grainTrailer", "medium");
-    const field = readyField(10, 6);
+    // 8ac × 6t/ac = 48t — fits in one hopper load, so the field finishes
+    // fully cut with nothing left to trigger a SECOND trip once this one
+    // completes (keeps the "trip completed" assertion below unambiguous).
+    const field = readyField(8, 6);
     save.fields.push(field);
     enqueueTask(save, field, "harvest", APRIL_1);
-    const cap = harvesterCapacityTons("medium");
 
-    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) >= cap - 1e-6, 5000);
+    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) >= 48 - 1e-6, 5000);
     const now = runUntil(save, APRIL_1, () => !!unloadTaskFor(save, combineOf(save).id)?.waitingForSilo, 5000);
     expect(unloadTaskFor(save, combineOf(save).id)?.waitingForSilo).toBe(true);
     expect(save.grain.corn).toBe(200); // untouched while waiting
@@ -227,5 +229,58 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     runUntil(save, APRIL_1, () => tractorOf(save).taskId !== undefined, 5000);
     const trailer = save.implements.find((i) => i.kind === "grainTrailer")!;
     expect(trailer.attachedTo).toBe(tractorOf(save).id);
+  });
+});
+
+describe("self-healing: an idle harvester with leftover grain but no trip coming (maintainer request, 2026-07-13)", () => {
+  it("keeps looking every tick — once a silo/trailer exist, it dispatches without any new harvest work", () => {
+    const save = gameWithAgents();
+    const combine = combineOf(save);
+    // Simulate a field that finished harvesting back when no silo existed —
+    // grain stuck onboard, and (as of this fix) the field/crop remembered.
+    combine.grainOnboard = 22;
+    combine.lastFieldId = "field-1";
+    combine.lastCrop = "corn";
+    combine.state = "idle";
+    expect(unloadTaskFor(save, combine.id)).toBeUndefined(); // nothing coming yet
+
+    // NOW the player builds a silo and buys a trailer.
+    const silo = buyBuildingAt(save, "silo", [-50, -50], "large");
+    assignSiloCrop(save, silo.id, "corn");
+    buyImplement(save, "grainTrailer", "medium");
+
+    runUntil(save, APRIL_1, () => save.grain.corn > 0, 5000);
+    expect(save.grain.corn).toBeCloseTo(22, 0);
+    expect(combine.grainOnboard ?? 0).toBeCloseTo(0, 6);
+  });
+
+  it("legacy save with no lastCrop tracked: guesses the crop when exactly one silo is assigned", () => {
+    const save = gameWithAgents();
+    const combine = combineOf(save);
+    combine.grainOnboard = 15; // lastFieldId/lastCrop deliberately left unset
+    combine.state = "idle";
+
+    const silo = buyBuildingAt(save, "silo", [-50, -50], "large");
+    assignSiloCrop(save, silo.id, "corn"); // the ONLY crop with a silo
+    buyImplement(save, "grainTrailer", "medium");
+
+    runUntil(save, APRIL_1, () => save.grain.corn > 0, 5000);
+    expect(save.grain.corn).toBeCloseTo(15, 0);
+  });
+
+  it("legacy save with an AMBIGUOUS crop (two silos, two crops) doesn't guess wrong — stays put", () => {
+    const save = gameWithAgents();
+    const combine = combineOf(save);
+    combine.grainOnboard = 15; // lastFieldId/lastCrop deliberately left unset
+
+    const cornSilo = buyBuildingAt(save, "silo", [-50, -50], "large");
+    assignSiloCrop(save, cornSilo.id, "corn");
+    const soySilo = buyBuildingAt(save, "silo", [-50, -60], "large");
+    assignSiloCrop(save, soySilo.id, "soybeans");
+    buyImplement(save, "grainTrailer", "medium");
+
+    runUntil(save, APRIL_1, () => false, 5000);
+    expect(unloadTaskFor(save, combine.id)).toBeUndefined();
+    expect(combine.grainOnboard).toBe(15); // untouched, not silently dropped either
   });
 });

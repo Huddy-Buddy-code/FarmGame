@@ -139,6 +139,13 @@ export interface Agent {
    * at the combine's size tier's capacity (maintainer request, 2026-07-12) —
    * once full it stops and waits for a Grain Trailer (`sim/tasks.ts`). */
   grainOnboard?: number;
+  /** Harvester-only: the field/crop the current `grainOnboard` came from.
+   * Set whenever grain banks; kept around after the harvest task itself is
+   * long gone so a leftover hopper (e.g. no silo existed yet when the field
+   * finished) can still get a Grain Trailer routed to it later, once one
+   * does (maintainer request, 2026-07-13). */
+  lastFieldId?: string;
+  lastCrop?: CropId;
 }
 
 /** An attachable implement (a plow, a planter, a sprayer, a Grain Trailer). A

@@ -693,20 +693,32 @@ function homeTargetFor(save: SaveState, agent: Agent): Meters | undefined {
   return nearestFarmYard(save, agent.pos)?.pos;
 }
 
+/** Best-effort guess at what crop a leftover hopper holds when
+ * `agent.lastCrop` isn't set (legacy saves from before it was tracked) —
+ * the crop with exactly one silo-assignment candidate, if unambiguous.
+ * Otherwise `undefined` (leaves the hopper stuck rather than guessing
+ * wrong and dumping the wrong crop's grain into a silo). */
+function guessLeftoverCrop(save: SaveState): CropId | undefined {
+  const candidates = (Object.keys(gameConfig.crops) as CropId[]).filter((c) =>
+    save.buildings.some((b) => b.kind === "silo" && b.assignedCrop === c),
+  );
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
 /** Queue an "Unload Harvester" trip for `harvester` if one isn't already
  * coming (maintainer request, 2026-07-12) — system-generated, no cost, no
  * player action. A tractor+Grain Trailer picks it up like any other queued
- * task via the existing generic assignment loop below. `crop` is captured
- * HERE (not re-read from `field.crop` later) because `applyHarvestDone`
- * clears the field's crop the moment the harvest task itself completes —
- * the trailer for the last, still-in-the-hopper load would otherwise have
- * no idea what it's hauling by the time it arrives. */
-function ensureUnloadTask(save: SaveState, harvester: Agent, harvestTask: FarmTask, crop: CropId): void {
+ * task via the existing generic assignment loop below. `fieldId`/`crop` are
+ * passed explicitly (not re-read from `field.crop` later) because
+ * `applyHarvestDone` clears the field's crop the moment the harvest task
+ * itself completes — the trailer for the last, still-in-the-hopper load
+ * would otherwise have no idea what it's hauling by the time it arrives. */
+function ensureUnloadTask(save: SaveState, harvester: Agent, fieldId: string, crop: CropId): void {
   if (save.tasks.some((t) => t.type === "unloadHarvester" && t.harvesterAgentId === harvester.id)) return;
   save.tasks.push({
     id: `task-${++taskSeq}`,
     type: "unloadHarvester",
-    fieldId: harvestTask.fieldId,
+    fieldId,
     crop,
     totalAcres: 1,
     doneAcres: 0,
@@ -733,6 +745,16 @@ function tickAgent(
     const task = agent.taskId ? save.tasks.find((t) => t.id === agent.taskId) : undefined;
 
     if (!task) {
+      // Self-healing: an idle harvester with grain still in its hopper but
+      // no Unload Harvester trip coming (e.g. it finished a field before
+      // any silo existed) should keep looking to get one going, every tick
+      // — not just at the moment the grain first banked (maintainer
+      // request, 2026-07-13). Covers legacy saves from before `lastCrop`
+      // was tracked via a same-crop-silo guess.
+      if (agent.kind === "harvester" && (agent.grainOnboard ?? 0) > 1e-9) {
+        const crop = agent.lastCrop ?? guessLeftoverCrop(save);
+        if (crop) ensureUnloadTask(save, agent, agent.lastFieldId ?? "", crop);
+      }
       // Pick the first queued task of this agent's kind that's startable now.
       // Plow/plant also need the tractor to have (or be able to hitch) the
       // matching implement.
@@ -741,7 +763,10 @@ function tickAgent(
           t.status === "queued" &&
           TASK_AGENT_KIND[t.type] === agent.kind &&
           (!TASK_IMPLEMENT[t.type] || tractorCanUse(save, agent, TASK_IMPLEMENT[t.type]!)) &&
-          save.fields.some((f) => f.id === t.fieldId && isStartable(t, f)),
+          // unloadHarvester's fieldId is display-only (may be a legacy/
+          // unknown "" for a recovered leftover hopper) — doesn't need the
+          // field to actually exist, unlike every other task type.
+          (t.type === "unloadHarvester" || save.fields.some((f) => f.id === t.fieldId && isStartable(t, f))),
       );
       if (!next) {
         // No work queued — drive home (Tractor Barn with room, else Farm
@@ -793,19 +818,14 @@ function tickAgent(
       continue;
     }
 
-    const field = save.fields.find((f) => f.id === task.fieldId);
-    if (!field) {
-      // Field vanished mid-task (sold) — drop the job.
-      save.tasks.splice(save.tasks.indexOf(task), 1);
-      agent.taskId = undefined;
-      agent.state = "idle";
-      continue;
-    }
-
     // Unload Harvester is fundamentally different from every other task: it's
     // point-to-point travel (combine → silo), not a field coverage path, so
     // it's handled entirely here rather than falling into the generic
-    // "traveling"/"working" blocks below.
+    // "traveling"/"working" blocks below. Checked BEFORE the field lookup
+    // below — its `fieldId` is only for display and may be a legacy/unknown
+    // value ("") for a leftover hopper recovered without a known source
+    // field (maintainer request, 2026-07-13); it doesn't need the field to
+    // actually exist.
     if (task.type === "unloadHarvester") {
       const harvester = save.agents.find((a) => a.id === task.harvesterAgentId);
       const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "grainTrailer");
@@ -941,6 +961,15 @@ function tickAgent(
       }
     }
 
+    const field = save.fields.find((f) => f.id === task.fieldId);
+    if (!field) {
+      // Field vanished mid-task (sold) — drop the job.
+      save.tasks.splice(save.tasks.indexOf(task), 1);
+      agent.taskId = undefined;
+      agent.state = "idle";
+      continue;
+    }
+
     if (agent.state === "traveling") {
       // Drive to the field's coverage-path START (not the centroid), so work
       // begins exactly where the first lane does.
@@ -1066,7 +1095,7 @@ function tickAgent(
     if (task.type === "harvest" && field.crop) {
       const capacity = harvesterCapacityTons(agent.size ?? "medium");
       agent.grainOnboard ??= 0;
-      if (agent.grainOnboard > 1e-9) ensureUnloadTask(save, agent, task, field.crop);
+      if (agent.grainOnboard > 1e-9) ensureUnloadTask(save, agent, field.id, field.crop);
       if (agent.grainOnboard >= capacity - 1e-9) {
         budget = 0;
         continue;
@@ -1117,17 +1146,20 @@ function tickAgent(
         (agent.grainOnboard ?? 0) + (task.doneAcres - prevAcres) * field.trueYieldTonsPerAcre,
       );
       field.harvestedAcres = task.doneAcres;
+      // Remember where/what this hopper came from — survives the harvest
+      // task's own completion (and applyHarvestDone clearing field.crop),
+      // so a leftover load can still get routed later even if the harvest
+      // task itself is long gone (maintainer request, 2026-07-13).
+      agent.lastFieldId = field.id;
+      agent.lastCrop = field.crop;
       // A trip's wanted the moment there's any grain at all (see the
       // pre-check above) — this catches the case where a tick banks the
       // FIRST grain of the job (pre-check ran before this tick had any).
-      if (agent.grainOnboard > 1e-9) ensureUnloadTask(save, agent, task, field.crop);
+      if (agent.grainOnboard > 1e-9) ensureUnloadTask(save, agent, field.id, field.crop);
     }
 
     if (dist >= path.total - 1e-6) {
       task.doneAcres = task.totalAcres;
-      // Capture the crop BEFORE completeTask (applyHarvestDone clears
-      // field.crop) — the last hopper-load's ride still needs to know it.
-      const harvestedCrop = field.crop;
       completeTask(task, field, now, rand);
       // A finished rake changes no field STATUS, and its windrows are already on
       // the surface (revealed strip-by-strip as it drove). Forcing a full repaint
@@ -1142,8 +1174,10 @@ function tickAgent(
       // The last partial hopper (never hit "full" mid-job) still needs a ride
       // — usually already queued by the post-banking check above, but the
       // field can finish on the SAME tick that check saw zero grain yet.
-      if (task.type === "harvest" && harvestedCrop && (agent.grainOnboard ?? 0) > 1e-9) {
-        ensureUnloadTask(save, agent, task, harvestedCrop);
+      // agent.lastFieldId/lastCrop were captured by that same banking code
+      // (applyHarvestDone, just above, already cleared field.crop).
+      if (task.type === "harvest" && agent.lastCrop && (agent.grainOnboard ?? 0) > 1e-9) {
+        ensureUnloadTask(save, agent, agent.lastFieldId ?? field.id, agent.lastCrop);
       }
     }
   }
