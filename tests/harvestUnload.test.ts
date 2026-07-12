@@ -3,7 +3,9 @@ import { setProjection } from "../src/geo/coords";
 import type { Meters } from "../src/geo/coords";
 import { newGame } from "../src/state/saveState";
 import type { Field, SaveState } from "../src/state/saveState";
-import { ensureAgents, tickTasks, enqueueTask, buyImplement, sellAgent, harvesterCapacityTons } from "../src/sim/tasks";
+import {
+  ensureAgents, tickTasks, enqueueTask, buyImplement, sellAgent, harvesterCapacityTons, setHarvesterCrop,
+} from "../src/sim/tasks";
 import { tickFarming } from "../src/sim/farming";
 import { sellGrain } from "../src/sim/economy";
 import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
@@ -282,5 +284,46 @@ describe("self-healing: an idle harvester with leftover grain but no trip coming
     runUntil(save, APRIL_1, () => false, 5000);
     expect(unloadTaskFor(save, combine.id)).toBeUndefined();
     expect(combine.grainOnboard).toBe(15); // untouched, not silently dropped either
+
+    // Manual escape hatch: the player tells it what's onboard.
+    setHarvesterCrop(save, combine.id, "corn");
+    runUntil(save, APRIL_1, () => save.grain.corn > 0, 5000);
+    expect(save.grain.corn).toBeCloseTo(15, 0);
+  });
+
+  it("setHarvesterCrop refuses an empty hopper or a non-harvester", () => {
+    const save = gameWithAgents();
+    const combine = combineOf(save);
+    expect(() => setHarvesterCrop(save, combine.id, "corn")).toThrow(/no grain onboard/);
+    combine.grainOnboard = 5;
+    const tractor = save.agents.find((a) => a.kind === "tractor")!;
+    expect(() => setHarvesterCrop(save, tractor.id, "corn")).toThrow(/no such combine/i);
+  });
+
+  it("a tail load left when the field finishes still gets fully delivered — no grain lost in transit", () => {
+    // Silo + SMALL trailer set up BEFORE harvesting even starts, like a
+    // normal playthrough — not recovered after the fact.
+    const save = gameWithAgents();
+    const silo = buyBuildingAt(save, "silo", [-50, -50], "large");
+    assignSiloCrop(save, silo.id, "corn");
+    buyImplement(save, "grainTrailer", "small"); // 40t — can't empty a 50t hopper in one go
+    // 9ac × 6t/ac = 54t total.
+    const field = readyField(9, 6);
+    save.fields.push(field);
+    enqueueTask(save, field, "harvest", APRIL_1);
+
+    const doneAt = runUntil(save, APRIL_1, () => field.status === "harvested", 20_000, 1);
+    expect(combineOf(save).lastCrop).toBe("corn");
+    // Wait for EVERYTHING to actually land: hopper empty, trailer empty, no
+    // trip still in flight — not just "hopper reads 0" (a still-loaded
+    // trailer clears the hopper a tick or two before it finishes delivering).
+    const trailer = save.implements.find((i) => i.kind === "grainTrailer")!;
+    runUntil(
+      save, doneAt,
+      () => (combineOf(save).grainOnboard ?? 0) < 1e-6 && (trailer.cargoTons ?? 0) < 1e-6 && !unloadTaskFor(save, combineOf(save).id),
+      40_000, 1,
+    );
+    expect(save.grain.corn).toBeCloseTo(54, 0); // every ton accounted for
+    expect(combineOf(save).grainOnboard ?? 0).toBeCloseTo(0, 6);
   });
 });

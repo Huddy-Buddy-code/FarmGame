@@ -97,6 +97,18 @@ export function grainTrailerCapacityTons(size: EquipmentSize): number {
   return gameConfig.equipment.grainTrailer[size].capacityTons;
 }
 
+/** Manual escape hatch (maintainer request, 2026-07-13): a harvester with
+ * grain onboard but no `lastCrop` on record (a leftover from before that
+ * tracking existed, sitting alongside 2+ crops' worth of silos so the
+ * automatic same-crop-silo guess can't disambiguate) has no other way to
+ * ever get unstuck — this lets the player just say what's in the hopper. */
+export function setHarvesterCrop(save: SaveState, agentId: string, crop: CropId): void {
+  const agent = save.agents.find((a) => a.id === agentId);
+  if (!agent || agent.kind !== "harvester") throw new Error(`No such combine`);
+  if (!((agent.grainOnboard ?? 0) > 0)) throw new Error(`${agent.name} has no grain onboard`);
+  agent.lastCrop = crop;
+}
+
 /** Config (price + width) for each implement kind, by size. */
 const IMPLEMENT_CONFIG: Record<ImplementKind, Record<EquipmentSize, { price: number; widthFt: number }>> = {
   plow: gameConfig.equipment.plow,
@@ -1138,13 +1150,14 @@ function tickAgent(
 
     if (task.type === "harvest" && field.crop && field.trueYieldTonsPerAcre !== undefined) {
       // Grain banks into the combine's own hopper (not the farm bin directly
-      // anymore) — a Grain Trailer carries it the rest of the way. The
-      // distance clamp above guarantees this never exceeds capacity.
-      const capacity = harvesterCapacityTons(agent.size ?? "medium");
-      agent.grainOnboard = Math.min(
-        capacity,
-        (agent.grainOnboard ?? 0) + (task.doneAcres - prevAcres) * field.trueYieldTonsPerAcre,
-      );
+      // anymore) — a Grain Trailer carries it the rest of the way. NOT
+      // clamped to capacity here: the distance-target clamp above keeps this
+      // close to capacity, but `distanceAtWork`/`workDoneAt` aren't exact
+      // inverses of each other across a coverage path's headland turns, so a
+      // tick can still bank a hair over the target (bug found in testing —
+      // clamping here silently discarded that sliver of grain every fill
+      // cycle instead of letting the hopper run fractionally over).
+      agent.grainOnboard = (agent.grainOnboard ?? 0) + (task.doneAcres - prevAcres) * field.trueYieldTonsPerAcre;
       field.harvestedAcres = task.doneAcres;
       // Remember where/what this hopper came from — survives the harvest
       // task's own completion (and applyHarvestDone clearing field.crop),

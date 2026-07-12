@@ -43,6 +43,28 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   if sold now.
 - **95/95 tests passing** (added 5 rotation-planner tests). Typecheck clean.
 
+## Latest changes (2026-07-13, harvester self-heal follow-up)
+
+- **Investigated a report of a harvester still stuck** after the self-heal
+  fix. Traced it with an instrumented test: the underlying haul cycle is
+  correct (confirmed no grain is lost — a `Math.min(capacity, ...)` clamp on
+  banked grain was replaced with an unclamped add, since the distance-target
+  clamp and the acres↔work-distance conversion aren't exact inverses across
+  a coverage path's headland turns and could theoretically shave off a
+  sliver of grain each fill cycle; belt-and-suspenders, not a confirmed loss
+  source here). The actual stuck case: a **legacy leftover from before
+  `lastCrop` was tracked, sitting alongside 2+ crops' worth of silos** — the
+  same-crop-silo guess deliberately refuses to pick when it's ambiguous, and
+  with no other trigger left to re-attempt, that specific hopper had no path
+  to ever resolving itself.
+- **New manual escape hatch**: a harvester holding grain with no `lastCrop`
+  on record now shows a "Which crop is onboard?" dropdown right in its
+  Equipment-panel row — picking one (`setHarvesterCrop`) sets `lastCrop` and
+  the normal dispatch machinery takes it from there. Guarantees every stuck
+  hopper is recoverable regardless of how it got stuck.
+- 2 new tests (the ambiguous-crop case now resolves via the escape hatch;
+  `setHarvesterCrop`'s guards).
+
 ## Latest changes (2026-07-13, harvester self-heal)
 
 - **Bug fixed:** a harvester that finished a field with grain still onboard

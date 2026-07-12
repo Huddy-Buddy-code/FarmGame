@@ -52,7 +52,7 @@ import {
   buyAgent, sellAgent, buyImplement, sellImplement, attachImplement, detachImplement,
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
   reorderTask, estimateTaskHours, forageDue, defaultPlan,
-  harvesterCapacityTons, grainTrailerCapacityTons,
+  harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop,
 } from "./sim/tasks";
 import type { EquipmentKind } from "./sim/tasks";
 import {
@@ -1199,7 +1199,7 @@ function refreshEquipTab(force = false) {
       .map((a) => {
         const task = a.taskId ? save.tasks.find((t) => t.id === a.taskId) : undefined;
         const pct = task ? Math.round((task.doneAcres / task.totalAcres) * 100) : "";
-        return `${a.id}:${a.state}:${pct}:${Math.round(a.grainOnboard ?? 0)}:${task?.unloadPhase ?? ""}:${task?.waitingForSilo ?? ""}`;
+        return `${a.id}:${a.state}:${pct}:${Math.round(a.grainOnboard ?? 0)}:${task?.unloadPhase ?? ""}:${task?.waitingForSilo ?? ""}:${a.lastCrop ?? ""}`;
       })
       .join("|") +
     "#" +
@@ -1403,6 +1403,32 @@ function buildEquipMachines(): void {
         ${sub}
         ${pct !== null ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
       </span>`;
+
+    // Manual escape hatch: a harvester holding grain with no `lastCrop` on
+    // record (a leftover from before that tracking existed, ambiguous
+    // because 2+ crops have silos so the automatic guess can't pick one) has
+    // no other way to ever get a trailer routed to it — let the player say
+    // what's in the hopper (maintainer request, 2026-07-13).
+    if (agent.kind === "harvester" && (agent.grainOnboard ?? 0) > 0 && !agent.lastCrop) {
+      const select = document.createElement("select");
+      select.className = "er-crop-select";
+      select.innerHTML =
+        `<option value="">Which crop is onboard?</option>` +
+        (Object.keys(gameConfig.crops) as CropId[])
+          .map((c) => `<option value="${c}">${gameConfig.crops[c].emoji} ${gameConfig.crops[c].name}</option>`)
+          .join("");
+      select.addEventListener("change", () => {
+        if (!select.value) return;
+        try {
+          setHarvesterCrop(save, agent.id, select.value as CropId);
+          afterFleetChange();
+          toast(`Marked ${agent.name}'s load as ${gameConfig.crops[select.value as CropId].name.toLowerCase()} — a Grain Trailer is on its way`);
+        } catch (err) {
+          toast("❌ " + (err as Error).message, 3500);
+        }
+      });
+      row.appendChild(select);
+    }
 
     row.appendChild(locateButton(agent.name, agent.pos));
 
