@@ -33,6 +33,8 @@ import {
 } from "./farming";
 import { buildCoveragePath, sampleAt, workDoneAt, distanceAtWork } from "./coverage";
 import type { CoveragePath } from "./coverage";
+import { nearestFarmYard } from "./buildings";
+import type { Building } from "../state/saveState";
 
 const ACRE_M2 = 4046.8564224;
 
@@ -625,6 +627,44 @@ export function tickTasks(save: SaveState, now: SimTime, dtMinutes: number, rand
   return { changed, events };
 }
 
+/** Two points count as "the same spot" (an agent parked there) within a
+ * half-meter — exact equality would miss agents that arrived by slightly
+ * different paths. */
+function samePos(a: Meters, b: Meters): boolean {
+  return Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.5;
+}
+
+/** Where an idle tractor/harvester with no queued work should park: the
+ * nearest Tractor Barn with a free slot (occupancy = other idle machines
+ * already sitting at that barn's spot), else the nearest Farm Yard, else
+ * `undefined` — stay put, the pre-buildings behavior. Implements have no
+ * position of their own (they ride hitched or sit in the abstract "yard"),
+ * so only tractors/harvesters home. */
+function homeTargetFor(save: SaveState, agent: Agent): Meters | undefined {
+  if (agent.kind !== "tractor" && agent.kind !== "harvester") return undefined;
+  const slots = gameConfig.buildings.tractorBarn.slots;
+  let best: Building | undefined;
+  let bestD = Infinity;
+  for (const barn of save.buildings) {
+    if (barn.kind !== "tractorBarn") continue;
+    const occupied = save.agents.filter(
+      (a) =>
+        a.id !== agent.id &&
+        (a.kind === "tractor" || a.kind === "harvester") &&
+        a.state === "idle" &&
+        samePos(a.pos, barn.pos),
+    ).length;
+    if (occupied >= slots) continue;
+    const d = Math.hypot(barn.pos[0] - agent.pos[0], barn.pos[1] - agent.pos[1]);
+    if (d < bestD) {
+      bestD = d;
+      best = barn;
+    }
+  }
+  if (best) return best.pos;
+  return nearestFarmYard(save, agent.pos)?.pos;
+}
+
 function tickAgent(
   save: SaveState,
   agent: Agent,
@@ -652,6 +692,28 @@ function tickAgent(
           save.fields.some((f) => f.id === t.fieldId && isStartable(t, f)),
       );
       if (!next) {
+        // No work queued — drive home (Tractor Barn with room, else Farm
+        // Yard) if the farm's built somewhere for it to park; otherwise
+        // stay exactly where it stopped (pre-buildings behavior).
+        const home = homeTargetFor(save, agent);
+        if (home && !samePos(agent.pos, home)) {
+          const dx = home[0] - agent.pos[0];
+          const dy = home[1] - agent.pos[1];
+          const dist = Math.hypot(dx, dy);
+          const speed = (gameConfig.work.travelSpeedKmh * 1000) / 60; // meters per sim-minute
+          if (dist > 1e-6) agent.heading = Math.atan2(dy, dx);
+          agent.state = "traveling";
+          const timeNeeded = dist / speed;
+          if (timeNeeded <= budget) {
+            agent.pos = home;
+            budget -= timeNeeded;
+          } else {
+            const f = (budget * speed) / dist;
+            agent.pos = [agent.pos[0] + dx * f, agent.pos[1] + dy * f];
+            budget = 0;
+          }
+          continue;
+        }
         agent.state = "idle";
         return;
       }

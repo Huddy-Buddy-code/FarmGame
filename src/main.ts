@@ -1117,6 +1117,9 @@ function agentStatusText(agent: Agent): { text: string; pct: number | null } {
   if (task && agent.state === "working") {
     return { text: `${cap(taskVerb(task))} ${prettyId(task.fieldId)}`, pct: (task.doneAcres / task.totalAcres) * 100 };
   }
+  // No task but still "traveling" — driving home to a Tractor Barn/Farm Yard
+  // after finishing a job (see homeTargetFor in tasks.ts).
+  if (!task && agent.state === "traveling") return { text: "Heading home…", pct: null };
   return { text: "Idle — waiting for work", pct: null };
 }
 

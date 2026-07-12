@@ -43,6 +43,19 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   if sold now.
 - **95/95 tests passing** (added 5 rotation-planner tests). Typecheck clean.
 
+## Latest changes (2026-07-12, equipment homing)
+
+- **Tractors/harvesters now drive home when idle** (`homeTargetFor` in
+  `src/sim/tasks.ts`): after finishing a task with nothing else queued, an
+  agent drives to the nearest Tractor Barn with a free slot (occupancy =
+  other idle tractors/harvesters already parked at that barn's spot), or the
+  nearest Farm Yard if every barn's full/none exists. With no buildings at
+  all it stays put — exactly the old behavior. Fills in the gap left by the
+  buildings feature (was previously computed-but-unused).
+- Implements still don't home (they have no map position of their own —
+  they're either hitched or abstractly "in the yard").
+- 4 new tests in `tests/homing.test.ts`.
+
 ## Latest changes (2026-07-12, buildings)
 
 - **Farm buildings added:** Silo, Bale Storage Barn, Bale Storage Area, Tractor
