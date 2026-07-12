@@ -33,7 +33,7 @@ import {
 } from "./farming";
 import { buildCoveragePath, sampleAt, workDoneAt, distanceAtWork } from "./coverage";
 import type { CoveragePath } from "./coverage";
-import { nearestFarmYard } from "./buildings";
+import { nearestFarmYard, nearestSiloForCrop, siloCapacityForCrop } from "./buildings";
 import type { Building } from "../state/saveState";
 
 const ACRE_M2 = 4046.8564224;
@@ -47,6 +47,7 @@ export const TASK_AGENT_KIND: Record<TaskType, Agent["kind"]> = {
   fertilize: "tractor",
   rake: "tractor",
   bale: "tractor",
+  unloadHarvester: "tractor",
 };
 
 let taskSeq = 0;
@@ -62,25 +63,38 @@ export function initTaskIds(save: SaveState): void {
 /** Buyable power units. */
 export type EquipmentKind = "tractor" | "harvester";
 /** Buyable implements: a plow (tills), a planter (seeds), a sprayer (weeds or
- * fertilizes) — same widths/requirements, a tractor hitches one at a time. */
-export type ImplementKind = "plow" | "planter" | "sprayer" | "rake" | "bailer";
+ * fertilizes), a Grain Trailer (hauls a full combine to a silo) — same widths/
+ * requirements, a tractor hitches one at a time. */
+export type ImplementKind = "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer";
 
 const EQUIPMENT_NAME: Record<EquipmentKind, string> = { tractor: "Tractor", harvester: "Combine" };
 const IMPLEMENT_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake", bailer: "Baler",
+  grainTrailer: "Grain Trailer",
 };
 const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
 
 /** Which implement kind a task type needs (undefined = none, e.g. harvest).
- * Weed and fertilize both use a sprayer; rake/bale use their own tools. */
+ * Weed and fertilize both use a sprayer; rake/bale use their own tools;
+ * unloadHarvester needs a Grain Trailer. */
 const TASK_IMPLEMENT: Partial<Record<TaskType, ImplementKind>> = {
   plow: "plow", plant: "planter", weed: "sprayer", fertilize: "sprayer",
-  rake: "rake", bale: "bailer",
+  rake: "rake", bale: "bailer", unloadHarvester: "grainTrailer",
 };
 
 /** Price of a power unit at a given size. */
 export function agentPrice(kind: EquipmentKind, size: EquipmentSize): number {
-  return kind === "harvester" ? gameConfig.equipment.harvester.price : gameConfig.equipment.tractor[size].price;
+  return kind === "harvester" ? gameConfig.equipment.harvester[size].price : gameConfig.equipment.tractor[size].price;
+}
+
+/** Grain hopper capacity of a combine at `size`, tons (maintainer request, 2026-07-12). */
+export function harvesterCapacityTons(size: EquipmentSize): number {
+  return gameConfig.equipment.harvester[size].capacityTons;
+}
+
+/** Cargo capacity of a Grain Trailer at `size`, tons. */
+export function grainTrailerCapacityTons(size: EquipmentSize): number {
+  return gameConfig.equipment.grainTrailer[size].capacityTons;
 }
 
 /** Config (price + width) for each implement kind, by size. */
@@ -90,6 +104,7 @@ const IMPLEMENT_CONFIG: Record<ImplementKind, Record<EquipmentSize, { price: num
   sprayer: gameConfig.equipment.sprayer,
   rake: gameConfig.equipment.rake,
   bailer: gameConfig.equipment.bailer,
+  grainTrailer: gameConfig.equipment.grainTrailer,
 };
 
 /** Price of an implement at a given size. */
@@ -226,6 +241,9 @@ export function sellAgent(save: SaveState, agentId: string): { agent: Agent; ref
   const agent = save.agents[idx]!;
   if (agent.state !== "idle") {
     throw new Error(`${agent.name} is mid-job — let it finish first`);
+  }
+  if (agent.kind === "harvester" && (agent.grainOnboard ?? 0) > 0) {
+    throw new Error(`${agent.name} still has ${(agent.grainOnboard ?? 0).toFixed(1)}t of grain onboard — get it unloaded first`);
   }
   const lastOfKind = !save.agents.some((a) => a.id !== agentId && a.kind === agent.kind);
   const kindHasWork = save.tasks.some((t) => TASK_AGENT_KIND[t.type] === agent.kind);
@@ -486,6 +504,9 @@ export function reorderTask(save: SaveState, taskId: string, beforeTaskId: strin
  * implement width, ignoring headland turns.
  */
 export function estimateTaskHours(save: SaveState, task: FarmTask): number {
+  // Not an acres-based job — point-to-point hauling, no coverage path/width.
+  // The UI shows its own phase text instead of an acres/hours estimate.
+  if (task.type === "unloadHarvester") return 0;
   const field = save.fields.find((f) => f.id === task.fieldId);
   if (!field) return 0;
   const remainingAcres = Math.max(0, task.totalAcres - task.doneAcres);
@@ -501,8 +522,9 @@ export function estimateTaskHours(save: SaveState, task: FarmTask): number {
   }
 
   const kind = TASK_IMPLEMENT[task.type];
+  const nominalHarvesterSize = save.agents.find((a) => a.kind === "harvester")?.size ?? "medium";
   const widthFt = task.type === "harvest"
-    ? gameConfig.equipment.harvester.widthFt
+    ? gameConfig.equipment.harvester[nominalHarvesterSize].widthFt
     : (save.implements.find((i) => i.kind === kind)?.size
         ? IMPLEMENT_CONFIG[kind!][save.implements.find((i) => i.kind === kind)!.size].widthFt
         : IMPLEMENT_CONFIG[kind!].medium.widthFt);
@@ -525,6 +547,9 @@ export function releaseFieldTasks(save: SaveState, fieldId: string): void {
 /** Is this queued task startable given the field's CURRENT state? (A plant task
  * queued behind a plow task waits until the ground is actually tilled.) */
 function isStartable(task: FarmTask, field: Field): boolean {
+  // System-generated — always startable once queued; it just needs its
+  // fieldId to still resolve (for display), not any particular field status.
+  if (task.type === "unloadHarvester") return true;
   if (task.type === "plow") return canPlow(field.status);
   if (task.type === "plant") return field.status === "tilled";
   if (task.type === "weed" || task.type === "fertilize") return hasStandingCrop(field.status);
@@ -561,7 +586,7 @@ const baleJitter = new Map<string, number>();
 /** Working width (meters) for a task: from the attached implement (plow/
  * planter), or the config combine header width for harvest. */
 function taskSwathMeters(save: SaveState, task: FarmTask, agent: Agent): number {
-  if (task.type === "harvest") return gameConfig.equipment.harvester.widthFt * FEET_TO_METERS;
+  if (task.type === "harvest") return gameConfig.equipment.harvester[agent.size ?? "medium"].widthFt * FEET_TO_METERS;
   const kind = TASK_IMPLEMENT[task.type]!;
   const impl = attachedImplement(save, agent.id, kind);
   return impl ? implementWidthM(impl) : IMPLEMENT_CONFIG[kind].medium.widthFt * FEET_TO_METERS;
@@ -642,6 +667,9 @@ function samePos(a: Meters, b: Meters): boolean {
  * so only tractors/harvesters home. */
 function homeTargetFor(save: SaveState, agent: Agent): Meters | undefined {
   if (agent.kind !== "tractor" && agent.kind !== "harvester") return undefined;
+  // A full (or leftover-loaded) combine waits for its Grain Trailer — it
+  // shouldn't wander off toward a barn mid-wait.
+  if (agent.kind === "harvester" && (agent.grainOnboard ?? 0) > 0) return undefined;
   const slots = gameConfig.buildings.tractorBarn.slots;
   let best: Building | undefined;
   let bestD = Infinity;
@@ -663,6 +691,30 @@ function homeTargetFor(save: SaveState, agent: Agent): Meters | undefined {
   }
   if (best) return best.pos;
   return nearestFarmYard(save, agent.pos)?.pos;
+}
+
+/** Queue an "Unload Harvester" trip for `harvester` if one isn't already
+ * coming (maintainer request, 2026-07-12) — system-generated, no cost, no
+ * player action. A tractor+Grain Trailer picks it up like any other queued
+ * task via the existing generic assignment loop below. `crop` is captured
+ * HERE (not re-read from `field.crop` later) because `applyHarvestDone`
+ * clears the field's crop the moment the harvest task itself completes —
+ * the trailer for the last, still-in-the-hopper load would otherwise have
+ * no idea what it's hauling by the time it arrives. */
+function ensureUnloadTask(save: SaveState, harvester: Agent, harvestTask: FarmTask, crop: CropId): void {
+  if (save.tasks.some((t) => t.type === "unloadHarvester" && t.harvesterAgentId === harvester.id)) return;
+  save.tasks.push({
+    id: `task-${++taskSeq}`,
+    type: "unloadHarvester",
+    fieldId: harvestTask.fieldId,
+    crop,
+    totalAcres: 1,
+    doneAcres: 0,
+    status: "queued",
+    costPaid: 0,
+    harvesterAgentId: harvester.id,
+    unloadPhase: "toHarvester",
+  });
 }
 
 function tickAgent(
@@ -748,6 +800,145 @@ function tickAgent(
       agent.taskId = undefined;
       agent.state = "idle";
       continue;
+    }
+
+    // Unload Harvester is fundamentally different from every other task: it's
+    // point-to-point travel (combine → silo), not a field coverage path, so
+    // it's handled entirely here rather than falling into the generic
+    // "traveling"/"working" blocks below.
+    if (task.type === "unloadHarvester") {
+      const harvester = save.agents.find((a) => a.id === task.harvesterAgentId);
+      const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "grainTrailer");
+      if (!harvester || !trailer) {
+        // Combine sold (shouldn't happen — see sellAgent's onboard-grain
+        // guard) or trailer detached mid-job — don't strand the tractor.
+        save.tasks.splice(save.tasks.indexOf(task), 1);
+        agent.taskId = undefined;
+        agent.state = "idle";
+        continue;
+      }
+      const speed = (gameConfig.work.travelSpeedKmh * 1000) / 60; // meters per sim-minute
+
+      if (task.unloadPhase === "onloading") {
+        agent.state = "working";
+        const timer = task.phaseTimer ?? gameConfig.hauling.loadMinutes;
+        const used = Math.min(timer, budget);
+        budget -= used;
+        const left = timer - used;
+        if (left > 1e-9) {
+          task.phaseTimer = left;
+          continue;
+        }
+        const cap = grainTrailerCapacityTons(trailer.size);
+        const room = Math.max(0, cap - (trailer.cargoTons ?? 0));
+        const amount = Math.min(room, harvester.grainOnboard ?? 0);
+        harvester.grainOnboard = (harvester.grainOnboard ?? 0) - amount;
+        trailer.cargoTons = (trailer.cargoTons ?? 0) + amount;
+        trailer.cargoCrop = task.crop; // captured at task creation — see ensureUnloadTask
+        task.phaseTimer = undefined;
+        task.unloadPhase = "toSilo";
+        continue;
+      }
+
+      if (task.unloadPhase === "toSilo") {
+        const crop = trailer.cargoCrop;
+        const silo = crop ? nearestSiloForCrop(save, crop, agent.pos) : undefined;
+        if (!silo) {
+          // No silo assigned to this crop yet — sit tight (⚠️ surfaced in the UI).
+          task.waitingForSilo = true;
+          agent.state = "working";
+          budget = 0;
+          continue;
+        }
+        const dx = silo.pos[0] - agent.pos[0];
+        const dy = silo.pos[1] - agent.pos[1];
+        const dist = Math.hypot(dx, dy);
+        if (dist > 0.5) {
+          task.waitingForSilo = false;
+          agent.state = "traveling";
+          if (dist > 1e-6) agent.heading = Math.atan2(dy, dx);
+          const timeNeeded = dist / speed;
+          if (timeNeeded <= budget) {
+            agent.pos = silo.pos;
+            budget -= timeNeeded;
+          } else {
+            const f = (budget * speed) / dist;
+            agent.pos = [agent.pos[0] + dx * f, agent.pos[1] + dy * f];
+            budget = 0;
+          }
+          continue;
+        }
+        // Arrived — dump only if the crop's pooled silo capacity has room.
+        const room = siloCapacityForCrop(save, crop!) - save.grain[crop!];
+        if (room <= 1e-9) {
+          task.waitingForSilo = true;
+          agent.state = "working";
+          budget = 0;
+          continue;
+        }
+        task.waitingForSilo = false;
+        task.unloadPhase = "dumping";
+        task.phaseTimer = gameConfig.hauling.dumpMinutes;
+        continue;
+      }
+
+      if (task.unloadPhase === "dumping") {
+        agent.state = "working";
+        const timer = task.phaseTimer ?? gameConfig.hauling.dumpMinutes;
+        const used = Math.min(timer, budget);
+        budget -= used;
+        const left = timer - used;
+        if (left > 1e-9) {
+          task.phaseTimer = left;
+          continue;
+        }
+        const crop = trailer.cargoCrop!;
+        const room = Math.max(0, siloCapacityForCrop(save, crop) - save.grain[crop]);
+        const amount = Math.min(room, trailer.cargoTons ?? 0);
+        save.grain[crop] += amount;
+        trailer.cargoTons = (trailer.cargoTons ?? 0) - amount;
+        if ((trailer.cargoTons ?? 0) > 1e-9) {
+          // Silo filled up mid-dump — go back to waiting for more room.
+          task.unloadPhase = "toSilo";
+          task.waitingForSilo = true;
+          continue;
+        }
+        trailer.cargoTons = 0;
+        trailer.cargoCrop = undefined;
+        task.waitingForSilo = false;
+        events.push({ kind: "finished", task, agent });
+        save.tasks.splice(save.tasks.indexOf(task), 1);
+        agent.taskId = undefined;
+        agent.state = "idle";
+        continue;
+      }
+
+      // Default / "toHarvester": drive to the combine's current spot (it's
+      // stationary while full — see the harvest-pause block below).
+      {
+        const target = harvester.pos;
+        const dx = target[0] - agent.pos[0];
+        const dy = target[1] - agent.pos[1];
+        const dist = Math.hypot(dx, dy);
+        agent.state = "traveling";
+        if (dist > 0.5) {
+          if (dist > 1e-6) agent.heading = Math.atan2(dy, dx);
+          const timeNeeded = dist / speed;
+          if (timeNeeded <= budget) {
+            agent.pos = target;
+            budget -= timeNeeded;
+          } else {
+            const f = (budget * speed) / dist;
+            agent.pos = [agent.pos[0] + dx * f, agent.pos[1] + dy * f];
+            budget = 0;
+          }
+          continue;
+        }
+        task.unloadPhase = "onloading";
+        task.phaseTimer = gameConfig.hauling.loadMinutes;
+        agent.state = "working";
+        continue;
+      }
     }
 
     if (agent.state === "traveling") {
@@ -867,15 +1058,43 @@ function tickAgent(
       continue;
     }
 
+    // A full combine stops dead (state stays "working") and waits for a
+    // Grain Trailer — auto-queues its own Unload Harvester trip if one isn't
+    // already coming (maintainer request, 2026-07-12).
+    if (task.type === "harvest" && field.crop) {
+      const capacity = harvesterCapacityTons(agent.size ?? "medium");
+      agent.grainOnboard ??= 0;
+      if (agent.grainOnboard >= capacity - 1e-9) {
+        ensureUnloadTask(save, agent, task, field.crop);
+        budget = 0;
+        continue;
+      }
+    }
+
     // Working: drive the coverage path at field speed; swept in-field distance ×
     // swath = area worked, which is where doneAcres comes from (physical model).
     const path = getActivePath(save, task, field, agent);
     const speed = (taskFieldSpeedKmh(task.type) * 1000) / 60; // meters per sim-minute
     let dist = pathDistRuntime.get(task.id);
     if (dist === undefined) dist = distanceAtWork(path, (task.doneAcres * ACRE_M2) / path.swath);
-    const timeNeeded = (path.total - dist) / speed;
+
+    // Harvest is capacity-limited: don't let one (possibly large, at high
+    // time-compression) tick's travel budget drive the combine past what its
+    // hopper can still hold — clamp the distance target to the hopper's
+    // remaining room, so it stops EXACTLY at the fill point instead of
+    // cutting ground the hopper has no room to bank.
+    let target = path.total;
+    if (task.type === "harvest" && field.trueYieldTonsPerAcre) {
+      const capacity = harvesterCapacityTons(agent.size ?? "medium");
+      const room = Math.max(0, capacity - (agent.grainOnboard ?? 0));
+      const roomAcres = room / field.trueYieldTonsPerAcre;
+      const roomWork = workDoneAt(path, dist) + (roomAcres * ACRE_M2) / path.swath;
+      target = Math.min(path.total, distanceAtWork(path, roomWork));
+    }
+
+    const timeNeeded = (target - dist) / speed;
     const timeUsed = Math.min(timeNeeded, budget);
-    dist = Math.min(path.total, dist + speed * timeUsed);
+    dist = Math.min(target, dist + speed * timeUsed);
     budget -= timeUsed;
     pathDistRuntime.set(task.id, dist);
 
@@ -887,13 +1106,22 @@ function tickAgent(
     agent.heading = s.heading;
 
     if (task.type === "harvest" && field.crop && field.trueYieldTonsPerAcre !== undefined) {
-      // Grain banks continuously as the combine works, like real cart loads.
-      save.grain[field.crop] += (task.doneAcres - prevAcres) * field.trueYieldTonsPerAcre;
+      // Grain banks into the combine's own hopper (not the farm bin directly
+      // anymore) — a Grain Trailer carries it the rest of the way. The
+      // distance clamp above guarantees this never exceeds capacity.
+      const capacity = harvesterCapacityTons(agent.size ?? "medium");
+      agent.grainOnboard = Math.min(
+        capacity,
+        (agent.grainOnboard ?? 0) + (task.doneAcres - prevAcres) * field.trueYieldTonsPerAcre,
+      );
       field.harvestedAcres = task.doneAcres;
     }
 
     if (dist >= path.total - 1e-6) {
       task.doneAcres = task.totalAcres;
+      // Capture the crop BEFORE completeTask (applyHarvestDone clears
+      // field.crop) — the last hopper-load's ride still needs to know it.
+      const harvestedCrop = field.crop;
       completeTask(task, field, now, rand);
       // A finished rake changes no field STATUS, and its windrows are already on
       // the surface (revealed strip-by-strip as it drove). Forcing a full repaint
@@ -905,6 +1133,14 @@ function tickAgent(
       save.tasks.splice(save.tasks.indexOf(task), 1);
       agent.taskId = undefined;
       agent.state = "idle";
+      // The last partial hopper (never hit "full" mid-job) still needs a ride.
+      if (task.type === "harvest" && harvestedCrop && (agent.grainOnboard ?? 0) > 1e-9) {
+        ensureUnloadTask(save, agent, task, harvestedCrop);
+      }
+    } else if (task.type === "harvest" && field.crop && dist >= target - 1e-6) {
+      // Hit the hopper's capacity mid-field — stop here (state stays
+      // "working") and get a Grain Trailer coming.
+      ensureUnloadTask(save, agent, task, field.crop);
     }
   }
 }

@@ -5,6 +5,7 @@ import { newGame } from "../src/state/saveState";
 import type { Field, SaveState } from "../src/state/saveState";
 import { tickFarming } from "../src/sim/farming";
 import { ensureAgents, buyImplement, tickTasks, autoManageAll, activePlan } from "../src/sim/tasks";
+import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
 import { minutesPerMonth } from "../src/sim/calendar";
 
 beforeAll(() => setProjection(15, "N"));
@@ -13,9 +14,17 @@ const side = Math.sqrt(100 * 4046.8564224);
 const boundary: Meters[] = [[0, 0], [side, 0], [side, side], [0, side]];
 const APRIL_1 = minutesPerMonth();
 
+/** Also gives a Silo per crop + a Grain Trailer (maintainer request,
+ * 2026-07-12: the combine now has a real hopper and needs somewhere to haul
+ * to) — these tests drive full harvests and need the storage/hauling gear. */
 function gameWithAgents(): SaveState {
   const save = newGame();
   ensureAgents(save, [0, 0]); // medium tractor + combine + plow + planter
+  const cornSilo = buyBuildingAt(save, "silo", [-50, -50], "large");
+  assignSiloCrop(save, cornSilo.id, "corn");
+  const soySilo = buyBuildingAt(save, "silo", [-50, -60], "large");
+  assignSiloCrop(save, soySilo.id, "soybeans");
+  buyImplement(save, "grainTrailer", "medium");
   return save;
 }
 

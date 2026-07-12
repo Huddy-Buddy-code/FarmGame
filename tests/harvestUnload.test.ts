@@ -1,0 +1,214 @@
+import { describe, it, expect, beforeAll } from "vitest";
+import { setProjection } from "../src/geo/coords";
+import type { Meters } from "../src/geo/coords";
+import { newGame } from "../src/state/saveState";
+import type { Field, SaveState } from "../src/state/saveState";
+import { ensureAgents, tickTasks, enqueueTask, buyImplement, sellAgent, harvesterCapacityTons } from "../src/sim/tasks";
+import { tickFarming } from "../src/sim/farming";
+import { sellGrain } from "../src/sim/economy";
+import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
+import { gameConfig } from "../src/config/gameConfig";
+import { minutesPerMonth } from "../src/sim/calendar";
+
+beforeAll(() => setProjection(15, "N"));
+
+const APRIL_1 = minutesPerMonth();
+
+/** A small field, already "ready" with a known true yield — skips the grow
+ * cycle so tests can drive straight into harvesting. `acres` sized per test
+ * so the total potential yield lands where the test wants it relative to a
+ * medium combine's 50t hopper. */
+function readyField(acres: number, tonsPerAcre = 6): Field {
+  const side = Math.sqrt(acres * 4046.8564224);
+  const boundary: Meters[] = [[0, 0], [side, 0], [side, side], [0, side]];
+  return {
+    // plantedAt way in the past so tickFarming's growth-derived status (which
+    // would otherwise overwrite "ready" back to "growing") clamps at ready.
+    id: "field-1", parcelId: "parcel-1", boundary,
+    status: "ready", crop: "corn", plantedAt: -1_000_000, trueYieldTonsPerAcre: tonsPerAcre,
+  };
+}
+
+function gameWithAgents(): SaveState {
+  const save = newGame();
+  ensureAgents(save, [0, 0]); // medium tractor + medium combine (50t hopper)
+  return save;
+}
+
+function samePos(a: Meters, b: Meters): boolean {
+  return Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.5;
+}
+
+/** Run growth/tasks forward until `done()` or the cap, like main.ts's tick order. */
+function runUntil(save: SaveState, from: number, done: () => boolean, capMinutes = 200_000, step = 60): number {
+  let now = from;
+  while (!done() && now - from < capMinutes) {
+    now += step;
+    tickFarming(save, now);
+    tickTasks(save, now, step, () => 0.5);
+  }
+  return now;
+}
+
+function combineOf(save: SaveState) {
+  return save.agents.find((a) => a.kind === "harvester")!;
+}
+function tractorOf(save: SaveState) {
+  return save.agents.find((a) => a.kind === "tractor")!;
+}
+function unloadTaskFor(save: SaveState, harvesterId: string) {
+  return save.tasks.find((t) => t.type === "unloadHarvester" && t.harvesterAgentId === harvesterId);
+}
+
+describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-12)", () => {
+  it("banks into the combine's grainOnboard while cutting, not straight into save.grain", () => {
+    const save = gameWithAgents();
+    const field = readyField(10); // 10ac × 6t/ac = 60t potential — under way from full
+    save.fields.push(field);
+    enqueueTask(save, field, "harvest", APRIL_1);
+
+    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) > 0, 500);
+    expect(combineOf(save).grainOnboard).toBeGreaterThan(0);
+    expect(save.grain.corn).toBe(0);
+  });
+
+  it("pauses at capacity (never exceeds it) and auto-queues an Unload Harvester task", () => {
+    const save = gameWithAgents();
+    const field = readyField(10); // 60t potential > 50t hopper — will fill
+    save.fields.push(field);
+    enqueueTask(save, field, "harvest", APRIL_1);
+    const cap = harvesterCapacityTons("medium");
+
+    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) >= cap - 1e-6, 5000);
+    expect(combineOf(save).grainOnboard).toBeCloseTo(cap, 6);
+    // Field isn't finished — plenty of acres left uncut.
+    const task = save.tasks.find((t) => t.type === "harvest")!;
+    expect(task.doneAcres).toBeLessThan(task.totalAcres);
+    // No trailer owned yet, so it can't be relieved — hopper never overshoots.
+    runUntil(save, APRIL_1, () => false, 2000);
+    expect(combineOf(save).grainOnboard).toBeLessThanOrEqual(cap + 1e-6);
+    expect(unloadTaskFor(save, combineOf(save).id)).toBeDefined();
+  });
+
+  it("a full haul cycle (toHarvester → onloading → toSilo → dumping) lands grain in the assigned silo's crop bin", () => {
+    const save = gameWithAgents();
+    const silo = buyBuildingAt(save, "silo", [-50, -50], "large");
+    assignSiloCrop(save, silo.id, "corn");
+    buyImplement(save, "grainTrailer", "medium"); // 60t — covers a 50t hopper in one trip
+    const field = readyField(8, 6); // 48t potential — one fill, one clean haul
+    save.fields.push(field);
+    enqueueTask(save, field, "harvest", APRIL_1);
+
+    const doneAt = runUntil(save, APRIL_1, () => field.status === "harvested", 50_000);
+    runUntil(save, doneAt, () => save.grain.corn > 0, 5000);
+    expect(save.grain.corn).toBeCloseTo(48, 0);
+    expect(combineOf(save).grainOnboard ?? 0).toBeCloseTo(0, 6);
+    const trailer = save.implements.find((i) => i.kind === "grainTrailer")!;
+    expect(trailer.cargoTons ?? 0).toBe(0);
+    expect(trailer.cargoCrop).toBeUndefined();
+    expect(save.tasks.some((t) => t.type === "unloadHarvester")).toBe(false);
+  });
+
+  it("an undersized trailer only partially drains the hopper — a second trip follows automatically", () => {
+    const save = gameWithAgents();
+    const silo = buyBuildingAt(save, "silo", [-50, -50], "large");
+    assignSiloCrop(save, silo.id, "corn");
+    buyImplement(save, "grainTrailer", "small"); // 40t — can't empty a 50t-full hopper in one go
+    const field = readyField(10, 6); // 60t potential, definitely fills the 50t hopper
+    save.fields.push(field);
+    enqueueTask(save, field, "harvest", APRIL_1);
+    const cap = harvesterCapacityTons("medium");
+
+    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) >= cap - 1e-6, 5000);
+    // First trip: trailer (40t) takes what it can, not the full 50t hopper.
+    runUntil(save, APRIL_1, () => save.grain.corn > 0, 5000);
+    expect(save.grain.corn).toBeCloseTo(40, 0);
+    // A fresh Unload Harvester task follows without any player action once
+    // the hopper fills again — eventually the whole 60t potential lands.
+    runUntil(save, APRIL_1, () => save.grain.corn >= 59, 10_000);
+    expect(save.grain.corn).toBeCloseTo(60, 0);
+  });
+
+  it("no silo assigned to the crop → the trailer waits (⚠️) until one's assigned", () => {
+    const save = gameWithAgents();
+    buyImplement(save, "grainTrailer", "medium"); // no silo built/assigned at all
+    const field = readyField(10, 6);
+    save.fields.push(field);
+    enqueueTask(save, field, "harvest", APRIL_1);
+    const cap = harvesterCapacityTons("medium");
+
+    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) >= cap - 1e-6, 5000);
+    const now = runUntil(save, APRIL_1, () => !!unloadTaskFor(save, combineOf(save).id)?.waitingForSilo, 5000);
+    expect(unloadTaskFor(save, combineOf(save).id)?.waitingForSilo).toBe(true);
+    expect(save.grain.corn).toBe(0);
+
+    // It stays stuck — this isn't a one-tick fluke.
+    runUntil(save, now, () => false, 5000);
+    expect(unloadTaskFor(save, combineOf(save).id)?.waitingForSilo).toBe(true);
+
+    // Building/assigning a silo unsticks it without further player action.
+    const silo = buyBuildingAt(save, "silo", [-50, -50], "large");
+    assignSiloCrop(save, silo.id, "corn");
+    runUntil(save, now, () => save.grain.corn > 0, 5000);
+    expect(save.grain.corn).toBeGreaterThan(0);
+  });
+
+  it("a full-capacity silo → the trailer waits at it until sellGrain frees room", () => {
+    const save = gameWithAgents();
+    const silo = buyBuildingAt(save, "silo", [-50, -50], "small"); // 200t cap
+    assignSiloCrop(save, silo.id, "corn");
+    save.grain.corn = 200; // already at capacity
+    buyImplement(save, "grainTrailer", "medium");
+    const field = readyField(10, 6);
+    save.fields.push(field);
+    enqueueTask(save, field, "harvest", APRIL_1);
+    const cap = harvesterCapacityTons("medium");
+
+    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) >= cap - 1e-6, 5000);
+    const now = runUntil(save, APRIL_1, () => !!unloadTaskFor(save, combineOf(save).id)?.waitingForSilo, 5000);
+    expect(unloadTaskFor(save, combineOf(save).id)?.waitingForSilo).toBe(true);
+    expect(save.grain.corn).toBe(200); // untouched while waiting
+
+    sellGrain(save, "corn", 200); // free up room
+    runUntil(save, now, () => save.grain.corn > 0, 5000);
+    expect(save.grain.corn).toBeGreaterThan(0);
+    expect(unloadTaskFor(save, combineOf(save).id)).toBeUndefined(); // trip completed
+  });
+
+  it("sellAgent refuses to sell a harvester that still has grain onboard", () => {
+    const save = gameWithAgents();
+    const combine = combineOf(save);
+    combine.grainOnboard = 12;
+    expect(() => sellAgent(save, combine.id)).toThrow(/grain onboard/);
+  });
+
+  it("a full harvester doesn't home — it stays put even with a Farm Yard built", () => {
+    const save = gameWithAgents();
+    buyBuildingAt(save, "farmYard", [-1000, -1000]);
+    const field = readyField(10, 6);
+    save.fields.push(field);
+    enqueueTask(save, field, "harvest", APRIL_1);
+    const cap = harvesterCapacityTons("medium");
+
+    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) >= cap - 1e-6, 5000);
+    const posAtFull: Meters = [...combineOf(save).pos];
+    runUntil(save, APRIL_1, () => false, 5000);
+    expect(combineOf(save).pos).toEqual(posAtFull);
+  });
+
+  it("picking up an Unload Harvester task auto-hitches a Grain Trailer, same as a plow", () => {
+    const save = gameWithAgents();
+    const silo = buyBuildingAt(save, "silo", [-50, -50], "large");
+    assignSiloCrop(save, silo.id, "corn");
+    buyImplement(save, "grainTrailer", "medium");
+    const field = readyField(10, 6);
+    save.fields.push(field);
+    enqueueTask(save, field, "harvest", APRIL_1);
+    const cap = harvesterCapacityTons("medium");
+
+    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) >= cap - 1e-6, 5000);
+    runUntil(save, APRIL_1, () => tractorOf(save).taskId !== undefined, 5000);
+    const trailer = save.implements.find((i) => i.kind === "grainTrailer")!;
+    expect(trailer.attachedTo).toBe(tractorOf(save).id);
+  });
+});

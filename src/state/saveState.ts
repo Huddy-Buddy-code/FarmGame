@@ -135,25 +135,35 @@ export interface Agent {
    * as land). The starting fleet gets the config price (bought with starting
    * capital, notionally). */
   purchaseCost?: number;
+  /** Harvester-only: tons currently in the hopper. Fills as it cuts, capped
+   * at the combine's size tier's capacity (maintainer request, 2026-07-12) —
+   * once full it stops and waits for a Grain Trailer (`sim/tasks.ts`). */
+  grainOnboard?: number;
 }
 
-/** An attachable implement (a plow, a planter, a sprayer). A tractor is a
- * power unit; an implement gives it a job it can do. */
+/** An attachable implement (a plow, a planter, a sprayer, a Grain Trailer). A
+ * tractor is a power unit; an implement gives it a job it can do. */
 export interface Implement {
   id: string;
-  kind: "plow" | "planter" | "sprayer" | "rake" | "bailer";
+  kind: "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer";
   size: EquipmentSize;
   /** Id of the tractor this is hitched to, or undefined if parked in the yard. */
   attachedTo?: string;
   /** What was paid — refunded on sell-back. */
   purchaseCost?: number;
+  /** Grain Trailer-only: tons currently loaded, and which crop. Cleared back
+   * to 0/undefined once fully dumped at a silo. */
+  cargoTons?: number;
+  cargoCrop?: CropId;
 }
 
 /** Fieldwork the player has ordered. Tasks queue up and agents (tractor for
  * plow/plant/weed/fertilize, combine for harvest) work through them one after
  * another. Weed/fertilize are independent side-tasks — they don't gate or get
- * gated by plow/plant/harvest, they just need a standing crop in the field. */
-export type TaskType = "plow" | "plant" | "harvest" | "weed" | "fertilize" | "rake" | "bale";
+ * gated by plow/plant/harvest, they just need a standing crop in the field.
+ * `unloadHarvester` is system-generated (never player-queued) — a tractor+
+ * Grain Trailer hauling a full combine's hopper to a silo. */
+export type TaskType = "plow" | "plant" | "harvest" | "weed" | "fertilize" | "rake" | "bale" | "unloadHarvester";
 
 export interface FarmTask {
   id: string;
@@ -167,6 +177,16 @@ export interface FarmTask {
   status: "queued" | "active";
   /** Agent working this task, once one picks it up. */
   agentId?: string;
+  /** unloadHarvester-only: which combine this trip services. */
+  harvesterAgentId?: string;
+  /** unloadHarvester-only: which leg of the trip the tractor+trailer is on. */
+  unloadPhase?: "toHarvester" | "onloading" | "toSilo" | "dumping";
+  /** unloadHarvester-only: sim-minutes left in the current onload/dump pause. */
+  phaseTimer?: number;
+  /** unloadHarvester-only: true while parked with nowhere to dump (no silo
+   * assigned to the crop, or the assigned silo(s) are at capacity) — surfaced
+   * as a ⚠️ in the UI until the player clears it. */
+  waitingForSilo?: boolean;
   /** What was paid when the task was queued (plow cost / seed inputs) —
    * refunded in full if a still-queued task is canceled. */
   costPaid: number;

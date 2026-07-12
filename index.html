@@ -422,6 +422,7 @@
       .qr-name { font-weight: 700; font-size: 13px; }
       .qr-sub { font-size: 11px; color: #8a7658; }
       .queue-row.active { border-color: var(--green-dark); }
+      .queue-row.warn { border-color: var(--red); background: rgba(199, 81, 70, 0.08); }
       .queue-row.queued { cursor: grab; }
       .queue-row.queued.dragging { opacity: 0.4; }
       .queue-row.queued.drag-over { border-color: var(--green-dark); border-style: dashed; }
@@ -447,6 +448,9 @@
       .agent-dot .agent-glyph { display: inline-flex; transition: transform 0.12s linear; }
       .agent-dot.working { border-color: var(--green-dark); }
       .agent-dot.working .agent-bob { animation: chug 0.9s infinite; }
+      /* ⚠️ a tractor/harvester stuck on a silo with no room (maintainer
+         request, 2026-07-12) — red ring, no bounce (they're stopped). */
+      .agent-dot.warn { border-color: var(--red); box-shadow: 0 0 0 2px rgba(199, 81, 70, 0.35), var(--shadow); }
       /* Bales dropped in the field — decorative, must not eat field clicks. */
       .bale-dot { line-height: 0; pointer-events: none; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35)); }
 

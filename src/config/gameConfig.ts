@@ -120,8 +120,26 @@ export interface GameConfig {
      * feet. Same hitch rule; runs after (or alongside) the rake. Sold in one
      * size (25 ft). */
     bailer: Record<EquipmentSize, { price: number; widthFt: number }>;
-    /** The combine is self-contained for now (integral grain header). */
-    harvester: { price: number; widthFt: number };
+    /** The combine is self-contained (integral grain header) but now SIZED
+     * like a tractor (maintainer request, 2026-07-12): each tier has its own
+     * hopper capacity — the combine fills as it cuts, stops when full, and
+     * waits for a Grain Trailer (see `hauling` + `sim/tasks.ts`). */
+    harvester: Record<EquipmentSize, { price: number; widthFt: number; capacityTons: number }>;
+    /** Grain Trailer: hauls a full combine hopper to a silo. A normal
+     * implement (one tractor hitch slot, like a plow) — `widthFt` is unused
+     * (not a fieldwork tool) but kept so it shares the generic implement
+     * config shape. `capacityTons` caps how much one trip can carry; a
+     * trailer smaller than the hopper just takes a partial load. */
+    grainTrailer: Record<EquipmentSize, { price: number; widthFt: number; capacityTons: number }>;
+  };
+
+  /** Grain hauling (maintainer request, 2026-07-12): the pause a tractor+
+   * Grain Trailer sits still for at each end of a haul — loading at the
+   * combine, dumping at the silo. Same "~10 sim-seconds at 1×" convention as
+   * `forage.baleTieMinutes`. */
+  hauling: {
+    loadMinutes: number;
+    dumpMinutes: number;
   };
 
   /** Forage baling (maintainer request, 2026-07-11). After a forage crop is
@@ -269,7 +287,20 @@ export const gameConfig: GameConfig = {
       medium: { price: 130_000, widthFt: 25 },
       large: { price: 130_000, widthFt: 25 },
     },
-    harvester: { price: 450_000, widthFt: 30 },
+    harvester: {
+      small: { price: 350_000, widthFt: 20, capacityTons: 30 },
+      medium: { price: 450_000, widthFt: 30, capacityTons: 50 },
+      large: { price: 600_000, widthFt: 40, capacityTons: 80 },
+    },
+    grainTrailer: {
+      small: { price: 25_000, widthFt: 0, capacityTons: 40 },
+      medium: { price: 45_000, widthFt: 0, capacityTons: 60 },
+      large: { price: 70_000, widthFt: 0, capacityTons: 100 },
+    },
+  },
+  hauling: {
+    loadMinutes: 0.17, // ≈ 10 s at 1×
+    dumpMinutes: 0.17,
   },
   forage: {
     rakeSpeedKmh: 13, // slightly faster than the baler

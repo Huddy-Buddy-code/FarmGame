@@ -10,6 +10,7 @@ import {
 } from "../src/sim/tasks";
 import { tickFarming } from "../src/sim/farming";
 import { sellBales } from "../src/sim/economy";
+import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
 import { minutesPerMonth } from "../src/sim/calendar";
 import { gameConfig } from "../src/config/gameConfig";
 import { areaAcres, pointInPolygon } from "../src/geo/geometry";
@@ -24,12 +25,19 @@ const EXPECTED_BALES = Math.round(ACRES * gameConfig.forage.balesPerAcre);
 const APRIL_1 = minutesPerMonth();
 const WINTER_1 = 9 * minutesPerMonth(); // Dec 1 — plow window opens (winter only)
 
-/** A game with the starting fleet PLUS a rake and a baler (so baling is possible). */
+/** A game with the starting fleet PLUS a rake and a baler (so baling is
+ * possible), a large corn Silo, and a Grain Trailer (maintainer request,
+ * 2026-07-12: the combine now has a real hopper and needs somewhere to haul). */
 function gameWithForageGear(): SaveState {
   const save = newGame();
   ensureAgents(save, [0, 0]);
   buyImplement(save, "rake", "small");
   buyImplement(save, "bailer", "medium");
+  const silo = buyBuildingAt(save, "silo", [-50, -50], "large");
+  assignSiloCrop(save, silo.id, "corn");
+  // Medium, not large — the starting tractor is medium and can't pull a
+  // larger implement (same pull-size rule as plow/planter).
+  buyImplement(save, "grainTrailer", "medium");
   return save;
 }
 

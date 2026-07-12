@@ -12,6 +12,7 @@ import {
   agentPrice, implementPrice, canPull,
 } from "../src/sim/tasks";
 import { sellGrain } from "../src/sim/economy";
+import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
 import {
   dateOf, formatDate, nextMonthStart, MINUTES_PER_DAY, minutesPerMonth,
   getDaysPerMonth, setDaysPerMonth,
@@ -36,6 +37,21 @@ function gameWithAgents(): SaveState {
   const save = newGame();
   ensureAgents(save, [0, 0]);
   return save;
+}
+
+/** Give a game a large corn Silo + Grain Trailer, with enough spare cash to
+ * afford them regardless of what's already been spent (maintainer request,
+ * 2026-07-12: the combine now has a real hopper and needs somewhere to haul
+ * to) — tests that drive a harvest all the way through need this; tests
+ * about buying/affording equipment don't, so it's opt-in, not baked into
+ * `gameWithAgents`. */
+function giveHaulingGear(save: SaveState): void {
+  save.money += 1_000_000;
+  const silo = buyBuildingAt(save, "silo", [-50, -50], "large");
+  assignSiloCrop(save, silo.id, "corn");
+  // Medium, not large — the starting tractor is medium and can't pull a
+  // larger implement (same pull-size rule as plow/planter).
+  buyImplement(save, "grainTrailer", "medium");
 }
 
 /** Run the world forward `minutes` from `from` in `step`-minute ticks (growth +
@@ -197,6 +213,7 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
 
   it("the combine harvests a ready field over sim-hours and banks acres × true yield", () => {
     const save = gameWithAgents();
+    giveHaulingGear(save);
     const field = freshField();
     save.fields.push(field);
     applyPlant(field, "corn", APRIL_1, () => 0.5);
@@ -208,14 +225,19 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     tickFarming(save, ready);
     enqueueTask(save, field, "harvest", ready);
 
-    // Partway: harvesting, grain banking but not yet complete.
+    // Partway: harvesting, grain banking into the combine's own hopper (not
+    // the farm bin — that only fills once a Grain Trailer hauls a load in).
     runWorld(save, ready, 120, 30);
     expect(isFieldHarvesting(save, field.id)).toBe(true);
-    expect(save.grain.corn).toBeGreaterThan(0);
-    expect(save.grain.corn).toBeLessThan(100 * truth);
+    const combine = save.agents.find((a) => a.kind === "harvester")!;
+    expect(combine.grainOnboard).toBeGreaterThan(0);
+    expect(combine.grainOnboard).toBeLessThan(100 * truth);
     runUntil(save, ready + 120, () => field.status === "harvested");
     expect(field.status).toBe("harvested");
     expect(field.crop).toBeUndefined();
+    // Field's done, but the last hopper-load may still be en route to the
+    // silo — drive on until it's actually landed in the farm bin.
+    runUntil(save, ready + 120, () => save.grain.corn > 0);
     expect(save.grain.corn).toBeCloseTo(100 * truth, 0);
   });
 
@@ -427,6 +449,7 @@ describe("equipment: sizes, implements, buy/sell/attach (brief §8 capital)", ()
 describe("auto-manage (idle mode, player-requested)", () => {
   it("waits out spring/summer/fall, plows only once winter opens, then plants/harvests itself", () => {
     const save = gameWithAgents();
+    giveHaulingGear(save);
     const field = freshField("stubble");
     field.autoManage = true;
     save.fields.push(field);
@@ -450,12 +473,17 @@ describe("auto-manage (idle mode, player-requested)", () => {
     // Ripens and auto-harvests.
     const grow = gameConfig.crops.corn.growMonths * mpm;
     now = runUntil(save, now, () => field.status === "harvested", grow + 30 * MINUTES_PER_DAY);
-    expect(save.grain.corn).toBeGreaterThan(0);
     expect(field.status).toBe("harvested");
+    // The last hopper-load may still be en route to the silo when the field
+    // itself flips to "harvested" — drive on until it's actually landed.
+    now = runUntil(save, now, () => save.grain.corn > 0, 5 * MINUTES_PER_DAY);
+    expect(save.grain.corn).toBeGreaterThan(0);
 
     // Fresh off harvest (summer) — the maintainer-requested behavior: it must
     // NOT be replowed immediately, only once winter comes back around.
-    expect(save.tasks).toHaveLength(0);
+    // (Ignore any still-finishing Unload Harvester trip — it's not a
+    // lifecycle task and self-clears once the hopper's empty.)
+    expect(save.tasks.filter((t) => t.type !== "unloadHarvester")).toHaveLength(0);
 
     now = runUntil(save, now, () => field.status === "tilled", 12 * mpm);
     expect(field.status).toBe("tilled");
@@ -540,6 +568,7 @@ describe("weeding & fertilizing (independent side-tasks, brief request 2026-07-1
 
   it("a stuck (sprayer-less) weed task must not block auto-manage from harvesting a ready field (regression)", () => {
     const save = gameWithAgents(); // no sprayer — the weed task below can never be picked up
+    giveHaulingGear(save);
     const field = freshField("planted");
     field.autoManage = true;
     field.crop = "corn";
@@ -553,8 +582,10 @@ describe("weeding & fertilizing (independent side-tasks, brief request 2026-07-1
     // Drive well past ready — the stuck weed task must not stop auto-manage
     // from queuing (and the combine from finishing) the harvest.
     const ready = APRIL_1 + gameConfig.crops.corn.growMonths * minutesPerMonth();
-    runUntil(save, juneStart, () => field.status === "harvested", ready - juneStart + 10 * MINUTES_PER_DAY);
+    const doneAt = runUntil(save, juneStart, () => field.status === "harvested", ready - juneStart + 10 * MINUTES_PER_DAY);
     expect(field.status).toBe("harvested");
+    // The last hopper-load may still be en route to the silo.
+    runUntil(save, doneAt, () => save.grain.corn > 0, 5 * MINUTES_PER_DAY);
     expect(save.grain.corn).toBeGreaterThan(0);
     // The stuck weed task is still there, untouched, independent as designed.
     expect(save.tasks.some((t) => t.type === "weed" && t.status === "queued")).toBe(true);

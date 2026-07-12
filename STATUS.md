@@ -43,6 +43,42 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   if sold now.
 - **95/95 tests passing** (added 5 rotation-planner tests). Typecheck clean.
 
+## Latest changes (2026-07-12, harvester hopper + Grain Trailer hauling)
+
+- **Combines have a real hopper now, sized like tractors** (Small 30t/Medium
+  50t/Large 80t). Grain banks into the combine's `grainOnboard`, not straight
+  into `save.grain` — a single sim-tick's travel is now capacity-clamped so
+  it stops EXACTLY at the fill point (a real bug caught in testing: without
+  this, a large tick at high time-compression could drive the combine past
+  what its hopper holds and silently discard the excess).
+- **New implement: Grain Trailer** (Small 40t/Medium 60t/Large 100t) — a
+  normal one-hitch-slot implement like a plow. New "Grain Trailers" shop
+  group in the Equipment panel.
+- **"Unload Harvester" auto-queues** the instant a hopper fills (or, for the
+  last partial load, the instant the field finishes) — no player action. A
+  tractor+Grain Trailer picks it up via the same generic task-assignment/
+  auto-hitch machinery every other task uses. Four phases (`toHarvester` →
+  `onloading` → `toSilo` → `dumping`), each a real point-to-point drive +
+  10-sim-second pause (same convention as the baler's tie-and-drop).
+- **Dumps into the silo assigned to that crop**; if none exists or the
+  crop's pooled silo capacity is full, the trailer waits in place
+  (`waitingForSilo`) — surfaced as a ⚠️ on the tractor, the harvester, and
+  the queue-panel row, and auto-resumes once the player frees room or
+  assigns a silo. An undersized trailer just takes a partial load; a fresh
+  trip auto-queues once the hopper fills again — no multi-trip bookkeeping
+  needed, it emerges from the normal fill/empty cycle.
+- Gotcha fixed: `applyHarvestDone` clears `field.crop` the moment the
+  harvest task itself completes, but the trailer for the LAST load doesn't
+  arrive until after that — the crop is now captured on the unload task at
+  creation time, not re-read from the field later.
+- `sellAgent` refuses to sell a harvester with grain onboard. A full
+  harvester doesn't participate in the drive-home-when-idle behavior (stays
+  put until relieved).
+- 9 new tests in `tests/harvestUnload.test.ts`; existing harvest-driving
+  tests in `farming.test.ts`/`forage.test.ts`/`plans.test.ts` updated to
+  give their fixtures a silo + Grain Trailer (harvest no longer completes
+  for free into an unlimited bin).
+
 ## Latest changes (2026-07-12, equipment homing)
 
 - **Tractors/harvesters now drive home when idle** (`homeTargetFor` in

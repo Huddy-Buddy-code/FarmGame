@@ -143,3 +143,21 @@ export function nearestOfKind(save: SaveState, kind: BuildingKind, from: Meters)
 export function nearestFarmYard(save: SaveState, from: Meters): Building | undefined {
   return nearestOfKind(save, "farmYard", from);
 }
+
+/** The nearest Silo assigned to `crop`, if one exists — where a Grain
+ * Trailer hauls a load (maintainer request, 2026-07-12). Capacity is pooled
+ * per crop (`siloCapacityForCrop`), not per building, so this only picks a
+ * physical destination — the caller checks room separately. */
+export function nearestSiloForCrop(save: SaveState, crop: CropId, from: Meters): Building | undefined {
+  let best: Building | undefined;
+  let bestD = Infinity;
+  for (const b of save.buildings) {
+    if (b.kind !== "silo" || b.assignedCrop !== crop) continue;
+    const d = Math.hypot(b.pos[0] - from[0], b.pos[1] - from[1]);
+    if (d < bestD) {
+      bestD = d;
+      best = b;
+    }
+  }
+  return best;
+}

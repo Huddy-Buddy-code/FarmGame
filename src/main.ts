@@ -52,6 +52,7 @@ import {
   buyAgent, sellAgent, buyImplement, sellImplement, attachImplement, detachImplement,
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
   reorderTask, estimateTaskHours, forageDue, defaultPlan,
+  harvesterCapacityTons, grainTrailerCapacityTons,
 } from "./sim/tasks";
 import type { EquipmentKind } from "./sim/tasks";
 import {
@@ -343,6 +344,7 @@ function taskVerb(task: FarmTask): string {
   if (task.type === "fertilize") return "fertilizing";
   if (task.type === "rake") return "raking";
   if (task.type === "bale") return "baling";
+  if (task.type === "unloadHarvester") return "hauling grain";
   return "harvesting";
 }
 
@@ -355,6 +357,19 @@ function toastTaskEvent(task: FarmTask, agent: Agent, kind: "started" | "finishe
 
 /** One marker per agent, moved (not recreated) every frame. */
 const agentMarkers = new Map<string, maplibregl.Marker>();
+
+/** ⚠️ badge condition (maintainer request, 2026-07-12): the tractor whose
+ * active job is a stuck unload, or the harvester that unload is servicing. */
+function isAgentWaitingForSilo(agent: Agent): boolean {
+  if (agent.kind === "tractor") {
+    const task = agent.taskId ? save.tasks.find((t) => t.id === agent.taskId) : undefined;
+    return !!task && task.type === "unloadHarvester" && !!task.waitingForSilo;
+  }
+  if (agent.kind === "harvester") {
+    return !!save.tasks.find((t) => t.type === "unloadHarvester" && t.harvesterAgentId === agent.id && t.waitingForSilo);
+  }
+  return false;
+}
 
 function updateAgentMarkers(): void {
   if (!mapRef) return;
@@ -382,6 +397,7 @@ function updateAgentMarkers(): void {
     }
     const el = marker.getElement();
     el.classList.toggle("working", agent.state === "working");
+    el.classList.toggle("warn", isAgentWaitingForSilo(agent));
     // Point the glyph along the driving heading. The SVGs are drawn facing WEST,
     // and screen-y points down while meters-north points up, so aligning to travel
     // is a rotation of (π − heading). But that rolls the icon 180° upside-down when
@@ -638,6 +654,21 @@ function buildQueueRow(task: FarmTask): HTMLElement {
   const isActive = task.status === "active";
   const agent = isActive && task.agentId ? save.agents.find((a) => a.id === task.agentId) : undefined;
   const iconHtml = agent ? `<span class="icon">${(AGENT_ICON[agent.kind] ?? tractorIconSvg)(18)}</span>` : "";
+
+  if (task.type === "unloadHarvester") {
+    // Not acres-based — no %/hours estimate; show the phase instead.
+    const sub = task.waitingForSilo ? "⚠️ Waiting for silo room" : (UNLOAD_PHASE_TEXT[task.unloadPhase ?? "toHarvester"] ?? "Hauling grain…");
+    const row = document.createElement("div");
+    row.className = "queue-row" + (isActive ? " active" : " queued") + (task.waitingForSilo ? " warn" : "");
+    row.innerHTML = `
+      ${iconHtml}
+      <span class="qr-info">
+        <div class="qr-name">🚛 Unload Harvester · ${prettyId(task.fieldId)}</div>
+        <div class="qr-sub">${sub}</div>
+      </span>`;
+    return row; // system task — not draggable/cancelable, it self-regenerates
+  }
+
   const hours = estimateTaskHours(save, task);
   const pct = (task.doneAcres / task.totalAcres) * 100;
   const sub = isActive
@@ -713,7 +744,7 @@ let lastQueueKey = " init";
 function refreshQueuePanel(): void {
   // Skip DOM churn when nothing visible changed (1% progress buckets animate).
   const key = save.tasks
-    .map((t) => `${t.id}:${t.status}:${t.agentId ?? ""}:${Math.round((t.doneAcres / t.totalAcres) * 100)}`)
+    .map((t) => `${t.id}:${t.status}:${t.agentId ?? ""}:${Math.round((t.doneAcres / t.totalAcres) * 100)}:${t.unloadPhase ?? ""}:${t.waitingForSilo ?? ""}`)
     .join("|");
   if (key === lastQueueKey) return;
   lastQueueKey = key;
@@ -1111,11 +1142,45 @@ function afterFleetChange(): void {
   refreshQueuePanel();
 }
 
+/** Text for a harvester waiting on a Grain Trailer — full mid-job, or idle
+ * with a leftover partial hopper after finishing its field. ⚠️ if the
+ * servicing unload trip is stuck with nowhere to dump. */
+function harvesterWaitingText(agent: Agent): string | null {
+  const capV = harvesterCapacityTons(agent.size ?? "medium");
+  const onboard = agent.grainOnboard ?? 0;
+  const blocked = onboard >= capV - 1e-9;
+  if (onboard <= 1e-9 || !(agent.state === "idle" || blocked)) return null;
+  const unload = save.tasks.find((t) => t.type === "unloadHarvester" && t.harvesterAgentId === agent.id);
+  const warn = unload?.waitingForSilo ? "⚠️ " : "";
+  return `${warn}Waiting for a Grain Trailer (${onboard.toFixed(1)}/${capV}t)`;
+}
+
+const UNLOAD_PHASE_TEXT: Record<string, string> = {
+  toHarvester: "Driving to the combine…",
+  onloading: "Loading grain…",
+  toSilo: "Hauling to the silo…",
+  dumping: "Unloading at the silo…",
+};
+
 function agentStatusText(agent: Agent): { text: string; pct: number | null } {
   const task = agent.taskId ? save.tasks.find((t) => t.id === agent.taskId) : undefined;
+
+  if (agent.kind === "harvester") {
+    const waiting = harvesterWaitingText(agent);
+    if (waiting) return { text: waiting, pct: null };
+  }
+
+  if (task && task.type === "unloadHarvester") {
+    const text = task.waitingForSilo ? "⚠️ Waiting for silo room" : (UNLOAD_PHASE_TEXT[task.unloadPhase ?? "toHarvester"] ?? "Hauling grain…");
+    return { text, pct: null };
+  }
   if (task && agent.state === "traveling") return { text: `Driving to ${prettyId(task.fieldId)}…`, pct: null };
   if (task && agent.state === "working") {
-    return { text: `${cap(taskVerb(task))} ${prettyId(task.fieldId)}`, pct: (task.doneAcres / task.totalAcres) * 100 };
+    let text = `${cap(taskVerb(task))} ${prettyId(task.fieldId)}`;
+    if (task.type === "harvest" && (agent.grainOnboard ?? 0) > 0) {
+      text += ` · ${(agent.grainOnboard ?? 0).toFixed(1)}t onboard`;
+    }
+    return { text, pct: (task.doneAcres / task.totalAcres) * 100 };
   }
   // No task but still "traveling" — driving home to a Tractor Barn/Farm Yard
   // after finishing a job (see homeTargetFor in tasks.ts).
@@ -1134,11 +1199,11 @@ function refreshEquipTab(force = false) {
       .map((a) => {
         const task = a.taskId ? save.tasks.find((t) => t.id === a.taskId) : undefined;
         const pct = task ? Math.round((task.doneAcres / task.totalAcres) * 100) : "";
-        return `${a.id}:${a.state}:${pct}`;
+        return `${a.id}:${a.state}:${pct}:${Math.round(a.grainOnboard ?? 0)}:${task?.unloadPhase ?? ""}:${task?.waitingForSilo ?? ""}`;
       })
       .join("|") +
     "#" +
-    save.implements.map((i) => `${i.id}:${i.attachedTo ?? ""}`).join("|") +
+    save.implements.map((i) => `${i.id}:${i.attachedTo ?? ""}:${Math.round(i.cargoTons ?? 0)}`).join("|") +
     `|$${Math.round(save.money)}`;
   if (!force && key === lastEquipKey) return;
   lastEquipKey = key;
@@ -1234,15 +1299,36 @@ function buildEquipShop(): void {
     }),
   );
 
+  // Combines are sized like tractors (maintainer request, 2026-07-12) — each
+  // tier its own hopper capacity, shown so the player can size it against
+  // the Grain Trailer(s) they'll pair it with.
   const combine = group("Combine", combineIconSvg(16));
-  const cprice = gameConfig.equipment.harvester.price;
-  combine.appendChild(
-    buyButton("Combine", cprice, () => {
-      const a = buyAgent(save, "harvester", "medium", spawnPos());
-      afterFleetChange();
-      toast(`Bought ${a.name} — parked at the yard`);
-    }),
-  );
+  for (const size of SIZES) {
+    const price = agentPrice("harvester", size);
+    const tons = harvesterCapacityTons(size);
+    combine.appendChild(
+      buyButton(`${SIZE_LABEL[size]} · ${tons}t`, price, () => {
+        const a = buyAgent(save, "harvester", size, spawnPos());
+        afterFleetChange();
+        toast(`Bought ${a.name} — parked at the yard`);
+      }),
+    );
+  }
+
+  // Grain Trailer: hauls a full combine to a silo. A normal implement (one
+  // tractor hitch slot) — sized like plow/planter.
+  const trailers = group("Grain Trailers", "🚛");
+  for (const size of SIZES) {
+    const price = implementPrice("grainTrailer", size);
+    const tons = grainTrailerCapacityTons(size);
+    trailers.appendChild(
+      buyButton(`${SIZE_LABEL[size]} · ${tons}t`, price, () => {
+        const i = buyImplement(save, "grainTrailer", size);
+        afterFleetChange();
+        toast(`Bought ${implementName(save, i)} — parked in the yard`);
+      }),
+    );
+  }
 
   // Buildings: click-to-place fixtures (silo/barns/yard), not instant buys —
   // the button just arms placement mode; the map click pays and drops it.
@@ -1333,7 +1419,9 @@ function buildEquipMachines(): void {
   }
 }
 
-const IMPLEMENT_ICON: Record<string, string> = { plow: "🔧", planter: "🌱", sprayer: "💦", rake: "🧹", bailer: "📦" };
+const IMPLEMENT_ICON: Record<string, string> = {
+  plow: "🔧", planter: "🌱", sprayer: "💦", rake: "🧹", bailer: "📦", grainTrailer: "🚛",
+};
 
 /** IMPLEMENTS you attach: every plow/planter, with a selector to hitch it to a
  * tractor (or park it in the yard) and a sell button. */
@@ -1346,10 +1434,12 @@ function buildEquipImplements(): void {
     return;
   }
   for (const impl of implements_) {
-    const ft = gameConfig.equipment[impl.kind][impl.size].widthFt;
     const host = impl.attachedTo ? save.agents.find((a) => a.id === impl.attachedTo) : undefined;
     const where = host ? `On ${host.name}` : "In the yard";
     const refund = impl.purchaseCost ?? implementPrice(impl.kind, impl.size);
+    const sizeLine = impl.kind === "grainTrailer"
+      ? `${grainTrailerCapacityTons(impl.size)}t capacity${impl.cargoTons ? ` · ${impl.cargoTons.toFixed(1)}t onboard` : ""}`
+      : `${gameConfig.equipment[impl.kind][impl.size].widthFt} ft wide`;
 
     const row = document.createElement("div");
     row.className = "equip-row implement";
@@ -1357,7 +1447,7 @@ function buildEquipImplements(): void {
       <span class="icon">${IMPLEMENT_ICON[impl.kind] ?? "🔧"}</span>
       <span class="er-info">
         <div class="er-name">${implementName(save, impl)}</div>
-        <div class="er-status">${where} · ${ft} ft wide</div>
+        <div class="er-status">${where} · ${sizeLine}</div>
       </span>`;
 
     row.appendChild(hitchSelector(impl));
