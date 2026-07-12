@@ -28,8 +28,8 @@ import { buyFieldFromBoundary, renderField, initIdCounters, sellField, hashSeed 
 import { drawFieldTexture } from "./field/fieldRender";
 import { updateBuildingMarkers, BUILDING_ICON } from "./field/buildingRender";
 import {
-  buyBuildingAt, sellBuilding, buildingPrice, initBuildingIdCounters,
-  BUILDING_NAME, siloCapacityForCrop, assignSiloCrop,
+  buyBuildingAt, sellBuilding, buildingPrice, buildingDisplayName, initBuildingIdCounters,
+  BUILDING_NAME, siloCapacityForCrop, siloCapacityOf, assignSiloCrop,
   baleCapacity, barnSlotTotal, nearestFarmYard,
 } from "./sim/buildings";
 import { distanceAtWork } from "./sim/coverage";
@@ -100,6 +100,9 @@ if (loaded) {
 // Only one map interaction is active at a time.
 type Mode = "none" | "field" | `building:${BuildingKind}`;
 let mode: Mode = "none";
+/** Size armed for the NEXT silo placement (set by the Buildings shop button
+ * just before `mode` becomes "building:silo"; ignored for every other kind). */
+let pendingSiloSize: EquipmentSize = "small";
 
 let overlay: OverlayEngine;
 let mapRef: maplibregl.Map;
@@ -1241,8 +1244,20 @@ function buildEquipShop(): void {
   // Buildings: click-to-place fixtures (silo/barns/yard), not instant buys —
   // the button just arms placement mode; the map click pays and drops it.
   const buildings = group("Buildings", "🏗️");
-  const BUILDING_LIST: BuildingKind[] = ["silo", "baleBarn", "baleArea", "tractorBarn", "implementBarn", "farmYard"];
-  for (const kind of BUILDING_LIST) {
+  // Silos come in three sizes (maintainer request, 2026-07-12), like tractors.
+  for (const size of SIZES) {
+    const tons = siloCapacityOf(size);
+    buildings.appendChild(
+      buyButton(`${BUILDING_ICON.silo} ${buildingDisplayName("silo", size)} · ${tons.toLocaleString()}t`, buildingPrice("silo", size), () => {
+        mode = "building:silo";
+        pendingSiloSize = size;
+        $("equiptab").style.display = "none";
+        toast(`🏗️ Click the map to place your ${buildingDisplayName("silo", size)}`);
+      }),
+    );
+  }
+  const OTHER_BUILDINGS: Exclude<BuildingKind, "silo">[] = ["baleBarn", "baleArea", "tractorBarn", "implementBarn", "farmYard"];
+  for (const kind of OTHER_BUILDINGS) {
     buildings.appendChild(
       buyButton(`${BUILDING_ICON[kind]} ${BUILDING_NAME[kind]}`, buildingPrice(kind), () => {
         mode = `building:${kind}`;
@@ -1683,11 +1698,12 @@ function wireBuildingPlacement(map: maplibregl.Map) {
     const kind = mode.slice("building:".length) as BuildingKind;
     mode = "none";
     const pos = toMeters([e.lngLat.lng, e.lngLat.lat]);
+    const size = kind === "silo" ? pendingSiloSize : undefined;
     try {
-      buyBuildingAt(save, kind, pos);
+      buyBuildingAt(save, kind, pos, size);
       updateHud();
       refreshBuildingMarkers();
-      toast(`🏗️ Built ${BUILDING_NAME[kind]} for $${buildingPrice(kind).toLocaleString()}`);
+      toast(`🏗️ Built ${buildingDisplayName(kind, size)} for $${buildingPrice(kind, size).toLocaleString()}`);
     } catch (err) {
       toast("❌ " + (err as Error).message, 3500);
     }
@@ -1704,7 +1720,7 @@ function refreshBuildingMarkers(): void {
 function buildingCapacityText(building: Building): string {
   switch (building.kind) {
     case "silo": {
-      const per = gameConfig.buildings.silo.capacityTons.toLocaleString();
+      const per = siloCapacityOf(building.size ?? "small").toLocaleString();
       if (!building.assignedCrop) return `Holds ${per} t once assigned a crop below.`;
       const cfg = gameConfig.crops[building.assignedCrop];
       return `Holds ${per} t of ${cfg.name.toLowerCase()} · farm total ${siloCapacityForCrop(save, building.assignedCrop).toLocaleString()} t`;
@@ -1723,11 +1739,12 @@ function buildingCapacityText(building: Building): string {
 }
 
 function onBuildingClick(building: Building): void {
-  const refund = buildingPrice(building.kind);
+  const refund = buildingPrice(building.kind, building.size);
+  const name = buildingDisplayName(building.kind, building.size);
   const el = document.createElement("div");
   el.className = "building-popup";
   el.innerHTML = `
-    <div class="bp-title">${BUILDING_ICON[building.kind]} ${BUILDING_NAME[building.kind]}</div>
+    <div class="bp-title">${BUILDING_ICON[building.kind]} ${name}</div>
     <div class="bp-cap">${buildingCapacityText(building)}</div>`;
 
   if (building.kind === "silo") {
@@ -1752,11 +1769,11 @@ function onBuildingClick(building: Building): void {
   sellBtn.className = "shop-buy";
   sellBtn.textContent = `Sell · $${refund.toLocaleString()}`;
   sellBtn.addEventListener("click", () => {
-    if (!confirm(`Sell ${BUILDING_NAME[building.kind]} for $${refund.toLocaleString()}?`)) return;
+    if (!confirm(`Sell ${name} for $${refund.toLocaleString()}?`)) return;
     sellBuilding(save, building.id);
     updateHud();
     refreshBuildingMarkers();
-    toast(`💰 Sold ${BUILDING_NAME[building.kind]} for $${refund.toLocaleString()}`);
+    toast(`💰 Sold ${name} for $${refund.toLocaleString()}`);
     popup.remove();
   });
   el.appendChild(sellBtn);

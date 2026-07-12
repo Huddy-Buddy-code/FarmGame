@@ -106,6 +106,8 @@ export interface Building {
   kind: BuildingKind;
   /** UTM-meter placement point. */
   pos: Meters;
+  /** Silo-only: capacity tier (Small/Medium/Large), chosen at purchase. */
+  size?: EquipmentSize;
   /** Silo-only: which crop's grain this silo is dedicated to (chosen by the
    * player on click). A silo holds no capacity until assigned — grain
    * capacity is tracked per crop, not pooled across crops. */

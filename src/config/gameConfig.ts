@@ -175,8 +175,9 @@ export interface GameConfig {
    * where equipment parks) is a follow-up pass. Sell-back refunds full price,
    * same rule as land/equipment. */
   buildings: {
-    /** Grain storage, tons. */
-    silo: { price: number; capacityTons: number };
+    /** Grain storage, tons — sized like equipment (Small/Medium/Large), each
+     * tier cheaper per ton than the last (bulk-build economy). */
+    silo: Record<EquipmentSize, { price: number; capacityTons: number }>;
     /** Indoor bale storage — pricier, presumably weatherproof (flavor; no
      * mechanical difference yet). */
     baleBarn: { price: number; capacityBales: number };
@@ -281,7 +282,11 @@ export const gameConfig: GameConfig = {
     baleTieMinutes: 0.17, // ≈ 10 s at 1×
   },
   buildings: {
-    silo: { price: 90_000, capacityTons: 200 },
+    silo: {
+      small: { price: 90_000, capacityTons: 200 },
+      medium: { price: 200_000, capacityTons: 500 },
+      large: { price: 350_000, capacityTons: 1000 },
+    },
     baleBarn: { price: 70_000, capacityBales: 300 },
     baleArea: { price: 25_000, capacityBales: 300 },
     tractorBarn: { price: 60_000, slots: 3 },

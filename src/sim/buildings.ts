@@ -5,10 +5,14 @@
  * (silo tons, barn slots, bale-storage counts) are computed here for the UI
  * and for a follow-up mechanics pass; nothing in the sim currently BLOCKS on
  * them (harvest/baling/equipment parking are unchanged this slice).
+ *
+ * Silos are SIZED like equipment (Small/Medium/Large — maintainer request,
+ * 2026-07-12), each tier a bigger, cheaper-per-ton tank. Every other building
+ * is one fixed size.
  */
 
 import { gameConfig } from "../config/gameConfig";
-import type { CropId } from "../config/gameConfig";
+import type { CropId, EquipmentSize } from "../config/gameConfig";
 import type { BuildingKind, Building, SaveState } from "../state/saveState";
 import type { Meters } from "../geo/coords";
 
@@ -32,18 +36,36 @@ export const BUILDING_NAME: Record<BuildingKind, string> = {
   farmYard: "Farm Yard",
 };
 
-export function buildingPrice(kind: BuildingKind): number {
+const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
+
+/** Display name including size tier for a silo ("Medium Silo"); everything
+ * else is unsized (`BUILDING_NAME[kind]`). */
+export function buildingDisplayName(kind: BuildingKind, size?: EquipmentSize): string {
+  if (kind === "silo") return `${SIZE_LABEL[size ?? "small"]} Silo`;
+  return BUILDING_NAME[kind];
+}
+
+/** Price of a building — silos take a size (defaults to Small); every other
+ * kind is one fixed price and ignores `size`. */
+export function buildingPrice(kind: BuildingKind, size?: EquipmentSize): number {
+  if (kind === "silo") return gameConfig.buildings.silo[size ?? "small"].price;
   return gameConfig.buildings[kind].price;
 }
 
-/** Buy a building and drop it at `pos`. Throws if unaffordable. */
-export function buyBuildingAt(save: SaveState, kind: BuildingKind, pos: Meters): Building {
-  const price = buildingPrice(kind);
+/** Grain capacity of a single silo at `size`, tons. */
+export function siloCapacityOf(size: EquipmentSize): number {
+  return gameConfig.buildings.silo[size].capacityTons;
+}
+
+/** Buy a building and drop it at `pos`. `size` only applies to (and is
+ * required to matter for) silos — defaults to Small. Throws if unaffordable. */
+export function buyBuildingAt(save: SaveState, kind: BuildingKind, pos: Meters, size?: EquipmentSize): Building {
+  const price = buildingPrice(kind, size);
   if (price > save.money) {
-    throw new Error(`A ${BUILDING_NAME[kind]} costs $${price.toLocaleString()} — not enough cash`);
+    throw new Error(`A ${buildingDisplayName(kind, size)} costs $${price.toLocaleString()} — not enough cash`);
   }
   save.money -= price;
-  const building: Building = { id: nextId("bld"), kind, pos };
+  const building: Building = { id: nextId("bld"), kind, pos, size: kind === "silo" ? (size ?? "small") : undefined };
   save.buildings.push(building);
   return building;
 }
@@ -53,7 +75,7 @@ export function sellBuilding(save: SaveState, buildingId: string): { building: B
   const idx = save.buildings.findIndex((b) => b.id === buildingId);
   if (idx === -1) throw new Error(`Building ${buildingId} not found`);
   const building = save.buildings[idx]!;
-  const refund = buildingPrice(building.kind);
+  const refund = buildingPrice(building.kind, building.size);
   save.buildings.splice(idx, 1);
   save.money += refund;
   return { building, refund };
@@ -62,15 +84,17 @@ export function sellBuilding(save: SaveState, buildingId: string): { building: B
 /** Total grain storage across every owned Silo, tons, regardless of crop
  * assignment — the farm's total silo footprint. */
 export function siloCapacityTons(save: SaveState): number {
-  const n = save.buildings.filter((b) => b.kind === "silo").length;
-  return n * gameConfig.buildings.silo.capacityTons;
+  return save.buildings
+    .filter((b) => b.kind === "silo")
+    .reduce((sum, b) => sum + siloCapacityOf(b.size ?? "small"), 0);
 }
 
 /** Grain storage assigned to `crop`, tons — only silos dedicated to that crop
  * count. A silo holds no capacity for anything until it's assigned. */
 export function siloCapacityForCrop(save: SaveState, crop: CropId): number {
-  const n = save.buildings.filter((b) => b.kind === "silo" && b.assignedCrop === crop).length;
-  return n * gameConfig.buildings.silo.capacityTons;
+  return save.buildings
+    .filter((b) => b.kind === "silo" && b.assignedCrop === crop)
+    .reduce((sum, b) => sum + siloCapacityOf(b.size ?? "small"), 0);
 }
 
 /** Assign (or clear, with `undefined`) which crop a Silo is dedicated to.
