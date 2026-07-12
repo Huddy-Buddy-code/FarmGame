@@ -72,6 +72,23 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     expect(save.grain.corn).toBe(0);
   });
 
+  it("queues an Unload Harvester trip as soon as there's ANY grain onboard, not just once full (maintainer request, 2026-07-13)", () => {
+    const save = gameWithAgents();
+    const field = readyField(10); // 60t potential — well over the 50t hopper
+    save.fields.push(field);
+    enqueueTask(save, field, "harvest", APRIL_1);
+    const cap = harvesterCapacityTons("medium");
+
+    // Stop the instant the hopper has ANY grain at all — nowhere near full.
+    // Fine step so we actually catch it early rather than overshooting to
+    // capacity within one big tick.
+    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) > 0, 500, 1);
+    const onboard = combineOf(save).grainOnboard ?? 0;
+    expect(onboard).toBeGreaterThan(0);
+    expect(onboard).toBeLessThan(cap * 0.5); // nowhere close to full yet
+    expect(unloadTaskFor(save, combineOf(save).id)).toBeDefined();
+  });
+
   it("pauses at capacity (never exceeds it) and auto-queues an Unload Harvester task", () => {
     const save = gameWithAgents();
     const field = readyField(10); // 60t potential > 50t hopper — will fill

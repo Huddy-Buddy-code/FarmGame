@@ -43,6 +43,15 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   if sold now.
 - **95/95 tests passing** (added 5 rotation-planner tests). Typecheck clean.
 
+## Latest changes (2026-07-13, unload trigger)
+
+- **"Unload Harvester" now queues as soon as the combine has ANY grain
+  onboard**, not just once the hopper's completely full — hauling runs in
+  parallel with ongoing cutting rather than only kicking in at capacity. The
+  combine itself still physically stops once truly full (hopper capacity is
+  a real limit); the trigger for DISPATCHING a trailer is now "any product,"
+  matching the maintainer's request. New test pins this down explicitly.
+
 ## Latest changes (2026-07-12, harvester hopper + Grain Trailer hauling)
 
 - **Combines have a real hopper now, sized like tractors** (Small 30t/Medium

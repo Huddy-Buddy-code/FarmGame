@@ -1058,14 +1058,16 @@ function tickAgent(
       continue;
     }
 
-    // A full combine stops dead (state stays "working") and waits for a
-    // Grain Trailer — auto-queues its own Unload Harvester trip if one isn't
-    // already coming (maintainer request, 2026-07-12).
+    // A Grain Trailer trip is wanted as soon as there's ANY grain aboard —
+    // not just once the hopper's completely full (maintainer request,
+    // 2026-07-13) — so hauling can run in parallel with ongoing cutting
+    // instead of only kicking in at capacity. The combine itself only stops
+    // dead (state stays "working") once truly full.
     if (task.type === "harvest" && field.crop) {
       const capacity = harvesterCapacityTons(agent.size ?? "medium");
       agent.grainOnboard ??= 0;
+      if (agent.grainOnboard > 1e-9) ensureUnloadTask(save, agent, task, field.crop);
       if (agent.grainOnboard >= capacity - 1e-9) {
-        ensureUnloadTask(save, agent, task, field.crop);
         budget = 0;
         continue;
       }
@@ -1115,6 +1117,10 @@ function tickAgent(
         (agent.grainOnboard ?? 0) + (task.doneAcres - prevAcres) * field.trueYieldTonsPerAcre,
       );
       field.harvestedAcres = task.doneAcres;
+      // A trip's wanted the moment there's any grain at all (see the
+      // pre-check above) — this catches the case where a tick banks the
+      // FIRST grain of the job (pre-check ran before this tick had any).
+      if (agent.grainOnboard > 1e-9) ensureUnloadTask(save, agent, task, field.crop);
     }
 
     if (dist >= path.total - 1e-6) {
@@ -1133,14 +1139,12 @@ function tickAgent(
       save.tasks.splice(save.tasks.indexOf(task), 1);
       agent.taskId = undefined;
       agent.state = "idle";
-      // The last partial hopper (never hit "full" mid-job) still needs a ride.
+      // The last partial hopper (never hit "full" mid-job) still needs a ride
+      // — usually already queued by the post-banking check above, but the
+      // field can finish on the SAME tick that check saw zero grain yet.
       if (task.type === "harvest" && harvestedCrop && (agent.grainOnboard ?? 0) > 1e-9) {
         ensureUnloadTask(save, agent, task, harvestedCrop);
       }
-    } else if (task.type === "harvest" && field.crop && dist >= target - 1e-6) {
-      // Hit the hopper's capacity mid-field — stop here (state stays
-      // "working") and get a Grain Trailer coming.
-      ensureUnloadTask(save, agent, task, field.crop);
     }
   }
 }
