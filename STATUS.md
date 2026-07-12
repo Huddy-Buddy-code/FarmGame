@@ -1,346 +1,69 @@
 # STATUS
 
-_Update at the end of every session (brief §13)._
-
-**Latest:** 2026-07-10 (cont'd). **Fieldwork you can watch + an implements system.**
-Machines now DRIVE a back-and-forth coverage path across the field, revealing the
-new texture (tilled/seeded/cut stubble) strip-by-strip behind them, icon rotating to
-its heading — plowing/planting/harvesting are visible at the satellite view, not
-instant. Timing went PHYSICAL: a job's length emerges from field size × implement
-width. Tractors are now POWER UNITS that attach IMPLEMENTS (Small/Medium/Large plows,
-5/10/20 ft); a tractor pulls its class or smaller, and plowing needs a tractor + plow.
-Equipment tab buys/sells every size and hitches/unhitches plows. 43 tests green
-(coverage geometry + serpentine motion + implements). **Visual layer (the reveal
-stamping + icon rotation) is NOT browser-verified — needs an eyeball.**
-
-**Earlier 2026-07-10:** **The work-queue + agents slice**: plowing, planting,
-and harvesting are now TASKS that queue in a right-hand Work Queue panel, performed
-over realistic sim-hours by two discrete agents — a 🚜 Tractor (plow/plant) and a
-🌾 Combine (harvest) — that drive to fields as dots on the map. Pay-on-queue with
-full refund on cancel. 28 tests green; full loop browser-verified end-to-end.
-
----
+_End-of-session snapshot. Detailed history in git log._
 
 ## Where we are
 
-Hard gate passed (§12.1); county packages; overlay engine live. **The farm now runs a
-real season**: buy land → plow → plant corn/soybeans → watch realistic (now rounded,
-soft-edged) textures change as it grows → yield range narrows → harvest over sim-days
-into the grain bin → **sell grain** from Inventory or **sell the land back** from the
-field panel. A **Fields tab** gives a fleet overview at a glance. §12 steps 1–3 and a
-slice of 5 (placeholder sale) are DONE. Next: **move the grain for real** (§12 step
-4) — truck + real buyer + local price/fuel — which replaces the placeholder sale.
+Hard gate passed: NAIP + OSM roads + real routing for one county. Farm runs a
+full season: buy land → plow (winter) → plant corn/soybeans → grow (visible
+textures, narrowing yield) → harvest → sell grain (flat price placeholder).
+Fieldwork is physical — machines drive coverage paths, textures reveal strip-by-strip.
+Equipment is tractor/implement hitching (plow, planter, sprayer). Work queues are
+drag-reorderable. Finance tab has per-year loans at 5%, 15-year amortization.
 
-## Done
+**v1 checklist (§12):** steps 1–3 done. Step 4 (real market: buyers, capacity,
+routing) is the critical gate — *"if moving grain profitably is fun, the game works."*
 
-### Slice 0 — Scaffold + Data Spike (the hard gate) ✅
-- Repo initialized (git from commit #1). Vite + TypeScript + MapLibre GL.
-- Architecture pillars stubbed from day one:
-  - **Config object** (`src/config/gameConfig.ts`) — the only home for balance numbers.
-  - **Coordinate system** (`src/geo/coords.ts`) — one internal UTM-meter space,
-    conversion only at edges. Round-trip unit tested (`tests/coords.test.ts`).
-  - **Sim clock** (`src/sim/clock.ts`) — pause, time-compression, queued future actions.
-  - **Save-state shape** (`src/state/saveState.ts`) — parcels/fields/agents/contracts.
-- **Gate CONFIRMED in-browser** (maintainer, 2026-07-08): NAIP + roads + a real route
-  (12.0 km by road vs 5.7 km straight, following the section-line grid).
-- Endpoint notes: USDA retired per-state ImageServers → we use the national mosaic
-  `NAIP/USDA_CONUS_PRIME`. Routing verified against the public OSRM demo server.
+## Systems in place
 
-### Slice 0.1 — County packages (the playable "maps") ✅
-- Each playable county is a self-contained DATA package under `public/counties/<id>/`,
-  loaded by id at runtime. Adding a county = drop a folder + one registry line; **no
-  code change**. ("county + save = session", mirroring the brief's "module + party =
-  campaign".) How-to is in the README.
-  - `public/counties/story-ia/manifest.json` — identity, UTM zone, bbox, center,
-    imagery source, attribution.
-  - `public/counties/story-ia/roads.geojson` — pre-built OSM road extract (1.38 MB,
-    3,558 ways: public roads + field tracks; driveways/parking excluded). **Loads
-    offline — no live Overpass at play time.**
-  - `src/county/{types,registry}.ts` — package format + loader.
-  - `src/map/roadsLayer.ts` — draws the extract as cased vector lines over NAIP
-    (yellow = major road, white = local), so imagery stays clean (no green tint).
-- Coordinate system is now **per-county**: `setProjection(zone, hemisphere)` is set
-  from the loaded manifest at startup (a Palouse county is a different UTM zone).
-- **Imagery decision:** roads are BUNDLED (small; Overpass is flaky), but full-county
-  NAIP is gigabytes, so the manifest *describes* the imagery source and we serve it
-  live from USDA (a reliable gov CDN). The manifest format is ready to swap to
-  cached/self-hosted county tiles later without touching code.
+- **Core:** UTM-meter coords; sim clock (pause/1×/60×/3600×, editable pace); indexed
+  save/load with auto-save.
+- **Land & growth:** draw fields, buy/sell, corn/soybeans. Hidden true yield with
+  narrowing confidence range. Month-keyed growth (pace-independent).
+- **Fieldwork:** plow → plant → harvest as queued tasks; agents drive coverage paths
+  (boustrophedon cellular decomposition skips concave cutouts properly). Textures
+  reveal strip-by-strip; machines never plow through notches.
+- **Equipment:** tractors (small/medium/large) hitch one impl at a time (plow,
+  planter, sprayer). Combine self-contained. Auto-swap on pickup. Smallest-first
+  assignment.
+- **Tasks:** side-tasks (weed June+, fertilize month-after-plant) independent of
+  lifecycle. Window-gated, once-per-crop guards.
+- **Plowing:** winter only (Dec–Feb). Auto-manage waits for window like any gated step.
+- **Rotation planner:** 1–5 per-year plans in field panel. Crop dropdown + toggles
+  (Weed/Fertilize/Bale). Advance Jan 1, loop after last. Each plan auto-runs its
+  lifecycle. Weed/fert once per crop (reset at plant). Bale is forage-only; plan
+  without Bale plows residue under.
+- **Forage baling:** rake (25 ft, Small) + baler (Medium) after corn harvest. Baler
+  pauses ~10 s per bale to tie & drop. Bales stored as drop coords; persist until
+  sold. All bales render (incremental append, even subsampling if >600).
+- **Finance:** open year balance (±$50k/click, no cap) → locks in as loan on Jan 1
+  (5% fixed, 15yr amort, monthly payment). Locked loans separate, with payoff &
+  refinance buttons (+$15k flat fee, resets term).
+- **Net worth:** cash + land value + equipment value − debt. Values = actual refund
+  if sold now.
+- **95/95 tests passing** (added 5 rotation-planner tests). Typecheck clean.
 
-### Slice 1 — Overlay engine + first field ✅ (this session)
-- **Pillar 3, the geo-referenced raster overlay engine** (`src/map/overlay.ts`). The
-  ONE module behind painter edits, field textures, and the fieldwork reveal (brief §4).
-  - `OverlayEngine` hands out named `Surface`s; each Surface is an off-DOM 2D canvas
-    pinned to a patch of ground via a MapLibre **canvas source** (4 geo corners). You
-    draw in **geo-space** (`paint()` / `tracePolygon()` take meters); NAIP tiles are
-    never touched, so edits are reversible and glued to real coords on zoom/pan.
-  - Per-patch (not one county-sized) canvas: raster is allocated only where the player
-    paints, so it scales with owned land, not county size. `OVERLAY_METERS_PER_PIXEL`
-    (~1 m/px, matches NAIP) is the quality knob — technical, NOT in gameConfig.
-  - Idle-cheap: a static surface uploads for one frame on `markDirty()` then pauses.
-- **Procedural field textures** (`src/field/fieldRender.ts`, brief §10) — per-status
-  palette (stubble/tilled/planted/growing/ready/harvested) + seeded speckle, clipped
-  to the field polygon. Seeded per field id so repaints are stable.
-- **Slice 2 — buy one parcel → draw one field** (`src/field/fields.ts`, brief §12.2):
-  draw a polygon on the map (click vertices, double-click to close) → stores a Parcel +
-  Field in the save-state as **UTM meters** → deducts land cost → renders texture +
-  white outline. First real economic transaction (money now means something).
-- **Geometry helpers** (`src/geo/geometry.ts`): shoelace area (winding-independent),
-  bbox, pad. Area in m²/ha/acres. Unit-tested (`tests/geometry.test.ts`).
-- Config: added `landPricePerAcre` ($12k, Corn-Belt ballpark). Fixed a scaffold bug —
-  `newGame()` now seeds `money` from `gameConfig.startingMoney` (was hardcoded 0).
+## Latest changes (2026-07-12)
 
-### Slice 3 — The growing season + cozy game UI ✅ (2026-07-09)
-- **Calendar** (`src/sim/calendar.ts`): 12 × 30-day months, campaign starts Mar 1 Yr 1
-  (pre-planting). Seasons ride on months. **Skip to Month** (dropdown) fast-forwards
-  via a ~2.5 s **montage** that fully simulates the skipped time (no shortcuts).
-- **Crops:** corn 🌽 (Apr–May, 110 d, 5.5 t/ac base) + soybeans 🫘 (May–Jun, 100 d,
-  1.6 t/ac). All numbers in gameConfig.
-- **Yield (§6, the crux):** true yield rolled hidden at planting inside ±30%;
-  player sees a **visible range that narrows** toward it (rangebar in field panel).
-  Unit-tested: always contains truth, monotonically narrows.
-- **Harvest:** takes sim-days (`harvestAcresPerDay`), grain flows into an **on-farm
-  bin**.
-- **Farming sim** (`src/sim/farming.ts`) is pure/testable (no map/DOM); main.ts
-  repaints field overlay textures when a status flips.
-- **Cozy UI**: cream/wood panels, top HUD, time controls, field side panel, toasts.
-  `pointInPolygon` in geometry.ts for click→field hit-testing.
+- **Rotation planner UX:** auto-manage is now a plan designer — 1–5 rows per year,
+  each with crop + op toggles (Weed/Fertilize/Bale). Plans loop yearly.
+- **Concave-field fixes:** cellular decomposition means tractors skip notches (don't
+  work through them). Fixes texture run-out, completion snap, and bale placement.
+- **Machine icon flip:** now mirror (scaleX) when driving east; stay upright always.
+- **Bale marker rendering:** all bales now render (was capped 150); incremental
+  append + even subsampling for huge fields.
 
-### Slice 4 — Persistence, plow, realistic textures, sale, idle auto-manage ✅ (2026-07-09, cont'd)
-- **Persistence** (`src/state/persistence.ts`): localStorage save/load (SaveState +
-  clock time + mid-harvest set), versioned + corrupt-safe. Auto-saves every 5s and
-  on tab hide/close; a refresh drops you back exactly where you were. **🔄 Reset**
-  button (top-left) wipes and starts a new farm — the only way saves get cleared now.
-- **Plow step** (`plow()` in farming.ts): stubble/harvested → tilled (pays
-  `plowCostPerAcre`) → *then* plant. Matches the brief's §10 field lifecycle.
-- **Realistic field textures** (`src/field/fieldRender.ts` rewrite): muted
-  satellite-toned palettes, multi-scale noise (soil-moisture blotches + fine
-  speckle), and plow/crop/cut **rows oriented along each field's longest edge** —
-  reads as part of NAIP, not a sticker on it. Growing fields are stage-aware (young
-  rows → closing canopy → mature tone), repainting on 1/12-season buckets.
-  Ready color is per-crop (corn golden-tan, soybeans ochre).
-- **Inventory / v0 sale** (`src/sim/economy.ts` + toolbar panel): flat
-  `sellPricePerTon` per crop, "Sell all" from the grain bin. Explicitly a
-  placeholder — the real market slice (buyers, capacity, local-demand drop,
-  hauling, brief §5) replaces its *internals*, not its call shape.
-- **Idle auto-manage** (player-requested, this session): a per-field toggle in the
-  field panel (`Field.autoManage` in saveState). When on, `autoManageField()` in
-  farming.ts plows the instant it's stubble/harvested, plants the first crop (config
-  order) whose window is open the instant it's tilled, and starts harvest the
-  instant it's ready — all silently retried next tick if unaffordable/out of season
-  (never throws). Runs inside `tickFarming()`, so it works at any speed including
-  the fastest. Manual action buttons hide while a field is auto-managed; toasts narrate
-  what happened (useful after leaving the tab). Unit-tested end-to-end: a fresh
-  stubble field plows → waits out the off-season → plants on the window's first day
-  → harvests → re-plows itself, with zero manual calls.
-- **Speed buttons**: pause/1×/60×/3600× with exact real-time meanings — 1× is
-  literal real time, 60× is 1 real second = 1 game minute, 3600× is 1 real second =
-  1 game hour. Meant to pair with auto-manage for real walk-away play.
-- **Crop Calendar** panel (toolbar): FS-style planting/harvest bands per crop,
-  derived from gameConfig, with a "you are here" line. **Year bar** under the HUD:
-  season-themed strip (🌱☀️🍂❄️) with a position marker.
-- Starting money raised to $1,000,000 (was $100k — too little land was affordable).
-- **Day progress bar**, stacked directly above the year bar in the same panel: a
-  night→dawn→day→dusk→night gradient (midnight at both ends, noon in the middle),
-  no text, with a marker showing time-of-day. Purely a mood/flavor readout for now —
-  no gameplay reads day/night yet, but the sim clock already has the data (§4).
+## Known gaps / unverified
 
-### Slice 5 — Sell field, Fields tab, rounded/soft rendering, editable calendar pace ✅ (2026-07-09, cont'd again)
-- **Sell a field back** (`sellField()` in `src/field/fields.ts`): refunds exactly
-  `field.purchaseCost` (stored at buy time — NOT recomputed at current land price,
-  so it stays correct once pricing ever becomes dynamic). Falls back to
-  `acres × landPricePerAcre` for pre-upgrade saves that lack the field. Refuses
-  while mid-harvest (nothing sane to hand back). Removes the parcel, the field, its
-  overlay texture surface, and its outline. A persistent **💰 Sell Field** button
-  lives in the field detail panel (works regardless of status).
-- **Fields tab** (toolbar → 🌾 Fields): every owned field at a glance — icon,
-  status (incl. "harvesting"), acres, 🤖 auto-manage marker, and expected total
-  yield range (reuses `yieldRange()`). Click a row to open that field's detail
-  panel. Refreshes live while open (same ~2×/s cadence as the HUD).
-- **Rounded, natural field rendering** (`smoothPolygon()`, new in `geo/geometry.ts`)
-  — display-only corner-cutting; the stored `field.boundary` used for
-  area/hit-testing/auto-manage is never touched. Used for both the canvas texture
-  clip (`fieldRender.ts`) and the outline polygon (`fields.ts`); crop-row direction
-  still reads off the TRUE boundary so rows don't skew. **Tuned over several
-  maintainer rounds** to its current form:
-  - **Corner bevel** is now a FIXED ~10 m cut per corner (`maxCutMeters`, not a
-    percentage — a fraction over-rounded big fields), 2 iterations for a slight
-    bevel + gentle fillet. Knob: `maxCutMeters` (lower = sharper).
-  - **Border** is a thick, blurry, zoom-scaled feather **tinted to match the
-    field's own texture** (per-field `color` property + data-driven `["get","color"]`
-    paint) — no more white/cream line. Colour comes from `fieldEdgeColor()`, driven
-    by the shared `palette()` in `fieldRender.ts` (single source of truth for the
-    texture's base/dark/light tones, so outline and fill can't drift). Growing
-    fields' edges follow the soil→canopy lerp; ready follows the crop.
-- **Editable calendar pace** (maintainer request: lower month length toward 5
-  days): `calendar.ts`'s `DAYS_PER_MONTH`/`MINUTES_PER_MONTH` consts became mutable
-  module state (`getDaysPerMonth()` / `setDaysPerMonth()` / `minutesPerMonth()` —
-  same pattern as `coords.ts`'s `setProjection`). A **dropdown in the time bar**
-  (5/10/15/20/25/30 days) changes it live. Persisted alongside the save
-  (`PersistedGame.daysPerMonth`, optional so old saves still load, default 30).
-- **Crop growth keyed to MONTHS, not days** (follow-up fix): originally growth used
-  a fixed 24h day (`growDays`), so shrinking the month made a crop take many
-  game-months and miss its season (110 days = 22 months at 5 days/month). Config is
-  now `growMonths` (corn 3.7, soy 3.3) and `growthProgress()` uses `minutesPerMonth()`,
-  so the pace knob rescales the WHOLE loop together — seasons AND crops speed up in
-  lockstep, harvest still lands in the same month at any pace (unit-tested invariant).
-  Harvest RATE stays acres-per-real-day (`harvestAcresPerDay`) — a combine's
-  throughput, correctly independent of calendar labelling.
-- **Middle-mouse-drag panning** (`wireMiddleMousePan` in `main.ts`): left-click is
-  taken by field select / drawing, so panning got the middle button. MapLibre has
-  no built-in middle-button pan, so we drive `panBy()` from raw pointer deltas
-  (mousedown button 1 + `preventDefault` to kill autoscroll; window-level move/up so
-  a drag off the canvas still tracks). Left-drag select, right-drag rotate, and
-  scroll-zoom are untouched.
-- Tests: 27 total (up from 18) — new `tests/fields.test.ts` (sellField), calendar
-  pace test, month-keyed-growth invariance test, 3 new `smoothPolygon` shape tests.
-
-### Slice 6 — Work queue + agents (tractor & combine) ✅ (2026-07-10)
-- **Fieldwork is no longer instant** (closes the "plow/harvest are instant" gap
-  noted last session): plow/plant/harvest are `FarmTask`s in `save.tasks`, worked
-  through by agents in `save.agents` — both persisted, so refreshing mid-job resumes
-  it. New module `src/sim/tasks.ts` (pure/testable like farming.ts).
-- **Agents (brief §9 state machine, v1):** one Tractor (plow + plant) and one
-  Combine harvester (harvest), seeded at the county center (`ensureAgents`).
-  idle → drive to field (straight-line at `work.travelSpeedKmh`; road routing
-  later) → work → pick up the next startable task, all within one tick if time
-  compression allows. Rendered as emoji dot markers on the map (bounce while
-  working).
-- **Realistic durations** (all in `gameConfig.work`): plow 12 ac/hr, seed 18 ac/hr,
-  harvest 9 ac/hr, travel 22 km/h. `harvestAcresPerDay` is gone; task duration =
-  acres ÷ rate. Harvested grain banks continuously as the combine cuts.
-- **Pay-on-queue** (design decision): queueing charges immediately (plow cost /
-  seed inputs); canceling a still-QUEUED task refunds in full. Tasks actively being
-  worked can't be canceled; selling a field auto-refunds its queued tasks but
-  refuses while a machine is on it (`releaseFieldTasks`).
-- **Chained queueing:** validation runs against `effectiveStatus()` (what the field
-  WILL be after its pending tasks), so plow + plant queue back-to-back; a plant task
-  behind a plow simply isn't "startable" until the ground is actually tilled.
-  Planting-window check happens at queue time (committed even if the window closes
-  while the tractor catches up).
-- **Work Queue panel** (right side, always visible): MACHINES section (each agent's
-  status — idle / driving to X / working X with live progress bar) + JOBS section
-  (every task: icon, field, acres, waiting/percent-done, ✕ cancel-with-refund on
-  queued ones). Field panel and Fields tab show queued/active work too; the field
-  panel's action buttons became "Queue Plow / plant chooser / Queue Harvest".
-- **Auto-manage now routes through the queue** (`autoManageField` moved to
-  tasks.ts): it *enqueues* the next lifecycle step instead of doing it instantly —
-  consistent with everything going through agents. Same silent-retry semantics.
-- **farming.ts slimmed** to growth + primitives: `applyPlow/applyPlant/
-  applyHarvestDone` (called by the task system on completion), `tickFarming` only
-  derives growth status now. Old `plow/plant/startHarvest/harvesting`-set API is
-  gone; legacy `harvestingIds` in old saves migrate to queued harvest tasks on load.
-- Vite now honors a `PORT` env var (preview tooling); `.claude/launch.json` gained
-  `autoPort`.
-- **Equipment tab** (bottom toolbar → 🚜 Equipment, same session): fleet
-  management panel. Lists every machine with live status/progress, 📍 fly-to on
-  the map, and 💰 sell-back (purchase-price refund, `Agent.purchaseCost` — same
-  rule as land; starting fleet counts as bought at config price). **Buy** buttons
-  add more tractors/combines (`gameConfig.equipmentPrices`: $250k / $450k) that
-  park at the county-center "yard" and immediately pull from the queue — more
-  machines = parallel fieldwork (unit-tested). Guards: can't sell a machine
-  mid-job, nor the last one of its kind while jobs that need it are queued.
-- **Browser-verified end-to-end** (preview pane, this session): drew a 28.6 ac
-  field → queued plow (paid, listed, tractor drove 490 px on-screen and worked with
-  progress %) → tilled at 3600× → planted corn in April (window enforcement seen:
-  buttons disabled in March/August) → skip-montage to August → combine harvested
-  189 t banking live → chained plow re-queue → cancel refunded $573 → reload
-  restored grain/date/agents with zero console errors.
-
-### Slice 7 — Watchable fieldwork + implements/sizes system ✅ (2026-07-10, cont'd)
-- **The sweep (the whole point):** a machine drives a back-and-forth
-  **coverage path** (`src/sim/coverage.ts`, pure + tested) whose lanes run along
-  the field's longest edge (same direction `fieldRender` draws rows), spaced one
-  implement-**width** apart, joined by headland U-turns. As it drives, the NEW
-  texture (tilled/seeded/cut-stubble) is revealed **strip by strip behind it**
-  (`updateReveals`/`stampReveal` in main.ts): the target texture is baked once into
-  an offscreen canvas (via the new `drawFieldTexture` export, same seed as the final
-  repaint → no "pop"), and only the swept swaths are blitted onto the field surface.
-  The machine icon **rotates to its driving heading** (`Agent.heading`; SVGs face
-  west, so CSS rotate = π − heading). `Surface.setAnimating()` keeps the canvas
-  re-uploading only while a sweep is live.
-- **PHYSICAL timing** (replaced acres/hour): duration emerges from field size ÷
-  (implement width × field speed). `gameConfig.work` is now `{ fieldSpeedKmh: 12,
-  travelSpeedKmh: 22 }`; the acres/hour rates are gone. Wider implement → fewer,
-  longer-spaced lanes → shorter route → faster job (a real trade-up to buy toward).
-- **Implements + sizes system** (`EquipmentSize` = small/medium/large, `SIZE_RANK`,
-  `FEET_TO_METERS` in gameConfig): a **tractor is a power unit** with a `size`; an
-  **`Implement`** (a `"plow"` now; planters/etc. reuse the shape) attaches to a
-  tractor via `attachedTo`. `canPull` = implement class ≤ tractor class. **Plowing
-  requires a tractor WITH a plow** — task selection gates on `tractorCanPlow` and
-  **auto-hitches** an idle compatible plow on pickup. Plow widths are LITERAL feet
-  (maintainer choice): Small 5 / Medium 10 / Large 20 ft (≈100+ fine passes on a big
-  field — realistic, dense). Combine is self-contained (30 ft integral header);
-  planting uses a 30 ft implicit planter width until planter implements exist.
-- **Starting fleet:** medium tractor + medium combine + medium plow (hitched), so
-  plowing works out of the box. Prices in `gameConfig.equipment`
-  (tractor 150/250/400k, plow 40/80/150k, combine 450k). Pre-size/pre-implement
-  saves migrate to medium in `ensureAgents`.
-- **Equipment tab rebuilt:** a buy "shop" (tractors & plows in each size + combine,
-  live affordability) + the owned fleet, where each tractor has a **hitch dropdown**
-  to attach/detach a plow (pull-size rule enforced, disabled mid-job), 📍 fly-to, and
-  💰 sell (purchase-price refund; selling a tractor drops its plow back to the yard).
-  Unattached plows list separately with sell.
-- Tests: 43 total (was 31) — new `tests/coverage.test.ts` (7), physical-model +
-  implements + serpentine-motion tests replacing the old acres/hour assertions.
-- ⚠️ **Unverified visually:** browser preview was off this session (maintainer:
-  too slow). The reveal stamping, texture-alignment, U-turn look, and icon rotation
-  direction are typecheck+unit-test backed but NOT eyeballed. If icons drive
-  backward, flip the `Math.PI - heading` offset in `updateAgentMarkers`.
-
-### Dev convenience
-- `start-dev.bat` — double-click to install (first run) + launch the dev server and
-  open the browser at http://localhost:5173.
+- **Economy is placeholder** — flat sell price. No buyers, capacity, or hauling yet.
+- Rotation planner unplayed in real sessions (unit-tested only).
+- Drag-reorder in Work Queue unmanually verified.
+- Routing uses public OSRM demo (not self-hosted).
+- **Browser Preview is OFF** (maintainer directive). New unseen: rotation planner UI,
+  cellular-decomposition visuals (transits crossing notches), updated bale markers,
+  machine icon flip — logic tested, UX needs eyes.
 
 ## How to run
-- Double-click `start-dev.bat`, **or** `npm run dev` → http://localhost:5173.
-- Checks: `npm run typecheck`, `npm test`.
 
-## Next (in order)
-1. **Move grain for real — replace the v0 sale** (brief §12 step 4, §5): buyers (real
-   elevators/mills from OSM → county package `buyers.geojson`) with capacity + local
-   price, one capacity-limited truck routing on real roads (`src/map/routing.ts`
-   still works, unused since the cozy-UI rewrite), fuel + drive-time cost. This
-   supersedes `src/sim/economy.ts`'s flat price. *"If moving grain profitably in
-   steps 1–5 is fun, the game works."*
-2. **Auto-manage crop policy** is currently "first crop in config order whose window
-   is open" (corn beats soybeans whenever both are plantable). Once contracts/price
-   signals exist, this is the natural place to make it a real decision instead of a
-   fixed order — surface a per-field "preferred crop" setting, or leave it as a
-   deliberately dumb default players can override by switching auto-manage off.
-3. (Optional) county-picker UI; **road-following travel** (routing.ts) so machines
-   drive real roads from the yard to the field instead of straight lines; **planter
-   implements** (extend the implements system the plow established — right now plant
-   uses an implicit 30 ft width, no attachable planter); equipment
-   **condition→efficiency** (§8) hooks onto the size/implement model.
-
-### Notes for next session
-- **Verification status:** Claude stopped driving the browser-preview tool
-  (maintainer: too slow), so everything is typecheck+test verified only, WITH two
-  exceptions the maintainer eyeballed via their own screenshots: the **field
-  border/feather and corner bevel** were iterated to their liking (that's why
-  there are several render commits). Still NOT visually confirmed by anyone:
-  the **Fields tab** layout, the **sell-field** flow, the **days-per-month
-  dropdown** (+ whether the timebar overflows now with 4 buttons + 2 dropdowns),
-  and **middle-mouse panning**. Worth a pass next session.
-- **Idle auto-manage** still hasn't been played for real unattended hours; only
-  unit-tested end-to-end plus one instant-toggle browser check from a prior
-  session.
-- **Balance smell (partially addressed):** starting money raised to $1M so land
-  isn't as cramped. Still no debt/loan mechanism (§8) — the more realistic
-  long-term lever if balance needs more room.
-- Auto-manage state (`Field.autoManage`) persists through save/load like everything
-  else on Field — no special-casing needed, confirmed by reading the persistence code.
-- **Sell-field design note:** selling forfeits whatever crop is planted (no partial
-  refund for inputs already paid) — deliberate, keeps the mechanic simple. Revisit
-  if it feels punishing once real money pressure (contracts, debt) exists.
-
-## Deferred / known
-- ~~In-browser visual re-check pending for Slice 0.1.~~ **Resolved this session:**
-  browser-verified clean NAIP + "Roads: 3558 loaded ✓" + the new field overlay
-  rendering and staying geo-pinned on zoom.
-- **Road extract provenance:** fetched once via public Overpass (which rate-limited us
-  mid-session). If we add many counties, build a reproducible extract pipeline
-  (Geofabrik `.osm.pbf` clip, or a scripted/throttled Overpass job). The story-ia
-  extract is committed as data for now.
-- **Routing** still uses the public OSRM demo server. Before real gameplay, self-host
-  OSRM/Valhalla on a per-county extract (offline, fast, no rate limit). Same interface.
+`npm run dev` → http://localhost:5173. Checks: `npm run typecheck`, `npm test`.
+**Do not use Browser Preview** — see CLAUDE.md.

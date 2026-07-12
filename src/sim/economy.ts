@@ -10,7 +10,10 @@
 
 import { gameConfig } from "../config/gameConfig";
 import type { CropId } from "../config/gameConfig";
-import type { SaveState } from "../state/saveState";
+import type { SaveState, Field, Agent, Implement } from "../state/saveState";
+import { areaAcres } from "../geo/geometry";
+import { agentPrice, implementPrice } from "./tasks";
+import type { EquipmentKind } from "./tasks";
 
 export interface SaleResult {
   tons: number;
@@ -29,4 +32,62 @@ export function sellGrain(save: SaveState, crop: CropId, tons: number): SaleResu
   save.grain[crop] -= sold;
   save.money += revenue;
   return { tons: sold, revenue };
+}
+
+/**
+ * Sell every bale sitting in `field` at the flat config price. Mutates the save;
+ * returns what sold. Bales are tracked per-field and stay put until sold (no
+ * collection mechanic yet) — this is the field's "market interface."
+ */
+export function sellBales(save: SaveState, field: Field): { bales: number; revenue: number } {
+  const bales = field.baleLocations?.length ?? 0;
+  if (bales <= 0) return { bales: 0, revenue: 0 };
+  const revenue = Math.round(bales * gameConfig.forage.balePricePerBale);
+  field.baleLocations = [];
+  save.money += revenue;
+  return { bales, revenue };
+}
+
+/** A field's liquidation value — mirrors `sellField`'s refund exactly (what
+ * was actually paid, not a recomputed market rate; brief request: sell-back
+ * = purchase price). */
+function fieldValue(field: Field): number {
+  return field.purchaseCost ?? Math.round(areaAcres(field.boundary) * gameConfig.landPricePerAcre);
+}
+
+/** A machine's liquidation value — mirrors `sellAgent`'s refund. */
+function agentValue(agent: Agent): number {
+  return agent.purchaseCost ?? (agent.size ? agentPrice(agent.kind as EquipmentKind, agent.size) : 0);
+}
+
+/** An implement's liquidation value — mirrors `sellImplement`'s refund. */
+function implementValue(impl: Implement): number {
+  return impl.purchaseCost ?? implementPrice(impl.kind, impl.size);
+}
+
+export interface NetWorth {
+  cash: number;
+  landValue: number;
+  equipmentValue: number;
+  /** Total owed: this year's still-open borrowed balance + every locked
+   * loan's remaining principal. */
+  debt: number;
+  total: number;
+}
+
+/**
+ * Net worth = cash + land value + equipment value − debt (maintainer spec,
+ * 2026-07-11, revised: loan debt IS subtracted — see `debt` below).
+ * Land/equipment are valued at what they'd refund if sold right now (their
+ * purchase price — the game's existing sell-back rule), not a recomputed
+ * current-market rate.
+ */
+export function netWorth(save: SaveState): NetWorth {
+  const landValue = save.fields.reduce((sum, f) => sum + fieldValue(f), 0);
+  const equipmentValue =
+    save.agents.reduce((sum, a) => sum + agentValue(a), 0) +
+    save.implements.reduce((sum, i) => sum + implementValue(i), 0);
+  const cash = save.money;
+  const debt = save.finance.pendingPrincipal + save.finance.loans.reduce((sum, l) => sum + l.principal, 0);
+  return { cash, landValue, equipmentValue, debt, total: cash + landValue + equipmentValue - debt };
 }

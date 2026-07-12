@@ -17,8 +17,9 @@
         --red: #c75146;
         --shadow: 0 3px 10px rgba(60, 40, 15, 0.35);
         /* Shared width for the three stacked top-center bars (HUD / year / time),
-           so they line up as one column. */
-        --hud-w: 470px;
+           so they line up as one column. Widened from 470px (2026-07-11) to fit
+           the new Net Worth stat next to cash. */
+        --hud-w: 560px;
       }
       html, body { margin: 0; height: 100%; background: #111; overflow: hidden; }
       body { font: 14px/1.45 "Segoe UI", system-ui, sans-serif; color: var(--ink); }
@@ -115,7 +116,7 @@
          on it, anchored just above it, and only as tall as their content (then
          capped + scroll) — so short panels hug the bar and tall ones grow upward.
          Bottom-anchored with no `top`, so height stays content-driven. */
-      #fieldstab, #equiptab, #cropcal, #inventory {
+      #fieldstab, #equiptab, #cropcal, #inventory, #financetab {
         position: absolute; left: 50%; transform: translateX(-50%);
         bottom: 72px; z-index: 30; width: 50vw; box-sizing: border-box;
         max-height: calc(100vh - 190px); overflow-y: auto;
@@ -175,6 +176,75 @@
       .auto-note { font-size: 12px; color: #8a7658; margin-top: 8px; }
       .sell-row { margin-top: 8px; padding-top: 8px; border-top: 1.5px dashed var(--cream-2); }
 
+      /* ---------- Rotation planner ---------- */
+      #fp-plans:not(:empty) { margin-top: 8px; }
+      .plan-hint { font-size: 11px; color: #8a7658; margin: 2px 0 6px; }
+      .plan-row {
+        display: flex; align-items: center; gap: 5px; margin-bottom: 5px;
+      }
+      .plan-row.active .plan-yr { background: var(--green); color: #fff; border-color: var(--green-dark); }
+      .plan-yr {
+        font-size: 11px; font-weight: 700; min-width: 30px; text-align: center;
+        padding: 3px 4px; border: 1.5px solid var(--wood); border-radius: 6px;
+        background: var(--cream-2); color: var(--wood); flex-shrink: 0;
+      }
+      .plan-crop {
+        flex: 1; min-width: 0; font-size: 12px; padding: 4px 6px;
+        border: 1.5px solid var(--wood); border-radius: 6px; background: var(--cream);
+        color: var(--wood); font-family: inherit;
+      }
+      .plan-op {
+        font-size: 13px; line-height: 1; padding: 4px 5px; cursor: pointer;
+        border: 1.5px solid var(--wood); border-radius: 6px;
+        background: var(--cream-2); opacity: 0.4; flex-shrink: 0;
+      }
+      .plan-op.on { opacity: 1; background: var(--gold); border-color: var(--wood); }
+      .plan-op:disabled { cursor: default; opacity: 0.15; }
+      .plan-del {
+        font-size: 13px; line-height: 1; padding: 4px 6px; cursor: pointer; flex-shrink: 0;
+        border: 1.5px solid var(--wood); border-radius: 6px; background: var(--cream-2); color: var(--red);
+      }
+      .plan-add {
+        width: 100%; font-size: 12px; padding: 5px; margin-top: 2px; cursor: pointer;
+        border: 1.5px dashed var(--wood); border-radius: 6px; background: var(--cream);
+        color: var(--wood); font-family: inherit;
+      }
+      .plan-add:disabled { opacity: 0.4; cursor: default; }
+
+      /* ---------- To-do list ---------- */
+      #todolist h3 { color: var(--wood); }
+      .todo-item {
+        display: flex; align-items: center; gap: 6px; padding: 6px; margin-bottom: 4px;
+        background: var(--cream-2); border-radius: 6px; font-size: 12px; border: 1px solid var(--wood);
+        transition: all 0.2s;
+      }
+      .todo-item.done {
+        opacity: 0.6; text-decoration: line-through; background: #e8e0d0;
+      }
+      .todo-item input[type="checkbox"] {
+        cursor: pointer; flex-shrink: 0; accent-color: var(--green);
+      }
+      .todo-item .text {
+        flex: 1; word-break: break-word; cursor: pointer;
+      }
+      .todo-item .text.done { text-decoration: line-through; }
+      .todo-item .del {
+        flex-shrink: 0; cursor: pointer; font-size: 11px; color: var(--red);
+        padding: 2px 4px; border-radius: 3px; transition: background 0.15s;
+      }
+      .todo-item .del:hover { background: rgba(199, 81, 70, 0.2); }
+      #todo-items::-webkit-scrollbar { width: 6px; }
+      #todo-items::-webkit-scrollbar-track { background: transparent; }
+      #todo-items::-webkit-scrollbar-thumb { background: var(--wood); border-radius: 3px; }
+
+      /* ---------- Semi-transparent panels on hover ---------- */
+      #queuepanel, #todolist {
+        opacity: 0.5; transition: opacity 0.2s;
+      }
+      #queuepanel:hover, #todolist:hover {
+        opacity: 1;
+      }
+
       /* ---------- Crop calendar ---------- */
       #cropcal h2 { margin: 0 0 2px; font-size: 18px; }
       #cropcal .legend { font-size: 12px; color: #8a7658; margin-bottom: 10px; display: flex; gap: 14px; }
@@ -214,6 +284,33 @@
       .inv-row .qty { font-size: 12px; color: #8a7658; }
       .inv-row .price { font-size: 12px; color: #8a7658; text-align: right; margin-right: 4px; }
       .inv-row button:disabled { opacity: 0.45; cursor: default; }
+
+      /* ---------- Finance tab (loans) ---------- */
+      #financetab h2 { margin: 0 0 2px; font-size: 18px; }
+      #financetab .sub { font-size: 12px; color: #8a7658; margin-bottom: 10px; }
+      #financetab .close {
+        position: absolute; top: 10px; right: 12px; border: none; background: none;
+        font-size: 16px; padding: 2px 6px; color: #8a7658;
+      }
+      .loan-row {
+        background: var(--cream-2); border: 1.5px solid var(--wood);
+        border-radius: 12px; padding: 10px 12px; margin: 8px 0;
+      }
+      .loan-row .lr-top { display: flex; align-items: center; gap: 10px; }
+      .loan-row .lr-icon { font-size: 22px; }
+      .loan-row .lr-info { flex: 1; min-width: 0; }
+      .loan-row .lr-name { font-weight: 700; }
+      .loan-row .lr-sub { font-size: 12px; color: #8a7658; }
+      .loan-row .lr-actions { display: flex; gap: 8px; margin-top: 8px; }
+      .amt-btn { flex: 1; padding: 7px 4px; font-size: 13px; }
+      .amt-btn.borrow { background: var(--green); color: #fff; border-color: var(--green-dark); }
+      .amt-btn.borrow:hover { background: var(--green-dark); }
+      .amt-btn:disabled { opacity: 0.4; cursor: default; }
+      .refi-btn {
+        display: block; margin-top: 6px; padding: 3px 8px; font-size: 11px;
+        width: auto; background: var(--cream); color: var(--ink);
+      }
+      .refi-btn:disabled { opacity: 0.4; cursor: default; }
 
       /* ---------- Fields tab (bottom-toolbar panel listing owned fields) ---------- */
       #fieldstab h2 { margin: 0 0 8px; font-size: 18px; }
@@ -293,23 +390,27 @@
         font-size: 11px; font-weight: 700; color: #8a7658;
         text-transform: uppercase; letter-spacing: 0.04em; margin: 10px 0 4px;
       }
-      .agent-row, .queue-row {
+      .queue-row {
         display: flex; align-items: flex-start; gap: 8px;
         background: var(--cream-2); border: 1.5px solid var(--wood);
         border-radius: 10px; padding: 6px 9px; margin: 5px 0;
       }
-      .agent-row .icon, .queue-row .icon { font-size: 18px; line-height: 1.3; display: inline-flex; align-items: center; }
-      .agent-row.idle { opacity: 0.72; }
-      .ar-info, .qr-info { flex: 1; min-width: 0; }
-      .ar-name, .qr-name { font-weight: 700; font-size: 13px; }
-      .ar-status, .qr-sub { font-size: 11px; color: #8a7658; }
+      .queue-row .icon { font-size: 18px; line-height: 1.3; display: inline-flex; align-items: center; }
+      .qr-info { flex: 1; min-width: 0; }
+      .qr-name { font-weight: 700; font-size: 13px; }
+      .qr-sub { font-size: 11px; color: #8a7658; }
       .queue-row.active { border-color: var(--green-dark); }
+      .queue-row.queued { cursor: grab; }
+      .queue-row.queued.dragging { opacity: 0.4; }
+      .queue-row.queued.drag-over { border-color: var(--green-dark); border-style: dashed; }
       .qr-cancel {
         border: none; background: none; padding: 0 2px; font-size: 13px;
         color: #8a7658; line-height: 1.4;
       }
       .qr-cancel:hover { color: var(--red); background: none; }
       .queue-empty { font-size: 12px; color: #8a7658; padding: 6px 2px; }
+      .queue-tail { height: 10px; }
+      .queue-tail.drag-over { border: 1.5px dashed var(--green-dark); border-radius: 8px; }
       #queuepanel .progress { height: 7px; margin: 4px 0 1px; }
 
       /* Agent dots on the map (brief §9 "GPS dots", emoji edition). */
@@ -324,6 +425,8 @@
       .agent-dot .agent-glyph { display: inline-flex; transition: transform 0.12s linear; }
       .agent-dot.working { border-color: var(--green-dark); }
       .agent-dot.working .agent-bob { animation: chug 0.9s infinite; }
+      /* Bales dropped in the field — decorative, must not eat field clicks. */
+      .bale-dot { line-height: 0; pointer-events: none; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35)); }
       @keyframes chug {
         0%, 100% { transform: translateY(0) rotate(-2deg); }
         50% { transform: translateY(-2px) rotate(2deg); }
@@ -356,6 +459,19 @@
   <body>
     <div id="map"></div>
 
+    <!-- Left-side to-do list -->
+    <div id="todolist" class="panel" style="position: absolute; left: 10px; top: 190px; width: 240px; max-height: 75vh; z-index: 15; display: flex; flex-direction: column;">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+        <h3 style="margin: 0; font-size: 14px;">📝 To-Do</h3>
+        <button id="todo-collapse" style="padding: 2px 6px; font-size: 12px; width: auto;">−</button>
+      </div>
+      <div id="todo-items" style="flex: 1; overflow-y: auto; margin-bottom: 8px; min-height: 100px;"></div>
+      <div style="display: flex; gap: 4px;">
+        <input id="todo-input" type="text" placeholder="Add a note…" style="flex: 1; padding: 6px; border: 1.5px solid var(--wood); border-radius: 6px; font-size: 12px; background: var(--cream);" />
+        <button id="todo-add" style="padding: 6px 10px; font-size: 12px; width: auto;">+</button>
+      </div>
+    </div>
+
     <div id="resetbar" style="position:absolute; top:10px; left:10px; z-index:20;">
       <button id="btn-reset" class="panel" title="Wipe the save and start a new farm" style="padding:6px 12px;">🔄 Reset</button>
     </div>
@@ -364,9 +480,11 @@
       <div class="stat"><span class="icon">📅</span><span id="hud-date">—</span></div>
       <div class="divider"></div>
       <div class="stat"><span class="icon">💰</span><span id="hud-cash">—</span></div>
+      <div class="stat" title="Net worth = cash + land value + equipment value − loan debt">
+        <span class="icon">📈</span><span id="hud-networth">—</span>
+      </div>
       <div class="divider"></div>
-      <div class="stat"><span class="icon">🌽</span><span id="hud-corn">0 t</span></div>
-      <div class="stat"><span class="icon">🫘</span><span id="hud-soy">0 t</span></div>
+      <div class="stat" title="Total grain in the bin, all crops"><span class="icon">🌾</span><span id="hud-grain">0 t</span></div>
     </div>
 
     <div id="yearbar" class="panel">
@@ -402,6 +520,7 @@
       <button id="btn-equip">🚜 Equipment</button>
       <button id="btn-cropcal">📆 Crop Calendar</button>
       <button id="btn-inventory">📦 Inventory</button>
+      <button id="btn-finance">🏦 Finance</button>
     </div>
 
     <div id="fieldstab" class="panel">
@@ -430,6 +549,13 @@
       <div id="inv-rows"></div>
     </div>
 
+    <div id="financetab" class="panel">
+      <button class="close" id="finance-close">✕</button>
+      <h2>🏦 Finance</h2>
+      <div class="sub">5% fixed, 15-year loans · one per year borrowed · extra payments retire it sooner</div>
+      <div id="finance-rows"></div>
+    </div>
+
     <div id="cropcal" class="panel">
       <button class="close" id="cal-close">✕</button>
       <h2>📆 Crop Calendar</h2>
@@ -453,6 +579,7 @@
           <span class="slider"></span>
         </label>
       </div>
+      <div id="fp-plans"></div>
       <div id="fp-actions"></div>
       <div id="fp-msg"></div>
       <div class="sell-row">
@@ -462,9 +589,6 @@
 
     <div id="queuepanel" class="panel">
       <h2>📋 Work Queue</h2>
-      <div class="qp-sub">Machines</div>
-      <div id="agents-rows"></div>
-      <div class="qp-sub">Jobs</div>
       <div id="queue-rows"></div>
     </div>
 

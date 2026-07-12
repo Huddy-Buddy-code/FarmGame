@@ -6,10 +6,11 @@
  * field's size and the implement's working width — no abstract acres/hour rate.
  *
  * Equipment model: a TRACTOR is a power unit that attaches an IMPLEMENT (a plow
- * now; planters/etc. reuse this later). A tractor pulls implements of its own
- * size class or smaller. Plowing needs a tractor WITH a plow. The COMBINE is
- * self-contained (integral header). Each machine is the brief's §9 state machine:
- * idle → drive to field → work the coverage path → next task.
+ * or a planter — same widths/requirements, one hitched at a time). A tractor
+ * pulls implements of its own size class or smaller. Plowing needs a tractor
+ * WITH a plow; planting needs one WITH a planter (auto-swapped on pickup). The
+ * COMBINE is self-contained (integral header). Each machine is the brief's §9
+ * state machine: idle → drive to field → work the coverage path → next task.
  *
  * Money: costs are paid ON QUEUE (design decision 2026-07-10) — queueing a plow
  * or plant task charges immediately, and canceling a still-queued task refunds
@@ -22,10 +23,14 @@
 import { gameConfig, SIZE_RANK, FEET_TO_METERS } from "../config/gameConfig";
 import type { CropId, EquipmentSize } from "../config/gameConfig";
 import type { SimTime } from "./clock";
-import type { SaveState, Field, FieldStatus, FarmTask, Agent, Implement, TaskType } from "../state/saveState";
-import { areaAcres } from "../geo/geometry";
+import type { SaveState, Field, FieldStatus, FarmTask, Agent, Implement, TaskType, FieldPlan } from "../state/saveState";
+import { dateOf } from "./calendar";
+import { areaAcres, pointInPolygon } from "../geo/geometry";
 import type { Meters } from "../geo/coords";
-import { inPlantingWindow, canPlow, applyPlow, applyPlant, applyHarvestDone } from "./farming";
+import {
+  inPlantingWindow, canPlow, applyPlow, applyPlant, applyHarvestDone, applyBaleDone,
+  inPlowWindow, hasStandingCrop, inWeedingWindow, canFertilizeNow,
+} from "./farming";
 import { buildCoveragePath, sampleAt, workDoneAt, distanceAtWork } from "./coverage";
 import type { CoveragePath } from "./coverage";
 
@@ -36,6 +41,10 @@ export const TASK_AGENT_KIND: Record<TaskType, Agent["kind"]> = {
   plow: "tractor",
   plant: "tractor",
   harvest: "harvester",
+  weed: "tractor",
+  fertilize: "tractor",
+  rake: "tractor",
+  bale: "tractor",
 };
 
 let taskSeq = 0;
@@ -50,26 +59,45 @@ export function initTaskIds(save: SaveState): void {
 
 /** Buyable power units. */
 export type EquipmentKind = "tractor" | "harvester";
-/** Buyable implements (a plow now; more reuse this system later). */
-export type ImplementKind = "plow";
+/** Buyable implements: a plow (tills), a planter (seeds), a sprayer (weeds or
+ * fertilizes) — same widths/requirements, a tractor hitches one at a time. */
+export type ImplementKind = "plow" | "planter" | "sprayer" | "rake" | "bailer";
 
 const EQUIPMENT_NAME: Record<EquipmentKind, string> = { tractor: "Tractor", harvester: "Combine" };
-const IMPLEMENT_NAME: Record<ImplementKind, string> = { plow: "Plow" };
+const IMPLEMENT_NAME: Record<ImplementKind, string> = {
+  plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake", bailer: "Baler",
+};
 const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
+
+/** Which implement kind a task type needs (undefined = none, e.g. harvest).
+ * Weed and fertilize both use a sprayer; rake/bale use their own tools. */
+const TASK_IMPLEMENT: Partial<Record<TaskType, ImplementKind>> = {
+  plow: "plow", plant: "planter", weed: "sprayer", fertilize: "sprayer",
+  rake: "rake", bale: "bailer",
+};
 
 /** Price of a power unit at a given size. */
 export function agentPrice(kind: EquipmentKind, size: EquipmentSize): number {
   return kind === "harvester" ? gameConfig.equipment.harvester.price : gameConfig.equipment.tractor[size].price;
 }
 
+/** Config (price + width) for each implement kind, by size. */
+const IMPLEMENT_CONFIG: Record<ImplementKind, Record<EquipmentSize, { price: number; widthFt: number }>> = {
+  plow: gameConfig.equipment.plow,
+  planter: gameConfig.equipment.planter,
+  sprayer: gameConfig.equipment.sprayer,
+  rake: gameConfig.equipment.rake,
+  bailer: gameConfig.equipment.bailer,
+};
+
 /** Price of an implement at a given size. */
 export function implementPrice(kind: ImplementKind, size: EquipmentSize): number {
-  return gameConfig.equipment[kind][size].price;
+  return IMPLEMENT_CONFIG[kind][size].price;
 }
 
 /** Working width (meters) of an implement. */
 export function implementWidthM(impl: Implement): number {
-  return gameConfig.equipment[impl.kind][impl.size].widthFt * FEET_TO_METERS;
+  return IMPLEMENT_CONFIG[impl.kind][impl.size].widthFt * FEET_TO_METERS;
 }
 
 /** Can a tractor of `tractorSize` pull an implement of `implSize`? (its class or smaller) */
@@ -115,6 +143,11 @@ export function ensureAgents(save: SaveState, home: Meters): void {
     const tractor = save.agents.find((a) => a.kind === "tractor");
     if (tractor) impl.attachedTo = tractor.id;
     save.implements.push(impl);
+  }
+  // Seed a medium planter, parked in the yard (a tractor only hitches one
+  // implement at a time — it swaps in when a plant task comes up).
+  if (!save.implements.some((i) => i.kind === "planter")) {
+    save.implements.push(makeImplement(save, "planter", "medium"));
   }
   // De-dup display names (older saves numbered by live count, which could collide
   // once a machine had been sold — e.g. two "Medium Tractor 2"). Keep the first,
@@ -252,22 +285,35 @@ export function detachImplement(save: SaveState, implId: string): void {
   impl.attachedTo = undefined;
 }
 
-/** The plow currently hitched to `tractor`, if any. */
-function attachedPlow(save: SaveState, tractorId: string): Implement | undefined {
-  return save.implements.find((i) => i.attachedTo === tractorId && i.kind === "plow");
+/** The implement of `kind` currently hitched to `tractor`, if any. */
+function attachedImplement(save: SaveState, tractorId: string, kind: ImplementKind): Implement | undefined {
+  return save.implements.find((i) => i.attachedTo === tractorId && i.kind === kind);
 }
 
-/** An idle, unattached plow this tractor could hitch (largest that fits first). */
-function availablePlowFor(save: SaveState, tractor: Agent): Implement | undefined {
+/** An idle, unattached implement of `kind` this tractor could hitch (largest
+ * that fits first). */
+function availableImplementFor(save: SaveState, tractor: Agent, kind: ImplementKind): Implement | undefined {
   return save.implements
-    .filter((i) => i.kind === "plow" && !i.attachedTo && tractor.size && canPull(tractor.size, i.size))
+    .filter((i) => i.kind === kind && !i.attachedTo && tractor.size && canPull(tractor.size, i.size))
     .sort((a, b) => SIZE_RANK[b.size] - SIZE_RANK[a.size])[0];
+}
+
+/** Can this tractor take a task needing `kind` right now — does it have (or can
+ * it hitch) that implement? Used both for task assignment and UI hints. */
+function tractorCanUse(save: SaveState, tractor: Agent, kind: ImplementKind): boolean {
+  return !!attachedImplement(save, tractor.id, kind) || !!availableImplementFor(save, tractor, kind);
 }
 
 /** Can this tractor take a plow task right now — does it have (or can it hitch) a
  * plow? Used both for task assignment and UI hints. */
 export function tractorCanPlow(save: SaveState, tractor: Agent): boolean {
-  return !!attachedPlow(save, tractor.id) || !!availablePlowFor(save, tractor);
+  return tractorCanUse(save, tractor, "plow");
+}
+
+/** Can this tractor take a plant task right now — does it have (or can it hitch)
+ * a planter? Used both for task assignment and UI hints. */
+export function tractorCanPlant(save: SaveState, tractor: Agent): boolean {
+  return tractorCanUse(save, tractor, "planter");
 }
 
 /** All not-yet-finished tasks for a field (optionally of one type). */
@@ -280,6 +326,19 @@ export function isFieldHarvesting(save: SaveState, fieldId: string): boolean {
   return save.tasks.some((t) => t.fieldId === fieldId && t.type === "harvest" && t.status === "active");
 }
 
+/** Does the farm own the gear to bale — at least one rake AND one baler? Baling
+ * is only *required* before re-plowing when the player can actually do it; a
+ * farm with no baler just plows the residue under (so auto-manage never traps). */
+export function forageEquipped(save: SaveState): boolean {
+  return save.implements.some((i) => i.kind === "rake") && save.implements.some((i) => i.kind === "bailer");
+}
+
+/** Does this field still owe a rake + bale before it can be re-plowed? True only
+ * for a harvested forage field on a farm that owns the baling gear. */
+export function forageDue(save: SaveState, field: Field): boolean {
+  return field.status === "harvested" && !!field.forageReady && forageEquipped(save);
+}
+
 /**
  * The status a field WILL have once its pending tasks finish — what queueing
  * validates against, so a player can queue plow + plant back-to-back.
@@ -290,7 +349,9 @@ export function effectiveStatus(save: SaveState, field: Field): FieldStatus {
     if (t.fieldId !== field.id) continue;
     if (t.type === "plow") status = "tilled";
     else if (t.type === "plant") status = "planted";
-    else status = "harvested";
+    else if (t.type === "harvest") status = "harvested";
+    else if (t.type === "bale") status = "mulched";
+    // weed/fertilize/rake don't change the field's lifecycle status.
   }
   return status;
 }
@@ -300,20 +361,33 @@ export function taskCost(field: Field, type: TaskType, crop?: CropId): number {
   const acres = areaAcres(field.boundary);
   if (type === "plow") return Math.round(acres * gameConfig.plowCostPerAcre);
   if (type === "plant") return Math.round(acres * gameConfig.crops[crop!].inputCostPerAcre);
+  if (type === "weed") return Math.round(acres * gameConfig.weedCostPerAcre);
+  if (type === "fertilize") return Math.round(acres * gameConfig.fertilizeCostPerAcre);
+  if (type === "rake") return Math.round(acres * gameConfig.forage.rakeCostPerAcre);
+  if (type === "bale") return Math.round(acres * gameConfig.forage.baleCostPerAcre);
   return 0; // harvest: fuel/wages arrive with the cost-model slice (brief §8)
 }
 
 /**
  * Queue a task (pay-on-queue). Validates against the field's EFFECTIVE status so
- * chains like plow→plant queue together. Throws player-facing messages.
+ * chains like plow→plant queue together. Throws player-facing messages. Weed and
+ * fertilize are independent of the plow/plant/harvest chain and of each other —
+ * they gate only on the field's ACTUAL current state (a standing crop), not the
+ * effective/pending one, since there's nothing to chain them behind.
  */
 export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: SimTime, crop?: CropId): FarmTask {
   if (tasksFor(save, field.id, type).length > 0) {
     throw new Error(`${field.id} already has a ${type} task queued`);
   }
   const eff = effectiveStatus(save, field);
-  if (type === "plow" && !canPlow(eff)) {
-    throw new Error(`${field.id} can't be plowed (status: ${eff})`);
+  if (type === "plow") {
+    if (!canPlow(eff)) throw new Error(`${field.id} can't be plowed (status: ${eff})`);
+    // A harvested forage field owes a rake + bale first (unless a bale is
+    // already queued, which pushes eff to "mulched" and clears this branch).
+    if (eff === "harvested" && forageDue(save, field)) {
+      throw new Error(`Rake & bale ${field.id} before plowing`);
+    }
+    if (!inPlowWindow(now)) throw new Error(`Plowing opens in winter — ground needs to rest until then`);
   }
   if (type === "plant") {
     if (!crop) throw new Error("Pick a crop to plant");
@@ -324,6 +398,29 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
   }
   if (type === "harvest" && eff !== "ready") {
     throw new Error(`${field.id} isn't ready to harvest yet`);
+  }
+  if (type === "weed") {
+    if (!hasStandingCrop(field.status)) throw new Error(`${field.id} has nothing to weed (status: ${field.status})`);
+    if (!inWeedingWindow(now)) throw new Error(`Weeding opens in June`);
+  }
+  if (type === "fertilize") {
+    if (!hasStandingCrop(field.status)) throw new Error(`${field.id} has nothing to fertilize (status: ${field.status})`);
+    if (!canFertilizeNow(field, now)) throw new Error(`Fertilizing opens the month after planting`);
+  }
+  if (type === "rake") {
+    if (field.status !== "harvested" || !field.forageReady) {
+      throw new Error(`${field.id} has no forage to rake`);
+    }
+  }
+  if (type === "bale") {
+    if (field.status !== "harvested" || !field.forageReady) {
+      throw new Error(`${field.id} has no forage to bale`);
+    }
+    // The baler follows the rake — it can start once raking has begun, so a rake
+    // must at least be queued/underway (or already done, i.e. windrowed).
+    if (!field.windrowed && tasksFor(save, field.id, "rake").length === 0) {
+      throw new Error(`Rake ${field.id} first — the baler follows the rake`);
+    }
   }
   const cost = taskCost(field, type, crop);
   if (cost > save.money) {
@@ -360,6 +457,59 @@ export function cancelTask(save: SaveState, taskId: string): FarmTask {
 }
 
 /**
+ * Reorder a still-QUEUED task within the queue (drag-to-reorder in the Work
+ * Queue panel). Active tasks aren't reorderable — an agent is already
+ * committed to them, and their position in `save.tasks` doesn't affect
+ * anything once they're running. `beforeTaskId` is the queued task `taskId`
+ * should be inserted before, or undefined to move it to the end of the queue.
+ */
+export function reorderTask(save: SaveState, taskId: string, beforeTaskId: string | undefined): void {
+  const task = save.tasks.find((t) => t.id === taskId);
+  if (!task) throw new Error(`Task ${taskId} not found`);
+  if (task.status !== "queued") throw new Error(`Can't reorder — ${task.type} is already underway`);
+  save.tasks.splice(save.tasks.indexOf(task), 1);
+  if (!beforeTaskId) {
+    save.tasks.push(task);
+    return;
+  }
+  const before = save.tasks.find((t) => t.id === beforeTaskId);
+  save.tasks.splice(before ? save.tasks.indexOf(before) : save.tasks.length, 0, task);
+}
+
+/**
+ * Rough remaining time for a task, in hours, from the physical field-speed ×
+ * swath-width model (brief §10). Active tasks use their real coverage-path
+ * route (turns included) for a precise figure; queued tasks — no agent
+ * assigned yet — estimate off a nominal (currently owned, or medium default)
+ * implement width, ignoring headland turns.
+ */
+export function estimateTaskHours(save: SaveState, task: FarmTask): number {
+  const field = save.fields.find((f) => f.id === task.fieldId);
+  if (!field) return 0;
+  const remainingAcres = Math.max(0, task.totalAcres - task.doneAcres);
+  const speedMPerHr = taskFieldSpeedKmh(task.type) * 1000;
+
+  if (task.status === "active" && task.agentId) {
+    const agent = save.agents.find((a) => a.id === task.agentId);
+    if (agent) {
+      const path = getActivePath(save, task, field, agent);
+      const remainingDist = path.total * (task.totalAcres > 0 ? remainingAcres / task.totalAcres : 0);
+      return remainingDist / speedMPerHr;
+    }
+  }
+
+  const kind = TASK_IMPLEMENT[task.type];
+  const widthFt = task.type === "harvest"
+    ? gameConfig.equipment.harvester.widthFt
+    : (save.implements.find((i) => i.kind === kind)?.size
+        ? IMPLEMENT_CONFIG[kind!][save.implements.find((i) => i.kind === kind)!.size].widthFt
+        : IMPLEMENT_CONFIG[kind!].medium.widthFt);
+  const widthM = widthFt * FEET_TO_METERS;
+  const rateAcresPerHr = (speedMPerHr * widthM) / ACRE_M2;
+  return rateAcresPerHr > 0 ? remainingAcres / rateAcresPerHr : 0;
+}
+
+/**
  * Cancel every queued task on a field (refunding) — used when selling a field.
  * Throws if an agent is actively working it (can't sell ground mid-job).
  */
@@ -375,20 +525,44 @@ export function releaseFieldTasks(save: SaveState, fieldId: string): void {
 function isStartable(task: FarmTask, field: Field): boolean {
   if (task.type === "plow") return canPlow(field.status);
   if (task.type === "plant") return field.status === "tilled";
-  return field.status === "ready";
+  if (task.type === "weed" || task.type === "fertilize") return hasStandingCrop(field.status);
+  if (task.type === "rake") return field.status === "harvested" && !!field.forageReady;
+  // Baler follows the rake: startable once raking has begun (windrowed) and the
+  // field hasn't been baled yet (still "harvested").
+  if (task.type === "bale") return field.status === "harvested" && !!field.windrowed;
+  return field.status === "ready"; // harvest
+}
+
+/** In-field working speed for a task, km/h — rake and baler run at their own
+ * (config) speeds so the rake pulls ahead; everything else uses the shared
+ * fieldwork speed. */
+function taskFieldSpeedKmh(type: TaskType): number {
+  if (type === "rake") return gameConfig.forage.rakeSpeedKmh;
+  if (type === "bale") return gameConfig.forage.baleSpeedKmh;
+  return gameConfig.work.fieldSpeedKmh;
 }
 
 // --- coverage-path runtime (not persisted; rebuilt from doneAcres on reload) ---
 const pathCache = new Map<string, CoveragePath>();
 const pathDistRuntime = new Map<string, number>();
+// Baler-only runtime: how many bales this task has dropped so far, and the
+// sim-minutes left in the current "tie a bale" pause (undefined = not tying).
+const baleDropped = new Map<string, number>();
+const baleTieRemaining = new Map<string, number>();
+// The last on-field spot the baler occupied — bales are dropped HERE so they
+// never land in a concave notch the coverage path cuts across (farmstead, yard).
+const baleLastInside = new Map<string, Meters>();
+// ±10% jitter on the CURRENT pending bale's spacing, so bales don't land on an
+// obvious grid. Rolled once per bale, held until it drops, then re-rolled.
+const baleJitter = new Map<string, number>();
 
-/** Working width (meters) for a task: from the attached plow, or the config
- * planter/header width for plant/harvest. */
+/** Working width (meters) for a task: from the attached implement (plow/
+ * planter), or the config combine header width for harvest. */
 function taskSwathMeters(save: SaveState, task: FarmTask, agent: Agent): number {
   if (task.type === "harvest") return gameConfig.equipment.harvester.widthFt * FEET_TO_METERS;
-  if (task.type === "plant") return gameConfig.equipment.planterWidthFt * FEET_TO_METERS;
-  const plow = attachedPlow(save, agent.id);
-  return (plow ? implementWidthM(plow) : gameConfig.equipment.plow.medium.widthFt * FEET_TO_METERS);
+  const kind = TASK_IMPLEMENT[task.type]!;
+  const impl = attachedImplement(save, agent.id, kind);
+  return impl ? implementWidthM(impl) : IMPLEMENT_CONFIG[kind].medium.widthFt * FEET_TO_METERS;
 }
 
 /** The coverage path an active task is driving, built + cached on first use. */
@@ -414,6 +588,10 @@ export function getCoveragePath(save: SaveState, task: FarmTask): CoveragePath |
 function clearTaskRuntime(taskId: string): void {
   pathCache.delete(taskId);
   pathDistRuntime.delete(taskId);
+  baleDropped.delete(taskId);
+  baleTieRemaining.delete(taskId);
+  baleLastInside.delete(taskId);
+  baleJitter.delete(taskId);
 }
 
 /** Things that happened during a tick, for the UI to toast. */
@@ -435,7 +613,13 @@ export interface TasksTickResult {
 export function tickTasks(save: SaveState, now: SimTime, dtMinutes: number, rand: () => number = Math.random): TasksTickResult {
   const changed: Field[] = [];
   const events: TaskEvent[] = [];
-  for (const agent of save.agents) {
+  // Process machines SMALLEST-first, so the smallest capable tractor picks up a
+  // queued task before any larger one does — keeping big tractors free for the
+  // jobs only they can pull (maintainer request, 2026-07-11). Agents already
+  // mid-task just continue regardless of order; this only affects who grabs an
+  // unclaimed job.
+  const order = [...save.agents].sort((a, b) => SIZE_RANK[a.size ?? "medium"] - SIZE_RANK[b.size ?? "medium"]);
+  for (const agent of order) {
     tickAgent(save, agent, now, dtMinutes, changed, events, rand);
   }
   return { changed, events };
@@ -458,27 +642,39 @@ function tickAgent(
 
     if (!task) {
       // Pick the first queued task of this agent's kind that's startable now.
-      // Plowing also needs the tractor to have (or be able to hitch) a plow.
+      // Plow/plant also need the tractor to have (or be able to hitch) the
+      // matching implement.
       const next = save.tasks.find(
         (t) =>
           t.status === "queued" &&
           TASK_AGENT_KIND[t.type] === agent.kind &&
-          (t.type !== "plow" || tractorCanPlow(save, agent)) &&
+          (!TASK_IMPLEMENT[t.type] || tractorCanUse(save, agent, TASK_IMPLEMENT[t.type]!)) &&
           save.fields.some((f) => f.id === t.fieldId && isStartable(t, f)),
       );
       if (!next) {
         agent.state = "idle";
         return;
       }
-      // Auto-hitch a plow for a plow task if the tractor is bare.
-      if (next.type === "plow" && !attachedPlow(save, agent.id)) {
-        const p = availablePlowFor(save, agent);
-        if (p) p.attachedTo = agent.id;
+      // Auto-hitch the needed implement if the tractor isn't already carrying
+      // it — swapping off whatever else it's carrying (one implement at a time).
+      const needKind = TASK_IMPLEMENT[next.type];
+      if (needKind && !attachedImplement(save, agent.id, needKind)) {
+        const impl = availableImplementFor(save, agent, needKind);
+        if (impl) {
+          for (const i of save.implements) if (i.attachedTo === agent.id) i.attachedTo = undefined;
+          impl.attachedTo = agent.id;
+        }
       }
       next.status = "active";
       next.agentId = agent.id;
       agent.taskId = next.id;
       agent.state = "traveling";
+      // Picking up a rake windrows the field — this unlocks the baler right away
+      // (it may start before the rake finishes), and survives the rake finishing.
+      if (next.type === "rake") {
+        const f = save.fields.find((ff) => ff.id === next.fieldId);
+        if (f) f.windrowed = true;
+      }
       events.push({ kind: "started", task: next, agent });
       continue;
     }
@@ -515,10 +711,104 @@ function tickAgent(
       continue;
     }
 
+    // Baling is special: the baler collects forage as it drives, and every time
+    // it's gathered a bale's worth it STOPS to tie & eject the bale (dropped at
+    // its current spot), then carries on. So it's a drive → pause → drop loop,
+    // not a smooth sweep.
+    if (task.type === "bale") {
+      const path = getActivePath(save, task, field, agent);
+      const speed = (taskFieldSpeedKmh("bale") * 1000) / 60; // meters per sim-minute
+      const balesPerAcre = gameConfig.forage.balesPerAcre;
+      const totalBales = Math.max(1, Math.round(task.totalAcres * balesPerAcre));
+      // Space bales by WORK DISTANCE along the actual driven path, not by field
+      // AREA. A concave notch (farmstead/yard) makes the coverage path over-sweep
+      // — its `totalWork` exceeds the true polygon area — so area-based spacing
+      // would drop every bale in the first stretch and leave the far lanes bare.
+      // Work-distance spacing keeps them evenly spread over the WHOLE field while
+      // the count stays round(acres × balesPerAcre).
+      const workPerBale = path.totalWork / totalBales; // metres of in-field work per bale
+
+      let dist = pathDistRuntime.get(task.id);
+      if (dist === undefined) dist = distanceAtWork(path, (task.doneAcres * ACRE_M2) / path.swath);
+      let dropped = baleDropped.get(task.id);
+      if (dropped === undefined) {
+        // Re-derive on first tick / after a reload from how much work is done.
+        dropped = Math.min(totalBales, Math.floor(workDoneAt(path, dist) / workPerBale));
+        baleDropped.set(task.id, dropped);
+      }
+
+      // Mid-tie? Burn budget standing still; when the timer runs out, drop the bale.
+      const tie = baleTieRemaining.get(task.id);
+      if (tie !== undefined) {
+        const used = Math.min(tie, budget);
+        budget -= used;
+        const left = tie - used;
+        if (left > 1e-9) {
+          baleTieRemaining.set(task.id, left);
+          continue; // still tying (out of budget) — resume next tick
+        }
+        baleTieRemaining.delete(task.id);
+        baleJitter.delete(task.id); // re-roll spacing for the next bale
+        // Drop ON the field: use the current spot if it's inside, else the last
+        // on-field position (the baler may have stopped over a concave notch the
+        // path cut across — a bale must never land off the field).
+        const inside = pointInPolygon(agent.pos, field.boundary);
+        const drop = inside ? agent.pos : (baleLastInside.get(task.id) ?? agent.pos);
+        (field.baleLocations ??= []).push([drop[0], drop[1]]);
+        baleDropped.set(task.id, dropped + 1);
+        continue;
+      }
+
+      // Not tying: drive to the next bale threshold (or the field's end), stopping
+      // exactly there so the bale drops where a bale's worth was gathered.
+      // Jitter this bale's spacing ±10% (of work-metres) so drops don't fall on an
+      // exact grid. Rolled once per pending bale (held across ticks until it
+      // drops). The nominal `(dropped+1)*workPerBale` still anchors the count, so
+      // the total number of bales is unchanged — only where each lands shifts.
+      let jitter = 0;
+      if (dropped < totalBales) {
+        jitter = baleJitter.get(task.id) ?? workPerBale * (rand() * 0.2 - 0.1);
+        baleJitter.set(task.id, jitter);
+      }
+      const targetWork = dropped >= totalBales
+        ? path.totalWork
+        : Math.min(path.totalWork, (dropped + 1) * workPerBale + jitter);
+      const targetDist = dropped >= totalBales
+        ? path.total
+        : Math.min(path.total, distanceAtWork(path, targetWork));
+      const timeNeeded = Math.max(0, (targetDist - dist) / speed);
+      const timeUsed = Math.min(timeNeeded, budget);
+      dist = Math.min(path.total, dist + speed * timeUsed);
+      budget -= timeUsed;
+      pathDistRuntime.set(task.id, dist);
+      task.doneAcres = Math.min(task.totalAcres, (workDoneAt(path, dist) * path.swath) / ACRE_M2);
+      const s = sampleAt(path, dist);
+      agent.pos = s.pos;
+      agent.heading = s.heading;
+      if (pointInPolygon(agent.pos, field.boundary)) baleLastInside.set(task.id, agent.pos);
+
+      if (dist >= targetDist - 1e-6 && dropped < totalBales) {
+        // Gathered a bale's worth — stop and tie it.
+        baleTieRemaining.set(task.id, gameConfig.forage.baleTieMinutes);
+        continue;
+      }
+      if (dist >= path.total - 1e-6 && dropped >= totalBales) {
+        task.doneAcres = task.totalAcres;
+        completeTask(task, field, now, rand);
+        changed.push(field);
+        events.push({ kind: "finished", task, agent });
+        clearTaskRuntime(task.id);
+        save.tasks.splice(save.tasks.indexOf(task), 1);
+        agent.taskId = undefined;
+        agent.state = "idle";
+      }
+      continue;
+    }
+
     // Working: drive the coverage path at field speed; swept in-field distance ×
     // swath = area worked, which is where doneAcres comes from (physical model).
     const path = getActivePath(save, task, field, agent);
-    const speed = (gameConfig.work.fieldSpeedKmh * 1000) / 60; // meters per sim-minute
+    const speed = (taskFieldSpeedKmh(task.type) * 1000) / 60; // meters per sim-minute
     let dist = pathDistRuntime.get(task.id);
     if (dist === undefined) dist = distanceAtWork(path, (task.doneAcres * ACRE_M2) / path.swath);
     const timeNeeded = (path.total - dist) / speed;
@@ -543,7 +833,11 @@ function tickAgent(
     if (dist >= path.total - 1e-6) {
       task.doneAcres = task.totalAcres;
       completeTask(task, field, now, rand);
-      changed.push(field);
+      // A finished rake changes no field STATUS, and its windrows are already on
+      // the surface (revealed strip-by-strip as it drove). Forcing a full repaint
+      // here would wipe any mulch a concurrent baler has already revealed — so
+      // skip it for the rake; the reveal already left the surface correct.
+      if (task.type !== "rake") changed.push(field);
       events.push({ kind: "finished", task, agent });
       clearTaskRuntime(task.id);
       save.tasks.splice(save.tasks.indexOf(task), 1);
@@ -566,36 +860,119 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
     case "harvest":
       applyHarvestDone(field);
       break;
+    case "rake":
+      // Windrowing has no separate field-status effect — the field.windrowed
+      // flag was already set when the rake was picked up (so the baler could
+      // start before the rake finished).
+      break;
+    case "bale":
+      // Bales were dropped one-by-one into field.baleLocations as the baler
+      // worked; this just settles the field to mulched.
+      applyBaleDone(field);
+      break;
+    case "weed":
+    case "fertilize":
+      // No persistent field effect yet — a time/cost sink until a weed-
+      // pressure or fertility system exists to hook into (out of scope here).
+      break;
   }
 }
 
+/** The mutually-exclusive field-lifecycle task types (§10): only one of these
+ * should ever be pending on a field at a time. Weed/fertilize are deliberately
+ * NOT here — they're independent side-tasks (brief request, 2026-07-11) and
+ * must never block the lifecycle from advancing, including while stuck queued
+ * for lack of a sprayer. */
+const LIFECYCLE_TASKS: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "rake", "bale"]);
+
+/** The config's first crop — the fallback when an auto-managed field has no plans. */
+function defaultCrop(): CropId {
+  return (Object.keys(gameConfig.crops) as CropId[])[0]!;
+}
+
+/** A sensible default plan for an auto-managed field with none defined yet. */
+export function defaultPlan(): FieldPlan {
+  return { crop: defaultCrop(), bale: true };
+}
+
+/** The rotation plan active for `field` at `now`: `plans[(year-1) % len]`, since
+ * plans advance one per campaign year and loop after the last (maintainer design,
+ * 2026-07-12). Falls back to a single default plan when none are set. */
+export function activePlan(field: Field, now: SimTime): FieldPlan {
+  const plans = field.plans && field.plans.length > 0 ? field.plans : [defaultPlan()];
+  return plans[(dateOf(now).year - 1) % plans.length]!;
+}
+
 /**
- * Idle-game auto-management (player-requested, brief §7-adjacent): queue the
- * next lifecycle task the moment it's possible, so a player can walk away and
- * the agents keep the farm running. Failures (can't afford it, no planting
- * window open) are silently retried next tick.
+ * Idle-game auto-management (player-requested, brief §7-adjacent): drive the
+ * field's lifecycle against its active rotation plan (`activePlan`) — plow →
+ * plant the plan's crop → (weed / fertilize if the plan folds them in) → harvest
+ * → rake+bale or plow-under per the plan — looping year to year. Failures (can't
+ * afford it, out of season) are silently retried next tick.
  */
 export function autoManageField(save: SaveState, field: Field, now: SimTime): void {
-  if (tasksFor(save, field.id).length > 0) return; // work already lined up
+  const plan = activePlan(field, now);
+
+  // Optional side-tasks first — independent of the lifecycle, once per crop.
+  if (plan.weed && !field.autoWeedDone && hasStandingCrop(field.status) && inWeedingWindow(now)) {
+    try {
+      enqueueTask(save, field, "weed", now);
+      field.autoWeedDone = true;
+    } catch {
+      /* no sprayer / cash yet — retry next tick */
+    }
+  }
+  if (plan.fertilize && !field.autoFertDone && hasStandingCrop(field.status) && canFertilizeNow(field, now)) {
+    try {
+      enqueueTask(save, field, "fertilize", now);
+      field.autoFertDone = true;
+    } catch {
+      /* no sprayer / cash yet — retry next tick */
+    }
+  }
+
+  const lifecycleBusy = save.tasks.some((t) => t.fieldId === field.id && LIFECYCLE_TASKS.has(t.type));
+  if (lifecycleBusy) return; // a plow/plant/harvest/rake/bale step is already lined up
   switch (field.status) {
     case "stubble":
-    case "harvested":
+    case "mulched":
       try {
         enqueueTask(save, field, "plow", now);
       } catch {
-        /* can't afford it yet — retry next tick */
+        /* can't afford it yet, or out of the plow window — retry next tick */
+      }
+      break;
+    case "harvested":
+      if (forageDue(save, field) && plan.bale) {
+        // The forage loop: rake then bale (queued together — the baler waits in
+        // the queue until the rake has started). Once baled the field is
+        // "mulched" and comes back around to plowing.
+        try {
+          enqueueTask(save, field, "rake", now);
+        } catch {
+          /* can't afford it yet — retry next tick */
+        }
+        try {
+          enqueueTask(save, field, "bale", now);
+        } catch {
+          /* rake not queued yet / unaffordable — retry next tick */
+        }
+      } else {
+        // Plow under — discard any un-baled forage so the plow isn't gated on it
+        // (the plan opted out of baling, or there's no gear for it).
+        if (field.forageReady) field.forageReady = undefined;
+        try {
+          enqueueTask(save, field, "plow", now);
+        } catch {
+          /* can't afford it yet, or out of the plow window — retry next tick */
+        }
       }
       break;
     case "tilled":
-      // Policy: plant the first crop (config order) whose window is open and
-      // affordable. Placeholder — real crop/contract strategy is a later layer.
-      for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
-        try {
-          enqueueTask(save, field, "plant", now, cropId);
-          break;
-        } catch {
-          /* window closed or unaffordable — try the next crop */
-        }
+      try {
+        enqueueTask(save, field, "plant", now, plan.crop);
+      } catch {
+        /* window closed or unaffordable — retry next tick */
       }
       break;
     case "ready":

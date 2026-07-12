@@ -3,7 +3,7 @@ import { setProjection } from "../src/geo/coords";
 import { newGame } from "../src/state/saveState";
 import type { Field, SaveState } from "../src/state/saveState";
 import {
-  tickFarming, growthProgress, yieldRange, deriveStatus, applyPlant,
+  tickFarming, growthProgress, yieldRange, deriveStatus, applyPlant, hasStandingCrop,
 } from "../src/sim/farming";
 import {
   ensureAgents, enqueueTask, cancelTask, tickTasks, autoManageAll,
@@ -69,6 +69,10 @@ function runUntil(save: SaveState, from: number, done: () => boolean, capMinutes
 
 /** Campaign starts Mar 1 Yr 1; sim-time of April 1 Yr 1 (one month in). */
 const APRIL_1 = minutesPerMonth();
+/** Sim-time of Dec 1 Yr 1 — plowing opens (winter only, maintainer request
+ * 2026-07-11, narrowed to winter 2026-07-12: keeps auto-manage from re-plowing
+ * right after harvest). */
+const WINTER_1 = 9 * minutesPerMonth();
 
 describe("calendar", () => {
   it("starts on March 1, Year 1", () => {
@@ -111,14 +115,23 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     save.fields.push(field);
     const cash = save.money;
     const cost = taskCost(field, "plow");
-    const task = enqueueTask(save, field, "plow", 0);
+    const task = enqueueTask(save, field, "plow", WINTER_1);
     expect(cash - save.money).toBe(cost);
     expect(cost).toBe(Math.round(100 * gameConfig.plowCostPerAcre));
     // Can't queue plowing twice.
-    expect(() => enqueueTask(save, field, "plow", 0)).toThrow(/already/);
+    expect(() => enqueueTask(save, field, "plow", WINTER_1)).toThrow(/already/);
     cancelTask(save, task.id);
     expect(save.money).toBe(cash);
     expect(save.tasks).toHaveLength(0);
+  });
+
+  it("plowing is winter only (brief request: don't auto-replow right after harvest)", () => {
+    const save = gameWithAgents();
+    const field = freshField("stubble");
+    save.fields.push(field);
+    expect(() => enqueueTask(save, field, "plow", 0)).toThrow(/winter/i); // March
+    expect(() => enqueueTask(save, field, "plow", APRIL_1)).toThrow(/winter/i);
+    expect(() => enqueueTask(save, field, "plow", WINTER_1)).not.toThrow();
   });
 
   it("refuses to queue what the (effective) field state doesn't allow", () => {
@@ -128,8 +141,9 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     // Can't plant unplowed ground, can't harvest bare ground.
     expect(() => enqueueTask(save, field, "plant", APRIL_1, "corn")).toThrow(/[Pp]low/);
     expect(() => enqueueTask(save, field, "harvest", APRIL_1)).toThrow(/ready/);
-    // But with a plow QUEUED, planting can chain behind it.
-    enqueueTask(save, field, "plow", APRIL_1);
+    // But with a plow QUEUED, planting can chain behind it (each enqueue's own
+    // `now` is independently validated against its own window).
+    enqueueTask(save, field, "plow", WINTER_1);
     expect(effectiveStatus(save, field)).toBe("tilled");
     expect(() => enqueueTask(save, field, "plant", APRIL_1, "corn")).not.toThrow();
   });
@@ -147,16 +161,16 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     const save = gameWithAgents();
     const field = freshField("stubble");
     save.fields.push(field);
-    enqueueTask(save, field, "plow", 0);
+    enqueueTask(save, field, "plow", WINTER_1);
 
     // A couple of sim-hours in: driving/working, nowhere near done (a 100-ac
     // field at a 10-ft swath is a long route). The tractor should be moving.
-    runWorld(save, 0, 120, 30);
+    runWorld(save, WINTER_1, 120, 30);
     const tractor = save.agents.find((a) => a.kind === "tractor")!;
     expect(field.status).toBe("stubble");
     expect(tractor.state === "working" || tractor.state === "traveling").toBe(true);
     // Drive to completion.
-    runUntil(save, 120, () => field.status === "tilled");
+    runUntil(save, WINTER_1 + 120, () => field.status === "tilled");
     expect(field.status).toBe("tilled");
     expect(save.tasks).toHaveLength(0);
     expect(tractor.state).toBe("idle");
@@ -166,10 +180,13 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     const save = gameWithAgents();
     const field = freshField("stubble");
     save.fields.push(field);
-    enqueueTask(save, field, "plow", APRIL_1);
+    // Plow queued for winter (its own window); plant queued for the following
+    // spring's corn window — each enqueue validates against its own `now`,
+    // independent of the shared clock the simulation below actually runs on.
+    enqueueTask(save, field, "plow", WINTER_1);
     enqueueTask(save, field, "plant", APRIL_1, "corn");
 
-    runUntil(save, APRIL_1, () => field.status === "planted");
+    runUntil(save, WINTER_1, () => field.status === "planted");
     expect(field.status).toBe("planted");
     expect(field.crop).toBe("corn");
     const cfg = gameConfig.crops.corn;
@@ -314,8 +331,8 @@ describe("equipment: sizes, implements, buy/sell/attach (brief §8 capital)", ()
     sellImplement(save, plow.id);
     const field = freshField("stubble");
     save.fields.push(field);
-    enqueueTask(save, field, "plow", 0);
-    runWorld(save, 0, 600, 60);
+    enqueueTask(save, field, "plow", WINTER_1);
+    runWorld(save, WINTER_1, 600, 60);
     // No plow anywhere → the tractor never starts; the field stays stubble.
     expect(field.status).toBe("stubble");
     expect(save.tasks[0]!.status).toBe("queued");
@@ -328,9 +345,9 @@ describe("equipment: sizes, implements, buy/sell/attach (brief §8 capital)", ()
     const f1 = freshField("stubble");
     const f2: Field = { id: "field-2", parcelId: "parcel-2", boundary, status: "stubble" };
     save.fields.push(f1, f2);
-    enqueueTask(save, f1, "plow", 0);
-    enqueueTask(save, f2, "plow", 0);
-    tickTasks(save, 30, 30);
+    enqueueTask(save, f1, "plow", WINTER_1);
+    enqueueTask(save, f2, "plow", WINTER_1);
+    tickTasks(save, WINTER_1 + 30, 30);
     const working = save.tasks.filter((t) => t.status === "active");
     expect(working).toHaveLength(2);
     expect(new Set(working.map((t) => t.agentId)).size).toBe(2); // two different tractors
@@ -340,8 +357,8 @@ describe("equipment: sizes, implements, buy/sell/attach (brief §8 capital)", ()
     const save = gameWithAgents();
     const field = freshField("stubble");
     save.fields.push(field);
-    enqueueTask(save, field, "plow", 0);
-    runWorld(save, 0, 60, 30); // tractor picks it up and starts
+    enqueueTask(save, field, "plow", WINTER_1);
+    runWorld(save, WINTER_1, 60, 30); // tractor picks it up and starts
     const tractor = save.agents.find((a) => a.kind === "tractor")!;
     expect(() => sellAgent(save, tractor.id)).toThrow(/mid-job/);
 
@@ -357,7 +374,7 @@ describe("equipment: sizes, implements, buy/sell/attach (brief §8 capital)", ()
     const save2 = gameWithAgents();
     const f2 = freshField("stubble");
     save2.fields.push(f2);
-    enqueueTask(save2, f2, "plow", 0);
+    enqueueTask(save2, f2, "plow", WINTER_1);
     const t = save2.agents.find((a) => a.kind === "tractor")!;
     expect(() => sellAgent(save2, t.id)).toThrow(/only tractor/);
   });
@@ -366,11 +383,11 @@ describe("equipment: sizes, implements, buy/sell/attach (brief §8 capital)", ()
     const save = gameWithAgents();
     const field = freshField("stubble");
     save.fields.push(field);
-    enqueueTask(save, field, "plow", 0);
+    enqueueTask(save, field, "plow", WINTER_1);
     const tractor = save.agents.find((a) => a.kind === "tractor")!;
 
     const xs: number[] = [];
-    let now = 0;
+    let now = WINTER_1;
     for (let i = 0; i < 600 && field.status !== "tilled"; i++) {
       now += 30;
       tickFarming(save, now);
@@ -408,29 +425,41 @@ describe("equipment: sizes, implements, buy/sell/attach (brief §8 capital)", ()
 });
 
 describe("auto-manage (idle mode, player-requested)", () => {
-  it("queues plow, plant, and harvest itself with no manual calls, then loops", () => {
+  it("waits out spring/summer/fall, plows only once winter opens, then plants/harvests itself", () => {
     const save = gameWithAgents();
     const field = freshField("stubble");
     field.autoManage = true;
     save.fields.push(field);
+    const mpm = minutesPerMonth();
 
-    // March: auto-manage queues the plow (no season restriction); drive until tilled.
-    let now = runUntil(save, 0, () => field.status === "tilled", 5 * MINUTES_PER_DAY);
+    // March: plowing isn't in season (winter only) — auto-manage waits, nothing
+    // gets queued.
+    let now = runWorld(save, 0, APRIL_1 - MINUTES_PER_DAY, MINUTES_PER_DAY);
+    expect(field.status).toBe("stubble");
+    expect(save.tasks).toHaveLength(0);
+
+    // Fast-forward to winter: auto-manage queues + finishes the plow.
+    now = runUntil(save, now, () => field.status === "tilled", 12 * mpm);
     expect(field.status).toBe("tilled");
+    expect([11, 0, 1]).toContain(dateOf(now).month); // Dec–Feb
 
-    // Still March: no planting window yet, so nothing plants.
-    now = runWorld(save, now, Math.max(0, APRIL_1 - MINUTES_PER_DAY - now), MINUTES_PER_DAY);
-    expect(field.crop).toBeUndefined();
-
-    // April: window opens — auto-manage plants corn; drive until it's in the ground.
-    now = runUntil(save, now, () => field.crop === "corn", 10 * MINUTES_PER_DAY);
+    // Sits tilled over winter; next spring's window opens and it plants.
+    now = runUntil(save, now, () => field.crop === "corn", 10 * mpm);
     expect(field.crop).toBe("corn");
 
-    // Let it ripen, auto-harvest, and re-plow for next season.
-    const grow = gameConfig.crops.corn.growMonths * minutesPerMonth();
-    runUntil(save, now, () => save.grain.corn > 0 && field.status === "tilled", grow + 30 * MINUTES_PER_DAY);
+    // Ripens and auto-harvests.
+    const grow = gameConfig.crops.corn.growMonths * mpm;
+    now = runUntil(save, now, () => field.status === "harvested", grow + 30 * MINUTES_PER_DAY);
     expect(save.grain.corn).toBeGreaterThan(0);
-    expect(field.status).toBe("tilled"); // re-plowed itself for the next cycle
+    expect(field.status).toBe("harvested");
+
+    // Fresh off harvest (summer) — the maintainer-requested behavior: it must
+    // NOT be replowed immediately, only once winter comes back around.
+    expect(save.tasks).toHaveLength(0);
+
+    now = runUntil(save, now, () => field.status === "tilled", 12 * mpm);
+    expect(field.status).toBe("tilled");
+    expect([11, 0, 1]).toContain(dateOf(now).month);
   });
 
   it("silently waits (doesn't throw) when a step isn't affordable or in season", () => {
@@ -442,5 +471,92 @@ describe("auto-manage (idle mode, player-requested)", () => {
     expect(() => runWorld(save, 0, 60, 60)).not.toThrow();
     expect(field.status).toBe("stubble"); // still waiting, no crash
     expect(save.tasks).toHaveLength(0);
+  });
+});
+
+describe("weeding & fertilizing (independent side-tasks, brief request 2026-07-11)", () => {
+  it("weeding opens in June and closes once ready; fertilizing opens the month after planting", () => {
+    const save = gameWithAgents();
+    const field = freshField("planted");
+    field.crop = "corn";
+    field.plantedAt = APRIL_1;
+    field.trueYieldTonsPerAcre = 5;
+    save.fields.push(field);
+
+    // Before June: weeding refused.
+    expect(() => enqueueTask(save, field, "weed", APRIL_1)).toThrow(/June/);
+    const juneStart = APRIL_1 + 2 * minutesPerMonth();
+    const weedTask = enqueueTask(save, field, "weed", juneStart); // accepted
+    cancelTask(save, weedTask.id); // undo so it doesn't collide with the check below
+
+    // Fertilizing: not the same month as planting, but the next one is fine.
+    expect(() => enqueueTask(save, field, "fertilize", APRIL_1)).toThrow(/month after/);
+    const mayStart = APRIL_1 + minutesPerMonth();
+    const fertTask = enqueueTask(save, field, "fertilize", mayStart); // accepted
+    cancelTask(save, fertTask.id);
+
+    // Once the crop is mature/ready, neither is available any more.
+    field.status = "ready";
+    expect(() => enqueueTask(save, field, "weed", juneStart)).toThrow(/nothing to weed/);
+    expect(() => enqueueTask(save, field, "fertilize", mayStart)).toThrow(/nothing to fertilize/);
+  });
+
+  it("weed and fertilize are independent of each other and of plow/plant/harvest", () => {
+    const save = gameWithAgents();
+    buyImplement(save, "sprayer", "medium");
+    const field = freshField("planted");
+    field.crop = "corn";
+    field.plantedAt = APRIL_1;
+    field.trueYieldTonsPerAcre = 5;
+    save.fields.push(field);
+    const juneStart = APRIL_1 + 2 * minutesPerMonth();
+
+    // Both queue at once — neither gates on the other.
+    enqueueTask(save, field, "weed", juneStart);
+    enqueueTask(save, field, "fertilize", juneStart);
+    expect(save.tasks).toHaveLength(2);
+    expect(effectiveStatus(save, field)).toBe("planted"); // neither touches lifecycle status
+
+    // The one tractor works through both serially (it only owns one sprayer);
+    // growth ticks forward normally (it's not a lifecycle-status side effect
+    // of weed/fertilize — just time passing), but the crop stays standing.
+    runUntil(save, juneStart, () => save.tasks.length === 0, 5 * MINUTES_PER_DAY);
+    expect(save.tasks).toHaveLength(0);
+    expect(hasStandingCrop(field.status)).toBe(true);
+  });
+
+  it("needs a sprayer: with none available, the task just waits", () => {
+    const save = gameWithAgents(); // starting fleet has no sprayer
+    const field = freshField("planted");
+    field.crop = "corn";
+    field.plantedAt = APRIL_1;
+    field.trueYieldTonsPerAcre = 5;
+    save.fields.push(field);
+    const juneStart = APRIL_1 + 2 * minutesPerMonth();
+    enqueueTask(save, field, "weed", juneStart);
+    runWorld(save, juneStart, 600, 60);
+    expect(save.tasks[0]!.status).toBe("queued");
+  });
+
+  it("a stuck (sprayer-less) weed task must not block auto-manage from harvesting a ready field (regression)", () => {
+    const save = gameWithAgents(); // no sprayer — the weed task below can never be picked up
+    const field = freshField("planted");
+    field.autoManage = true;
+    field.crop = "corn";
+    field.plantedAt = APRIL_1;
+    field.trueYieldTonsPerAcre = 5;
+    save.fields.push(field);
+
+    const juneStart = APRIL_1 + 2 * minutesPerMonth();
+    enqueueTask(save, field, "weed", juneStart); // queues, then sits forever (no sprayer)
+
+    // Drive well past ready — the stuck weed task must not stop auto-manage
+    // from queuing (and the combine from finishing) the harvest.
+    const ready = APRIL_1 + gameConfig.crops.corn.growMonths * minutesPerMonth();
+    runUntil(save, juneStart, () => field.status === "harvested", ready - juneStart + 10 * MINUTES_PER_DAY);
+    expect(field.status).toBe("harvested");
+    expect(save.grain.corn).toBeGreaterThan(0);
+    // The stuck weed task is still there, untouched, independent as designed.
+    expect(save.tasks.some((t) => t.type === "weed" && t.status === "queued")).toBe(true);
   });
 });

@@ -120,6 +120,7 @@ export function renderField(map: MlMap, overlay: OverlayEngine, field: Field, no
     status: field.status,
     crop: field.crop,
     progress: growthProgress(field, now),
+    windrowed: field.status === "harvested" && !!field.windrowed,
     seed: hashSeed(field.id),
   };
   // Seed the texture from the field id so repaints stay stable across a session.

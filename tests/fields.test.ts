@@ -10,6 +10,11 @@ import { gameConfig } from "../src/config/gameConfig";
 import { sellField } from "../src/field/fields";
 import type { OverlayEngine } from "../src/map/overlay";
 import { ensureAgents, enqueueTask, tickTasks } from "../src/sim/tasks";
+import { minutesPerMonth } from "../src/sim/calendar";
+
+// Campaign starts Mar 1; plowing only opens in winter (Dec, month index 11 = 9
+// months after the March 1 start).
+const WINTER_1 = 9 * minutesPerMonth();
 
 beforeAll(() => setProjection(15, "N"));
 
@@ -69,7 +74,7 @@ describe("sellField (maintainer request: sell back for the purchase price)", () 
     save.fields.push(f2);
     save.parcels.push({ id: "parcel-2", boundary, owned: true });
     const cashBefore = save.money;
-    const task = enqueueTask(save, f2, "plow", 0);
+    const task = enqueueTask(save, f2, "plow", WINTER_1);
     expect(save.money).toBe(cashBefore - task.costPaid);
     sellField(fakeMap(), fakeOverlay(), save, "field-2");
     expect(save.money).toBe(cashBefore + 1000); // plow refunded + land refunded

@@ -20,7 +20,7 @@
 import { gameConfig } from "../config/gameConfig";
 import type { CropId } from "../config/gameConfig";
 import type { SimTime } from "./clock";
-import { minutesPerMonth, dateOf } from "./calendar";
+import { minutesPerMonth, dateOf, MONTHS_PER_YEAR } from "./calendar";
 import type { SaveState, Field, FieldStatus } from "../state/saveState";
 
 /** Is `crop` plantable in the month containing `t`? */
@@ -28,9 +28,41 @@ export function inPlantingWindow(crop: CropId, t: SimTime): boolean {
   return gameConfig.crops[crop].plantMonths.includes(dateOf(t).month);
 }
 
-/** Can this field be plowed right now (status-wise)? */
+/** Can this field be plowed right now (status-wise)? Bare stubble, freshly
+ * harvested ground, or a baled/mulched field all take a plow. NOTE: a harvested
+ * field that still owes forage (rake + bale) is gated separately — see
+ * `forageDue` in tasks.ts — so this being true isn't the whole story. */
 export function canPlow(status: FieldStatus): boolean {
-  return status === "stubble" || status === "harvested";
+  return status === "stubble" || status === "harvested" || status === "mulched";
+}
+
+/** Is `t` inside the plowing season (winter, `gameConfig.plowMonths`)?
+ * Status-independent — combine with `canPlow` for the full check. */
+export function inPlowWindow(t: SimTime): boolean {
+  return gameConfig.plowMonths.includes(dateOf(t).month);
+}
+
+/** Does this field have a standing (not-yet-mature) crop in it? True for
+ * planted/growing, false once it's ready/harvested or there's nothing in the
+ * ground — the gate weeding and fertilizing share. */
+export function hasStandingCrop(status: FieldStatus): boolean {
+  return status === "planted" || status === "growing";
+}
+
+/** Weeding opens after May (brief request: June onward). Status-independent —
+ * combine with `hasStandingCrop` for the full check. */
+export function inWeedingWindow(t: SimTime): boolean {
+  return dateOf(t).month > 4; // May = index 4; "after May" = June (5) or later
+}
+
+/** Fertilizing opens the month after planting (or later). False if the field
+ * was never planted. */
+export function canFertilizeNow(field: Field, now: SimTime): boolean {
+  if (field.plantedAt === undefined) return false;
+  const planted = dateOf(field.plantedAt);
+  const cur = dateOf(now);
+  const monthsSincePlanted = (cur.year - planted.year) * MONTHS_PER_YEAR + (cur.month - planted.month);
+  return monthsSincePlanted >= 1;
 }
 
 /**
@@ -42,6 +74,10 @@ export function applyPlow(field: Field): void {
     throw new Error(`${field.id} can't be plowed (status: ${field.status})`);
   }
   field.status = "tilled";
+  // Ground's been turned — any un-baled forage is gone. Bales already dropped in
+  // the field (field.bales) stay put until sold (no collection mechanic yet).
+  field.forageReady = undefined;
+  field.windrowed = undefined;
 }
 
 /**
@@ -60,14 +96,33 @@ export function applyPlant(field: Field, crop: CropId, now: SimTime, rand: () =>
   field.trueYieldTonsPerAcre = cfg.baseYieldTonsPerAcre * (1 - u + rand() * 2 * u);
   field.harvestedAcres = 0;
   field.status = "planted";
+  // Fresh crop → a new season: let the auto-manager weed/fertilize once again.
+  field.autoWeedDone = undefined;
+  field.autoFertDone = undefined;
 }
 
-/** Harvest-complete effect: back to bare ground, crop state cleared. */
+/** Harvest-complete effect: back to bare ground, crop state cleared. A forage
+ * crop (e.g. corn) leaves residue behind — flag it so the field owes a rake +
+ * bale before it can be re-plowed (when the farm owns the gear). */
 export function applyHarvestDone(field: Field): void {
+  if (field.crop && gameConfig.crops[field.crop].producesForage) {
+    field.forageReady = true;
+    field.windrowed = undefined;
+  }
   field.status = "harvested";
   field.crop = undefined;
   field.plantedAt = undefined;
   field.trueYieldTonsPerAcre = undefined;
+}
+
+/** Baling-complete effect: the windrows are gone and the field is left
+ * clean/mulched. The bales themselves were dropped one at a time by the baler as
+ * it worked (see `tasks.ts`) into `field.baleLocations`, and stay there until
+ * sold — so this only settles the field status/flags. */
+export function applyBaleDone(field: Field): void {
+  field.status = "mulched";
+  field.forageReady = undefined;
+  field.windrowed = undefined;
 }
 
 /** Growth progress 0..1 (1 = harvest-ready). 0 if nothing is growing.

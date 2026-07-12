@@ -27,6 +27,9 @@ export interface FieldPaintParams {
   crop?: CropId;
   /** Growth progress 0..1 (only meaningful for planted/growing/ready). */
   progress?: number;
+  /** Raked: overlay windrows (gathered forage in spaced rows) on the harvested
+   * surface. Visual-only — the field's lifecycle status stays "harvested". */
+  windrowed?: boolean;
   seed?: number;
 }
 
@@ -103,6 +106,23 @@ export function drawFieldTexture(
         rows(ctx, w, h, angle, 3, "#93835a", 1.2, 0.3);
         rows(ctx, w, h, angle, 9, "#c9ba90", 2.2, 0.28, 4.5); // windrowed chaff lines
         break;
+
+      case "mulched":
+        // Baled/mulched: clean, tidy surface with grass showing through — soft,
+        // evenly-spaced mown lines, no rough stubble. (Bales themselves are drawn
+        // as separate map markers.)
+        rows(ctx, w, h, angle, 6, "#7f8f5e", 0.9, 0.22);
+        rows(ctx, w, h, angle, 6, "#aebd88", 0.6, 0.18, 3); // lit mown edges
+        break;
+    }
+
+    // Windrows (raked forage): thick, widely-spaced rows of gathered residue
+    // over the cut stubble, along the field's run. Visual-only overlay for a
+    // harvested-and-raked field (before the baler collects it).
+    if (p.windrowed) {
+      rows(ctx, w, h, angle, 15, "#7a6a3f", 3.2, 0.5);       // the piled windrow
+      rows(ctx, w, h, angle, 15, "#a89263", 1.4, 0.4, 1.6);  // sunlit crest
+      rows(ctx, w, h, angle, 15, "#4f4529", 1.0, 0.3, -1.4); // shaded near edge
     }
 
     ctx.restore();
@@ -157,6 +177,9 @@ function palette(p: FieldPaintParams): { base: string; dark: string; light: stri
         : { base: "#b09a58", dark: "#977f43", light: "#c2ad6d" };
     case "harvested":
       return { base: "#b3a375", dark: "#9a8a5e", light: "#c4b489" };
+    case "mulched":
+      // Greener than stubble — grass retained under a clean, mown/baled surface.
+      return { base: "#9aa771", dark: "#84925f", light: "#adba8b" };
   }
 }
 

@@ -87,38 +87,93 @@ export function buildCoveragePath(boundary: Meters[], swath: number): CoveragePa
     if (maxN - swath / 2 - last > swath * 0.25) laneYs.push(maxN - swath / 2);
   }
 
-  // Each lane's [xL, xR] = where the horizontal line meets the polygon.
-  const lanes: Array<{ y: number; xL: number; xR: number }> = [];
-  for (const y of laneYs) {
-    const span = horizontalSpan(local, y);
-    if (span) lanes.push({ y, xL: span[0], xR: span[1] });
-  }
-  if (lanes.length === 0) {
-    // Degenerate: fall back to the bbox mid-line so there's always a route.
-    lanes.push({ y: (minN + maxN) / 2, xL: minE, xR: maxE });
-  }
+  // Each lane's INSIDE x-intervals. A concave notch (farmstead/yard cut out of
+  // the boundary) yields TWO intervals on the lanes that cross it — the path must
+  // skip the gap between them, not sweep across it.
+  const laneSpans = laneYs.map((y) => ({ y, spans: horizontalSpans(local, y) }));
 
-  const localPts: Meters[] = [];
-  for (let i = 0; i < lanes.length; i++) {
-    const lane = lanes[i]!;
-    const forward = i % 2 === 0;
-    const start: Meters = [forward ? lane.xL : lane.xR, lane.y];
-    const end: Meters = [forward ? lane.xR : lane.xL, lane.y];
-    if (i > 0) {
-      // Headland U-turn from the previous lane's end to this lane's start.
-      const prev = localPts[localPts.length - 1]!;
-      for (const p of turnArc(prev, start)) localPts.push(p);
+  // Boustrophedon CELLULAR DECOMPOSITION: group vertically-adjacent, x-overlapping
+  // intervals into "cells" (columns). Each cell is a gap-free strip swept fully
+  // before the next, so the machine never drives a WORKING pass through a cutout —
+  // it only TRANSITS (non-work) between cells. This keeps `totalWork` equal to the
+  // true field area (excluding the cutout), so the texture reveal fills exactly to
+  // completion instead of running out early.
+  interface Lane { y: number; xL: number; xR: number; }
+  const overlap = (aL: number, aR: number, bL: number, bR: number) => Math.min(aR, bR) - Math.max(aL, bL) > 1e-6;
+  const cells: Lane[][] = [];
+  let open: Lane[][] = [];
+  for (const { y, spans } of laneSpans) {
+    const nextOpen: Lane[][] = [];
+    const used = spans.map(() => false);
+    for (const cell of open) {
+      const last = cell[cell.length - 1]!;
+      const matches = spans.map((_, i) => i).filter((i) => !used[i] && overlap(last.xL, last.xR, spans[i]![0], spans[i]![1]));
+      // Clean 1-to-1 continuation only (a span not also claimed by another open
+      // cell). Splits/merges/dead-ends close the cell and open fresh ones.
+      if (matches.length === 1) {
+        const i = matches[0]!;
+        const contested = open.some((c) => c !== cell && overlap(c[c.length - 1]!.xL, c[c.length - 1]!.xR, spans[i]![0], spans[i]![1]));
+        if (!contested) {
+          used[i] = true;
+          cell.push({ y, xL: spans[i]![0], xR: spans[i]![1] });
+          nextOpen.push(cell);
+          continue;
+        }
+      }
+      cells.push(cell);
     }
-    localPts.push(start);
-    localPts.push(end);
+    for (let i = 0; i < spans.length; i++) {
+      if (!used[i]) nextOpen.push([{ y, xL: spans[i]![0], xR: spans[i]![1] }]);
+    }
+    open = nextOpen;
   }
-  // Per-SEGMENT field-work flags: a lane pass keeps the same y and changes x; a
-  // headland turn changes y. That cleanly separates work from turns.
-  const segInField: boolean[] = [];
-  for (let i = 0; i < localPts.length - 1; i++) {
-    const a = localPts[i]!;
-    const b = localPts[i + 1]!;
-    segInField.push(Math.abs(a[1] - b[1]) < 1e-6 && Math.abs(a[0] - b[0]) > 1e-6);
+  cells.push(...open);
+
+  // Emit the route: serpentine each cell, chained by a straight TRANSIT between
+  // cells and headland U-turns between lanes within a cell. `seg[i]` flags whether
+  // localPts[i]→[i+1] is a working pass (only lane passes are).
+  const localPts: Meters[] = [];
+  const seg: boolean[] = [];
+  const push = (p: Meters, inField: boolean) => {
+    if (localPts.length > 0) seg.push(inField);
+    localPts.push(p);
+  };
+  let prev: Meters | null = null;
+  for (const cell of cells) {
+    let lanes = cell.slice().sort((a, b) => a.y - b.y);
+    if (lanes.length === 0) continue;
+    // Enter the cell from whichever end (top/bottom lane) is nearer where we left
+    // off — less wasted transit, and it tends to keep transits inside the field.
+    if (prev && Math.abs(lanes[lanes.length - 1]!.y - prev[1]) < Math.abs(lanes[0]!.y - prev[1])) {
+      lanes = lanes.reverse();
+    }
+    let forward = true;
+    if (prev) {
+      const l0 = lanes[0]!;
+      forward = Math.hypot(l0.xL - prev[0], l0.y - prev[1]) <= Math.hypot(l0.xR - prev[0], l0.y - prev[1]);
+    }
+    for (let li = 0; li < lanes.length; li++) {
+      const lane = lanes[li]!;
+      const start: Meters = forward ? [lane.xL, lane.y] : [lane.xR, lane.y];
+      const end: Meters = forward ? [lane.xR, lane.y] : [lane.xL, lane.y];
+      if (localPts.length === 0) {
+        push(start, false);
+      } else if (li === 0) {
+        push(start, false); // straight transit between cells (non-work)
+      } else {
+        // Headland U-turn from the previous lane's end to this lane's start.
+        for (const q of turnArc(localPts[localPts.length - 1]!, start)) push(q, false);
+        push(start, false);
+      }
+      push(end, true);
+      prev = end;
+      forward = !forward;
+    }
+  }
+  if (localPts.length === 0) {
+    // Degenerate: no lane crossed the field — fall back to a single mid line.
+    push([minE, (minN + maxN) / 2], false);
+    push([maxE, (minN + maxN) / 2], true);
   }
 
   // Rotate the route back to meters.
@@ -134,12 +189,12 @@ export function buildCoveragePath(boundary: Meters[], swath: number): CoveragePa
     const b = pts[i + 1]!;
     const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
     total += len;
-    if (segInField[i]) totalWork += len;
+    if (seg[i]) totalWork += len;
     cum.push(total);
     work.push(totalWork);
   }
 
-  return { pts, cum, work, inField: segInField, total, totalWork, swath, angle };
+  return { pts, cum, work, inField: seg, total, totalWork, swath, angle };
 }
 
 /** Semicircular headland turn linking `from` (a lane end) to `to` (next lane
@@ -167,13 +222,12 @@ function turnArc(from: Meters, to: Meters): Meters[] {
   return out;
 }
 
-/** [xMin, xMax] where the horizontal line y=`y` crosses polygon `ring` (local
- * frame), or null if it doesn't. Uses the outermost crossings (robust for the
- * near-convex fields players draw; a concave notch is over-covered, which only
- * means a hair more sweep, never a gap). */
-function horizontalSpan(ring: Meters[], y: number): [number, number] | null {
-  let lo = Infinity;
-  let hi = -Infinity;
+/** The INSIDE x-intervals where the horizontal line y=`y` crosses polygon `ring`
+ * (local frame): all edge crossings sorted and paired (0–1, 2–3, …). A convex
+ * field gives one interval; a concave notch gives two (with the cutout as the
+ * gap between them), so the coverage path can skip it instead of sweeping across. */
+function horizontalSpans(ring: Meters[], y: number): Array<[number, number]> {
+  const xs: number[] = [];
   for (let i = 0; i < ring.length; i++) {
     const a = ring[i]!;
     const b = ring[(i + 1) % ring.length]!;
@@ -181,13 +235,15 @@ function horizontalSpan(ring: Meters[], y: number): [number, number] | null {
     const by = b[1];
     if (ay === by) continue;
     const t = (y - ay) / (by - ay);
-    if (t < 0 || t > 1) continue;
-    const x = a[0] + (b[0] - a[0]) * t;
-    if (x < lo) lo = x;
-    if (x > hi) hi = x;
+    if (t < 0 || t >= 1) continue; // half-open, so a shared vertex is counted once
+    xs.push(a[0] + (b[0] - a[0]) * t);
   }
-  if (lo === Infinity || hi <= lo) return null;
-  return [lo, hi];
+  xs.sort((p, q) => p - q);
+  const out: Array<[number, number]> = [];
+  for (let i = 0; i + 1 < xs.length; i += 2) {
+    if (xs[i + 1]! - xs[i]! > 1e-6) out.push([xs[i]!, xs[i + 1]!]);
+  }
+  return out;
 }
 
 export interface PathSample {

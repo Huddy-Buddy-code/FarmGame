@@ -72,6 +72,31 @@ describe("coverage path (serpentine fieldwork route)", () => {
     expect(Math.min(h, Math.abs(h - Math.PI))).toBeLessThan(0.05);
   });
 
+  // A rectangle with a rectangular bite cut out of one edge (a farmstead/yard).
+  const notched: Meters[] = [
+    [0, 0], [900, 0], [900, 450], [540, 450], [540, 315], [360, 315], [360, 450], [0, 450],
+  ];
+
+  it("skips a concave cutout: every WORKING lane stays inside the field", () => {
+    const path = buildCoveragePath(notched, 10);
+    for (let i = 0; i < path.pts.length - 1; i++) {
+      if (!path.inField[i]) continue; // transit/turn segments may cross the notch
+      const a = path.pts[i]!;
+      const b = path.pts[i + 1]!;
+      const mid: Meters = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+      expect(pointInPolygon(mid, notched)).toBe(true);
+    }
+  });
+
+  it("works the TRUE field area on a concave field (cutout excluded), not the bbox", () => {
+    const swath = 10;
+    const path = buildCoveragePath(notched, swath);
+    const swept = path.totalWork * swath;
+    const area = areaMeters(notched); // excludes the notch
+    expect(swept).toBeGreaterThan(area * 0.92);
+    expect(swept).toBeLessThan(area * 1.06);
+  });
+
   it("handles a field narrower than one swath (single pass)", () => {
     const sliver: Meters[] = [[0, 0], [300, 0], [300, 4], [0, 4]];
     const path = buildCoveragePath(sliver, 10);

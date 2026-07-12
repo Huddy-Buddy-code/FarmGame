@@ -29,7 +29,7 @@ import { drawFieldTexture } from "./field/fieldRender";
 import { distanceAtWork } from "./sim/coverage";
 import type { CoveragePath } from "./sim/coverage";
 import { persistGame, loadGame, clearSavedGame } from "./state/persistence";
-import { sellGrain } from "./sim/economy";
+import { sellGrain, sellBales, netWorth } from "./sim/economy";
 import { SimClock } from "./sim/clock";
 import {
   formatDate, dateOf, MONTH_NAMES, MONTH_SHORT,
@@ -38,15 +38,20 @@ import {
 } from "./sim/calendar";
 import {
   tickFarming, growthProgress, yieldRange, inPlantingWindow, canPlow,
+  hasStandingCrop, inWeedingWindow, canFertilizeNow,
 } from "./sim/farming";
 import {
   ensureAgents, initTaskIds, enqueueTask, cancelTask, taskCost, tasksFor,
   isFieldHarvesting, effectiveStatus, tickTasks, autoManageAll, autoManageField,
   buyAgent, sellAgent, buyImplement, sellImplement, attachImplement, detachImplement,
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
+  reorderTask, estimateTaskHours, forageDue, defaultPlan,
 } from "./sim/tasks";
 import type { EquipmentKind } from "./sim/tasks";
-import type { FarmTask, Agent, Implement, FieldStatus } from "./state/saveState";
+import {
+  tickLoans, borrowOpen, paydownOpen, paydownLoan, refinanceLoan,
+} from "./sim/finance";
+import type { FarmTask, Agent, Implement, FieldStatus, TaskType } from "./state/saveState";
 import { gameConfig } from "./config/gameConfig";
 import type { CropId, EquipmentSize } from "./config/gameConfig";
 
@@ -67,6 +72,10 @@ if (loaded) {
   save.tasks ??= [];
   save.agents ??= [];
   save.implements ??= [];
+  // Pre-finance saves: start the open borrowing year at whatever campaign
+  // year the save was loaded at (tickLoans self-corrects instantly either
+  // way, since a year with $0 pending never creates a loan).
+  save.finance ??= { openYear: dateOf(loaded.clockNow).year, pendingPrincipal: 0, loans: [] };
   initTaskIds(save);
   for (const id of loaded.harvestingIds ?? []) {
     const f = save.fields.find((x) => x.id === id);
@@ -148,6 +157,7 @@ async function main() {
     wireInventory();
     wireFieldsTab();
     wireEquipTab();
+    wireFinanceTab();
     wirePersistence();
     // Re-render every field from the loaded save (textures + outlines).
     for (const f of save.fields) renderField(map, overlay, f, clock.time());
@@ -224,6 +234,7 @@ function tickWorld(prev: number) {
   // queued work can start the same tick.
   autoManageAll(save, now);
   const work = tickTasks(save, now, dt);
+  tickLoans(save, now); // lock in a turned-over year, charge due monthly payments
   const allChanged = [...changed, ...work.changed];
   for (const f of allChanged) renderField(mapRef, overlay, f, now);
   repaintGrowthStages(now, allChanged);
@@ -239,6 +250,7 @@ function tickWorld(prev: number) {
     if (selectedFieldId) refreshFieldPanel();
     refreshFieldsTab();
     refreshEquipTab();
+    refreshFinanceTab();
     refreshQueuePanel();
   }
 }
@@ -314,6 +326,10 @@ function taskVerb(task: FarmTask): string {
     const c = task.crop ? gameConfig.crops[task.crop] : null;
     return c ? `planting ${c.name.toLowerCase()}` : "planting";
   }
+  if (task.type === "weed") return "weeding";
+  if (task.type === "fertilize") return "fertilizing";
+  if (task.type === "rake") return "raking";
+  if (task.type === "bale") return "baling";
   return "harvesting";
 }
 
@@ -353,18 +369,96 @@ function updateAgentMarkers(): void {
     }
     const el = marker.getElement();
     el.classList.toggle("working", agent.state === "working");
-    // Rotate the glyph to the driving heading. The SVGs are drawn facing WEST
-    // (front wheels / combine header on the left), and screen-y points down while
-    // meters-north points up, so the CSS rotation is (π − heading): driving east
-    // → 180°, north → 90° CW, etc.
+    // Point the glyph along the driving heading. The SVGs are drawn facing WEST,
+    // and screen-y points down while meters-north points up, so aligning to travel
+    // is a rotation of (π − heading). But that rolls the icon 180° upside-down when
+    // driving east — so instead of rotating past vertical, we MIRROR it horizontally
+    // (scaleX) and keep it upright. Machines mostly run east↔west, so this reads as
+    // "the tractor turned around," not "flipped over."
     const glyph = el.querySelector<HTMLElement>(".agent-glyph");
-    if (glyph && agent.heading !== undefined) glyph.style.transform = `rotate(${Math.PI - agent.heading}rad)`;
+    if (glyph && agent.heading !== undefined) {
+      let a = Math.atan2(Math.sin(Math.PI - agent.heading), Math.cos(Math.PI - agent.heading)); // (−π, π]
+      let sx = 1;
+      if (Math.abs(a) > Math.PI / 2) {
+        a -= Math.sign(a) * Math.PI; // bring rotation back within ±90°…
+        sx = -1; // …and mirror instead, so the icon stays upright
+      }
+      glyph.style.transform = `rotate(${a}rad) scaleX(${sx})`;
+    }
   }
   // Tear down markers for machines that were sold.
   for (const [id, marker] of agentMarkers) {
     if (!save.agents.some((a) => a.id === id)) {
       marker.remove();
       agentMarkers.delete(id);
+    }
+  }
+  updateBaleMarkers();
+}
+
+// ---------------------------------------------------------------------------
+// Bale markers: physical bales, each drawn at the exact spot the baler dropped it
+// (field.baleLocations). They accumulate live as the baler works and persist
+// until sold. Markers are appended incrementally as bales drop (no rebuild churn);
+// only a truly enormous field is subsampled, and then EVENLY so coverage stays
+// uniform rather than dropping the last-worked corner.
+// ---------------------------------------------------------------------------
+const MAX_BALE_MARKERS = 600; // per-field perf ceiling; real fields sit well under this
+
+/** A round hay bale: a stubby tan cylinder seen from the side. */
+function baleIconSvg(size = 14): string {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+    <ellipse cx="12" cy="13" rx="9" ry="8" fill="#d9c187" stroke="#9c8348" stroke-width="1.2"/>
+    <path d="M5 10.5c3 1.6 11 1.6 14 0M4 14c3.5 2 12.5 2 16 0" stroke="#b39a5c" stroke-width="0.9" fill="none"/>
+    <ellipse cx="12" cy="13" rx="3.4" ry="3" fill="#c7ad72" stroke="#9c8348" stroke-width="0.8"/>
+  </svg>`;
+}
+
+function makeBaleMarker(p: Meters): maplibregl.Marker {
+  const el = document.createElement("div");
+  el.className = "bale-dot";
+  el.innerHTML = baleIconSvg(14);
+  return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p)).addTo(mapRef!);
+}
+
+/** Markers for a field's bales — all of them, or an EVEN subsample if a field
+ * somehow tops the ceiling (uniform coverage, never a bare last corner). */
+function baleMarkersFor(locs: Meters[]): maplibregl.Marker[] {
+  if (locs.length <= MAX_BALE_MARKERS) return locs.map(makeBaleMarker);
+  const out: maplibregl.Marker[] = [];
+  for (let i = 0; i < MAX_BALE_MARKERS; i++) out.push(makeBaleMarker(locs[Math.floor((i * locs.length) / MAX_BALE_MARKERS)]!));
+  return out;
+}
+
+// `count` = how many baleLocations the markers currently represent.
+const baleMarkers = new Map<string, { count: number; markers: maplibregl.Marker[] }>();
+
+function updateBaleMarkers(): void {
+  if (!mapRef) return;
+  const wanted = new Set<string>();
+  for (const field of save.fields) {
+    const locs = field.baleLocations ?? [];
+    if (locs.length === 0) continue;
+    wanted.add(field.id);
+    const existing = baleMarkers.get(field.id);
+    if (existing && existing.count === locs.length) continue; // no change
+    if (!existing) {
+      baleMarkers.set(field.id, { count: locs.length, markers: baleMarkersFor(locs) });
+    } else if (locs.length > existing.count && locs.length <= MAX_BALE_MARKERS) {
+      // Common case while baling: just add markers for the NEW drops.
+      for (let i = existing.count; i < locs.length; i++) existing.markers.push(makeBaleMarker(locs[i]!));
+      existing.count = locs.length;
+    } else {
+      // Shrank (some sold), or crossed the subsample ceiling — rebuild.
+      for (const m of existing.markers) m.remove();
+      baleMarkers.set(field.id, { count: locs.length, markers: baleMarkersFor(locs) });
+    }
+  }
+  // Drop markers for fields that were sold or had their bales sold.
+  for (const [id, entry] of baleMarkers) {
+    if (!wanted.has(id)) {
+      for (const m of entry.markers) m.remove();
+      baleMarkers.delete(id);
     }
   }
 }
@@ -380,41 +474,56 @@ const ACRE_M2 = 4046.8564224;
 
 interface Reveal {
   taskId: string;
+  fieldId: string;
   baked: HTMLCanvasElement;
   /** How far along the route (full-route meters) we've stamped so far. */
   lastDist: number;
 }
-const reveals = new Map<string, Reveal>(); // keyed by fieldId
+// Keyed by TASK id — a single field can carry TWO concurrent reveals at once:
+// the rake laying windrows and the baler laying mulch behind it.
+const reveals = new Map<string, Reveal>();
 
 function revealTargetStatus(task: FarmTask): FieldStatus {
-  return task.type === "plow" ? "tilled" : task.type === "plant" ? "planted" : "harvested";
+  if (task.type === "plow") return "tilled";
+  if (task.type === "plant") return "planted";
+  if (task.type === "bale") return "mulched";
+  return "harvested";
 }
+
+/** Task types whose completion actually changes the field's texture — the only
+ * ones worth the reveal-stamping treatment. Weed/fertilize don't change
+ * status, so there's no "new" texture to reveal; the machine still visibly
+ * drives its coverage path, it just doesn't repaint anything as it goes. */
+const REVEALS_TEXTURE: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "rake", "bale"]);
 
 function updateReveals(): void {
   if (!overlay) return;
-  // Which field each active task is working right now.
-  const activeByField = new Map<string, FarmTask>();
-  for (const t of save.tasks) if (t.status === "active") activeByField.set(t.fieldId, t);
+  const activeTasks = save.tasks.filter((t) => t.status === "active" && REVEALS_TEXTURE.has(t.type));
+  const activeIds = new Set(activeTasks.map((t) => t.id));
 
-  // Drop reveals whose task ended or changed; stop animating that surface.
-  for (const [fid, r] of reveals) {
-    const t = activeByField.get(fid);
-    if (!t || t.id !== r.taskId) {
-      overlay.get(fid)?.setAnimating(false);
-      reveals.delete(fid);
+  // Drop reveals whose task ended; stop animating a surface only once NO reveal
+  // still uses it (a field may have both a rake and a baler reveal running).
+  for (const [tid, r] of reveals) {
+    if (!activeIds.has(tid)) {
+      reveals.delete(tid);
+      const stillRevealing = [...reveals.values()].some((x) => x.fieldId === r.fieldId);
+      if (!stillRevealing) overlay.get(r.fieldId)?.setAnimating(false);
     }
   }
 
-  for (const [fid, task] of activeByField) {
+  // Iterate in task order (rake enqueued before baler) so, where the baler has
+  // caught up to ground the rake already windrowed, its mulch stamp lands AFTER
+  // — and on top of — the windrows on the shared surface.
+  for (const task of activeTasks) {
     const agent = save.agents.find((a) => a.id === task.agentId);
     if (!agent || agent.state !== "working") continue; // reveal only while working
     const path = getCoveragePath(save, task);
-    const field = save.fields.find((f) => f.id === fid);
-    const surface = overlay.get(fid);
+    const field = save.fields.find((f) => f.id === task.fieldId);
+    const surface = overlay.get(task.fieldId);
     if (!path || !field || !surface) continue;
 
-    let r = reveals.get(fid);
-    if (!r || r.taskId !== task.id) {
+    let r = reveals.get(task.id);
+    if (!r) {
       const baked = document.createElement("canvas");
       baked.width = surface.canvas.width;
       baked.height = surface.canvas.height;
@@ -424,10 +533,13 @@ function updateReveals(): void {
         status: revealTargetStatus(task),
         crop: field.crop,
         progress: 0,
-        seed: hashSeed(fid),
+        // Raking reveals windrows over the harvested surface strip-by-strip; the
+        // baler then reveals clean/mulched over those windrows as it collects.
+        windrowed: task.type === "rake",
+        seed: hashSeed(task.fieldId),
       });
-      r = { taskId: task.id, baked, lastDist: 0 };
-      reveals.set(fid, r);
+      r = { taskId: task.id, fieldId: task.fieldId, baked, lastDist: 0 };
+      reveals.set(task.id, r);
       surface.setAnimating(true); // re-upload every frame while the sweep runs
     }
 
@@ -495,39 +607,103 @@ function lerpAlong(a: Meters, b: Meters, distA: number, distB: number, d: number
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
 }
 
-/** Rebuild the right-hand queue panel: each agent's status, then queued jobs. */
-let lastQueueKey = "";
+/** Task id currently being drag-reordered in the Jobs list, if any. */
+let draggingTaskId: string | null = null;
+
+function sectionDivider(label: string): HTMLElement {
+  const d = document.createElement("div");
+  d.className = "qp-sub";
+  d.textContent = label;
+  return d;
+}
+
+/** One row in the Jobs list. Active jobs are locked in place (an agent is
+ * already committed — reordering them would be meaningless/risky) and show
+ * the working machine's icon; queued jobs carry no icon, are drag-reorderable,
+ * and get a cancel button. */
+function buildQueueRow(task: FarmTask): HTMLElement {
+  const isActive = task.status === "active";
+  const agent = isActive && task.agentId ? save.agents.find((a) => a.id === task.agentId) : undefined;
+  const iconHtml = agent ? `<span class="icon">${(AGENT_ICON[agent.kind] ?? tractorIconSvg)(18)}</span>` : "";
+  const hours = estimateTaskHours(save, task);
+  const pct = (task.doneAcres / task.totalAcres) * 100;
+  const sub = isActive
+    ? `${task.totalAcres.toFixed(0)} ac · ${pct.toFixed(0)}% done · ${hours.toFixed(1)}h left`
+    : `${task.totalAcres.toFixed(0)} ac · waiting · ~${hours.toFixed(1)}h`;
+
+  const row = document.createElement("div");
+  row.className = "queue-row" + (isActive ? " active" : " queued");
+  row.innerHTML = `
+    ${iconHtml}
+    <span class="qr-info">
+      <div class="qr-name">${cap(taskVerb(task))} · ${prettyId(task.fieldId)}</div>
+      <div class="qr-sub">${sub}</div>
+      ${isActive ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
+    </span>`;
+
+  if (!isActive) {
+    row.draggable = true;
+    row.addEventListener("dragstart", (e) => {
+      draggingTaskId = task.id;
+      row.classList.add("dragging");
+      e.dataTransfer?.setData("text/plain", task.id);
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+    });
+    row.addEventListener("dragend", () => {
+      draggingTaskId = null;
+      row.classList.remove("dragging");
+    });
+    row.addEventListener("dragover", (e) => {
+      if (!draggingTaskId || draggingTaskId === task.id) return;
+      e.preventDefault();
+      row.classList.add("drag-over");
+    });
+    row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
+    row.addEventListener("drop", (e) => {
+      e.preventDefault();
+      row.classList.remove("drag-over");
+      if (!draggingTaskId || draggingTaskId === task.id) return;
+      try {
+        reorderTask(save, draggingTaskId, task.id);
+        lastQueueKey = " init";
+        refreshQueuePanel();
+      } catch (err) {
+        toast("❌ " + (err as Error).message, 3500);
+      }
+    });
+
+    const btn = document.createElement("button");
+    btn.className = "qr-cancel";
+    btn.textContent = "✕";
+    btn.title = task.costPaid > 0 ? `Cancel and refund $${task.costPaid.toLocaleString()}` : "Cancel";
+    btn.addEventListener("click", () => {
+      try {
+        cancelTask(save, task.id);
+        updateHud();
+        refreshQueuePanel();
+        if (selectedFieldId) refreshFieldPanel(true);
+        toast(task.costPaid > 0 ? `↩️ Canceled — $${task.costPaid.toLocaleString()} refunded` : "↩️ Canceled");
+      } catch (err) {
+        toast("❌ " + (err as Error).message, 3500);
+      }
+    });
+    row.appendChild(btn);
+  }
+
+  return row;
+}
+
+/** Rebuild the right-hand queue panel: Jobs only, split into a locked Active
+ * section (machines already committed) and a drag-reorderable Queued section
+ * (queue order = pickup priority). */
+let lastQueueKey = " init";
 function refreshQueuePanel(): void {
   // Skip DOM churn when nothing visible changed (1% progress buckets animate).
-  const key = save.agents
-    .map((a) => `${a.id}:${a.state}:${a.taskId ?? ""}`)
-    .concat(save.tasks.map((t) => `${t.id}:${t.status}:${Math.round((t.doneAcres / t.totalAcres) * 100)}`))
+  const key = save.tasks
+    .map((t) => `${t.id}:${t.status}:${t.agentId ?? ""}:${Math.round((t.doneAcres / t.totalAcres) * 100)}`)
     .join("|");
   if (key === lastQueueKey) return;
   lastQueueKey = key;
-
-  const agentsEl = $("agents-rows");
-  agentsEl.innerHTML = "";
-  for (const agent of save.agents) {
-    const task = agent.taskId ? save.tasks.find((t) => t.id === agent.taskId) : undefined;
-    let status = "Idle — waiting for work";
-    let pct: number | null = null;
-    if (task && agent.state === "traveling") status = `Driving to ${prettyId(task.fieldId)}…`;
-    else if (task && agent.state === "working") {
-      pct = (task.doneAcres / task.totalAcres) * 100;
-      status = `${cap(taskVerb(task))} ${prettyId(task.fieldId)}`;
-    }
-    const row = document.createElement("div");
-    row.className = "agent-row" + (agent.state === "idle" ? " idle" : "");
-    row.innerHTML = `
-      <span class="icon">${(AGENT_ICON[agent.kind] ?? tractorIconSvg)(18)}</span>
-      <span class="ar-info">
-        <div class="ar-name">${agent.name}</div>
-        <div class="ar-status">${status}</div>
-        ${pct !== null ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
-      </span>`;
-    agentsEl.appendChild(row);
-  }
 
   const rows = $("queue-rows");
   rows.innerHTML = "";
@@ -535,44 +711,39 @@ function refreshQueuePanel(): void {
     rows.innerHTML = `<div class="queue-empty">No jobs queued — plow, plant, or harvest a field.</div>`;
     return;
   }
-  for (const task of save.tasks) {
-    const pct = (task.doneAcres / task.totalAcres) * 100;
-    const icon =
-      task.type === "plant" && task.crop
-        ? gameConfig.crops[task.crop].emoji
-        : task.type === "harvest"
-          ? combineIconSvg(18)
-          : tractorIconSvg(18);
-    const row = document.createElement("div");
-    row.className = "queue-row" + (task.status === "active" ? " active" : "");
-    row.innerHTML = `
-      <span class="icon">${icon}</span>
-      <span class="qr-info">
-        <div class="qr-name">${cap(taskVerb(task))} · ${prettyId(task.fieldId)}</div>
-        <div class="qr-sub">${task.totalAcres.toFixed(0)} ac · ${
-          task.status === "active" ? `${pct.toFixed(0)}% done` : "waiting"
-        }</div>
-        ${task.status === "active" ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
-      </span>`;
-    if (task.status === "queued") {
-      const btn = document.createElement("button");
-      btn.className = "qr-cancel";
-      btn.textContent = "✕";
-      btn.title = task.costPaid > 0 ? `Cancel and refund $${task.costPaid.toLocaleString()}` : "Cancel";
-      btn.addEventListener("click", () => {
-        try {
-          cancelTask(save, task.id);
-          updateHud();
-          refreshQueuePanel();
-          if (selectedFieldId) refreshFieldPanel(true);
-          toast(task.costPaid > 0 ? `↩️ Canceled — $${task.costPaid.toLocaleString()} refunded` : "↩️ Canceled");
-        } catch (err) {
-          toast("❌ " + (err as Error).message, 3500);
-        }
-      });
-      row.appendChild(btn);
-    }
-    rows.appendChild(row);
+
+  const active = save.tasks.filter((t) => t.status === "active");
+  const queued = save.tasks.filter((t) => t.status === "queued");
+
+  if (active.length > 0) {
+    rows.appendChild(sectionDivider("Active"));
+    for (const task of active) rows.appendChild(buildQueueRow(task));
+  }
+  if (queued.length > 0) {
+    rows.appendChild(sectionDivider("Queued"));
+    for (const task of queued) rows.appendChild(buildQueueRow(task));
+    // A trailing drop target so a job can be dragged to the back of the queue.
+    const tail = document.createElement("div");
+    tail.className = "queue-tail";
+    tail.addEventListener("dragover", (e) => {
+      if (!draggingTaskId) return;
+      e.preventDefault();
+      tail.classList.add("drag-over");
+    });
+    tail.addEventListener("dragleave", () => tail.classList.remove("drag-over"));
+    tail.addEventListener("drop", (e) => {
+      e.preventDefault();
+      tail.classList.remove("drag-over");
+      if (!draggingTaskId) return;
+      try {
+        reorderTask(save, draggingTaskId, undefined);
+        lastQueueKey = " init";
+        refreshQueuePanel();
+      } catch (err) {
+        toast("❌ " + (err as Error).message, 3500);
+      }
+    });
+    rows.appendChild(tail);
   }
 }
 
@@ -586,8 +757,9 @@ function cap(s: string): string {
 function updateHud() {
   $("hud-date").textContent = formatDate(clock.time());
   $("hud-cash").textContent = "$" + Math.round(save.money).toLocaleString();
-  $("hud-corn").textContent = save.grain.corn.toFixed(1) + " t";
-  $("hud-soy").textContent = save.grain.soybeans.toFixed(1) + " t";
+  $("hud-networth").textContent = "$" + Math.round(netWorth(save).total).toLocaleString();
+  const totalGrain = Object.values(save.grain).reduce((sum, t) => sum + t, 0);
+  $("hud-grain").textContent = totalGrain.toFixed(1) + " t";
 
   // Year-position marker: fraction of the display year (Mar → Feb) elapsed.
   const f = yearFraction(clock.time());
@@ -627,7 +799,7 @@ function toast(text: string, ms = 2600) {
 // The four bottom-toolbar panels are MUTUALLY EXCLUSIVE — opening one closes any
 // other. Clicking the active panel's own button closes it (toggle).
 // ---------------------------------------------------------------------------
-const TOOLBAR_PANELS = ["fieldstab", "equiptab", "cropcal", "inventory"];
+const TOOLBAR_PANELS = ["fieldstab", "equiptab", "cropcal", "inventory", "financetab"];
 function toggleToolbarPanel(id: string, onOpen?: () => void): void {
   const opening = $(id).style.display !== "block";
   for (const p of TOOLBAR_PANELS) $(p).style.display = "none";
@@ -673,6 +845,146 @@ function refreshInventory() {
       toast(`💰 Sold ${sold.toFixed(1)} t of ${cfg.name.toLowerCase()} for $${revenue.toLocaleString()}`);
     });
     row.appendChild(btn);
+    rows.appendChild(row);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Finance tab: loans (brief §8). One OPEN balance for the current campaign
+// year, grown/shrunk with +/-$50k clicks (cash moves immediately); it locks
+// in as its own 5%/15-year loan the moment the year turns. Locked loans list
+// below, newest first — each pays down independently and can be refinanced.
+// ---------------------------------------------------------------------------
+function wireFinanceTab() {
+  $("btn-finance").addEventListener("click", () => toggleToolbarPanel("financetab", () => refreshFinanceTab(true)));
+  $("finance-close").addEventListener("click", () => ($("financetab").style.display = "none"));
+}
+
+function loanAmtLabel(n: number): string {
+  return n % 1000 === 0 ? `$${(n / 1000).toFixed(0)}k` : `$${n.toLocaleString()}`;
+}
+
+let lastFinanceKey = "";
+function refreshFinanceTab(force = false) {
+  const el = $("financetab");
+  if (el.style.display !== "block") return;
+
+  const key =
+    `${save.finance.openYear}:${Math.round(save.finance.pendingPrincipal)}` +
+    "#" +
+    save.finance.loans.map((l) => `${l.id}:${Math.round(l.principal)}:${Math.round(l.monthlyPayment)}`).join(",") +
+    `|$${Math.round(save.money)}`;
+  if (!force && key === lastFinanceKey) return;
+  lastFinanceKey = key;
+
+  const rows = $("finance-rows");
+  rows.innerHTML = "";
+  const inc = gameConfig.loan.incrementAmount;
+
+  // --- This year's open (not-yet-locked) borrowing ---
+  const pending = save.finance.pendingPrincipal;
+  const openRow = document.createElement("div");
+  openRow.className = "loan-row";
+  openRow.innerHTML = `
+    <div class="lr-top">
+      <span class="lr-icon">🏦</span>
+      <span class="lr-info">
+        <div class="lr-name">Year ${save.finance.openYear} borrowing</div>
+        <div class="lr-sub">${
+          pending > 0
+            ? `$${pending.toLocaleString()} — locks in as a ${gameConfig.loan.termMonths / 12}-yr loan at ${gameConfig.loan.ratePercent}% when the year turns`
+            : "Nothing borrowed yet this year"
+        }</div>
+      </span>
+    </div>`;
+  const openActions = document.createElement("div");
+  openActions.className = "lr-actions";
+  const borrowBtn = document.createElement("button");
+  borrowBtn.className = "amt-btn borrow";
+  borrowBtn.textContent = `+ ${loanAmtLabel(inc)}`;
+  borrowBtn.title = `Borrow ${loanAmtLabel(inc)} now`;
+  borrowBtn.addEventListener("click", () => {
+    borrowOpen(save, inc);
+    updateHud();
+    refreshFinanceTab(true);
+  });
+  openActions.appendChild(borrowBtn);
+  const openPayAmount = Math.min(inc, pending);
+  const openPayBtn = document.createElement("button");
+  openPayBtn.className = "amt-btn payoff";
+  openPayBtn.textContent = `− ${loanAmtLabel(inc)}`;
+  openPayBtn.disabled = openPayAmount <= 0 || openPayAmount > save.money;
+  openPayBtn.title = openPayAmount <= 0 ? "Nothing pending to pay down" : `Pay down ${loanAmtLabel(openPayAmount)}`;
+  openPayBtn.addEventListener("click", () => {
+    try {
+      paydownOpen(save, inc);
+      updateHud();
+      refreshFinanceTab(true);
+    } catch (err) {
+      toast("❌ " + (err as Error).message, 3500);
+    }
+  });
+  openActions.appendChild(openPayBtn);
+  openRow.appendChild(openActions);
+  rows.appendChild(openRow);
+
+  // --- Locked loans, newest first ---
+  const loans = [...save.finance.loans].sort((a, b) => b.originYear - a.originYear);
+  for (const loan of loans) {
+    const row = document.createElement("div");
+    row.className = "loan-row";
+    row.innerHTML = `
+      <div class="lr-top">
+        <span class="lr-icon">🏦</span>
+        <span class="lr-info">
+          <div class="lr-name">Year ${loan.originYear} loan</div>
+          <div class="lr-sub">$${Math.round(loan.principal).toLocaleString()} owed · $${Math.round(loan.monthlyPayment).toLocaleString()}/mo · ${loan.ratePercent}%</div>
+        </span>
+      </div>`;
+
+    const actions = document.createElement("div");
+    actions.className = "lr-actions";
+    const payAmount = Math.min(inc, loan.principal);
+    const payBtn = document.createElement("button");
+    payBtn.className = "amt-btn payoff";
+    payBtn.style.width = "100%";
+    payBtn.textContent = payAmount < inc ? `Pay off remaining $${Math.round(payAmount).toLocaleString()}` : `− ${loanAmtLabel(inc)}`;
+    payBtn.disabled = payAmount > save.money;
+    payBtn.addEventListener("click", () => {
+      try {
+        const payingOff = payAmount >= loan.principal - 0.01;
+        paydownLoan(save, loan.id, inc);
+        updateHud();
+        refreshFinanceTab(true);
+        toast(payingOff ? `💰 Paid off the Year ${loan.originYear} loan` : `💰 Paid down the Year ${loan.originYear} loan`);
+      } catch (err) {
+        toast("❌ " + (err as Error).message, 3500);
+      }
+    });
+    actions.appendChild(payBtn);
+    row.appendChild(actions);
+
+    // Refinance: only on locked loans, deliberately smaller, and the one
+    // button that warns + requires confirmation (maintainer request — the
+    // +/- buttons stay silent so rapid clicking isn't interrupted).
+    const refi = document.createElement("button");
+    refi.className = "refi-btn";
+    refi.textContent = `🔄 Refinance · $${gameConfig.loan.refinanceFee.toLocaleString()} fee`;
+    refi.addEventListener("click", () => {
+      const ok = confirm(
+        `Refinance the Year ${loan.originYear} loan?\n\n` +
+          `This resets it to a fresh ${gameConfig.loan.termMonths / 12}-year term at ${loan.ratePercent}% and ` +
+          `recalculates the monthly payment from the current balance. A $${gameConfig.loan.refinanceFee.toLocaleString()} ` +
+          `fee gets added to the loan's principal — it isn't charged in cash.`,
+      );
+      if (!ok) return;
+      refinanceLoan(save, loan.id);
+      updateHud();
+      refreshFinanceTab(true);
+      toast(`🔄 Refinanced the Year ${loan.originYear} loan`);
+    });
+    row.appendChild(refi);
+
     rows.appendChild(row);
   }
 }
@@ -837,6 +1149,53 @@ function buildEquipShop(): void {
     );
   }
 
+  const planters = group("Planters", "🌱");
+  for (const size of SIZES) {
+    const price = implementPrice("planter", size);
+    const ft = gameConfig.equipment.planter[size].widthFt;
+    planters.appendChild(
+      buyButton(`${SIZE_LABEL[size]} · ${ft}ft`, price, () => {
+        const i = buyImplement(save, "planter", size);
+        afterFleetChange();
+        toast(`Bought ${implementName(save, i)} — parked in the yard`);
+      }),
+    );
+  }
+
+  // Sprayers only come in Medium/Large (design choice — a big-acreage tool).
+  const sprayers = group("Sprayers", "💦");
+  for (const size of ["medium", "large"] as EquipmentSize[]) {
+    const price = implementPrice("sprayer", size);
+    const ft = gameConfig.equipment.sprayer[size].widthFt;
+    sprayers.appendChild(
+      buyButton(`${SIZE_LABEL[size]} · ${ft}ft`, price, () => {
+        const i = buyImplement(save, "sprayer", size);
+        afterFleetChange();
+        toast(`Bought ${implementName(save, i)} — parked in the yard`);
+      }),
+    );
+  }
+
+  // Rake & baler: single-size forage tools (25 ft). Rake windrows a harvested
+  // forage field; the baler follows and drops bales you sell from the field.
+  const rakes = group("Rakes", "🧹");
+  rakes.appendChild(
+    buyButton(`Small · ${gameConfig.equipment.rake.small.widthFt}ft`, implementPrice("rake", "small"), () => {
+      const i = buyImplement(save, "rake", "small");
+      afterFleetChange();
+      toast(`Bought ${implementName(save, i)} — parked in the yard`);
+    }),
+  );
+
+  const balers = group("Balers", "📦");
+  balers.appendChild(
+    buyButton(`Medium · ${gameConfig.equipment.bailer.medium.widthFt}ft`, implementPrice("bailer", "medium"), () => {
+      const i = buyImplement(save, "bailer", "medium");
+      afterFleetChange();
+      toast(`Bought ${implementName(save, i)} — parked in the yard`);
+    }),
+  );
+
   const combine = group("Combine", combineIconSvg(16));
   const cprice = gameConfig.equipment.harvester.price;
   combine.appendChild(
@@ -904,18 +1263,20 @@ function buildEquipMachines(): void {
   }
 }
 
-/** IMPLEMENTS you attach: every plow, with a selector to hitch it to a tractor
- * (or park it in the yard) and a sell button. */
+const IMPLEMENT_ICON: Record<string, string> = { plow: "🔧", planter: "🌱", sprayer: "💦", rake: "🧹", bailer: "📦" };
+
+/** IMPLEMENTS you attach: every plow/planter, with a selector to hitch it to a
+ * tractor (or park it in the yard) and a sell button. */
 function buildEquipImplements(): void {
   const rows = $("equip-implements");
   rows.innerHTML = "";
-  const plows = save.implements.filter((i) => i.kind === "plow");
-  if (plows.length === 0) {
-    rows.innerHTML = `<div id="fields-empty">No implements — buy a plow so a tractor can till.</div>`;
+  const implements_ = save.implements;
+  if (implements_.length === 0) {
+    rows.innerHTML = `<div id="fields-empty">No implements — buy a plow and a planter so a tractor can till and seed.</div>`;
     return;
   }
-  for (const impl of plows) {
-    const ft = gameConfig.equipment.plow[impl.size].widthFt;
+  for (const impl of implements_) {
+    const ft = gameConfig.equipment[impl.kind][impl.size].widthFt;
     const host = impl.attachedTo ? save.agents.find((a) => a.id === impl.attachedTo) : undefined;
     const where = host ? `On ${host.name}` : "In the yard";
     const refund = impl.purchaseCost ?? implementPrice(impl.kind, impl.size);
@@ -923,7 +1284,7 @@ function buildEquipImplements(): void {
     const row = document.createElement("div");
     row.className = "equip-row implement";
     row.innerHTML = `
-      <span class="icon">🔧</span>
+      <span class="icon">${IMPLEMENT_ICON[impl.kind] ?? "🔧"}</span>
       <span class="er-info">
         <div class="er-name">${implementName(save, impl)}</div>
         <div class="er-status">${where} · ${ft} ft wide</div>
@@ -1275,12 +1636,14 @@ function wireFieldSelection(map: maplibregl.Map) {
     if (!field) return;
     field.autoManage = (e.target as HTMLInputElement).checked;
     if (field.autoManage) {
+      // Seed a starter rotation plan the first time it's switched on.
+      if (!field.plans || field.plans.length === 0) field.plans = [defaultPlan()];
       // Act immediately rather than waiting for the next tick, so flipping the
       // switch feels responsive.
       autoManageField(save, field, clock.time());
       renderField(mapRef, overlay, field, clock.time());
       updateHud();
-      toast(`🤖 ${prettyId(field.id)} will manage itself — plow, plant, harvest`);
+      toast(`🤖 ${prettyId(field.id)} will run its rotation plan`);
     } else {
       toast(`🖐️ ${prettyId(field.id)} is back to manual control`);
     }
@@ -1320,7 +1683,7 @@ function fieldMsg(text: string) {
 }
 
 /** Queue a task from a panel button, with shared feedback plumbing. */
-function queueFromPanel(field: Field, type: "plow" | "plant" | "harvest", crop?: CropId): void {
+function queueFromPanel(field: Field, type: "plow" | "plant" | "harvest" | "weed" | "fertilize" | "rake" | "bale", crop?: CropId): void {
   try {
     const task = enqueueTask(save, field, type, clock.time(), crop);
     updateHud();
@@ -1331,6 +1694,109 @@ function queueFromPanel(field: Field, type: "plow" | "plant" | "harvest", crop?:
   } catch (err) {
     fieldMsg((err as Error).message);
   }
+}
+
+// --- Rotation planner (the auto-manage designer) ---------------------------
+let lastPlansKey = "";
+
+/** Force the planner (and panel) to rebuild after an edit. */
+function editPlans(): void {
+  lastPlansKey = "";
+  refreshFieldPanel(true);
+}
+
+/** Render the field's rotation plans into #fp-plans — one row per campaign year,
+ * each with a crop and the optional-operation toggles. Own change-detection so
+ * its dropdowns aren't rebuilt under the cursor on every tick. */
+function refreshPlanEditor(field: Field, now: number, auto: boolean): void {
+  const container = $("fp-plans");
+  const key = [field.id, auto ? 1 : 0, dateOf(now).year, JSON.stringify(field.plans ?? [])].join("|");
+  if (key === lastPlansKey) return;
+  lastPlansKey = key;
+  container.innerHTML = "";
+  if (!auto) return;
+
+  if (!field.plans || field.plans.length === 0) field.plans = [defaultPlan()];
+  const plans = field.plans;
+  const activeIdx = (dateOf(now).year - 1) % plans.length;
+
+  container.insertAdjacentHTML(
+    "beforeend",
+    `<div class="plan-hint">Rotation — one plan per year, loops after Yr ${plans.length}. Running Yr ${activeIdx + 1} now.</div>`,
+  );
+
+  const ops: Array<{ prop: "weed" | "fertilize" | "bale"; icon: string; title: string }> = [
+    { prop: "weed", icon: "💦", title: "Weed once, when the window opens" },
+    { prop: "fertilize", icon: "🌿", title: "Fertilize once, the month after planting" },
+    { prop: "bale", icon: "📦", title: "Rake + bale the residue after harvest (forage crops)" },
+  ];
+
+  plans.forEach((plan, i) => {
+    const row = document.createElement("div");
+    row.className = "plan-row" + (i === activeIdx ? " active" : "");
+
+    const yr = document.createElement("span");
+    yr.className = "plan-yr";
+    yr.textContent = "Yr" + (i + 1);
+    row.appendChild(yr);
+
+    const sel = document.createElement("select");
+    sel.className = "plan-crop";
+    for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
+      const opt = document.createElement("option");
+      opt.value = cropId;
+      opt.textContent = `${gameConfig.crops[cropId].emoji} ${gameConfig.crops[cropId].name}`;
+      if (cropId === plan.crop) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener("change", () => {
+      plan.crop = sel.value as CropId;
+      if (!gameConfig.crops[plan.crop].producesForage) plan.bale = false; // baling is forage-only
+      editPlans();
+    });
+    row.appendChild(sel);
+
+    for (const o of ops) {
+      const b = document.createElement("button");
+      const forageOnly = o.prop === "bale" && !gameConfig.crops[plan.crop].producesForage;
+      b.className = "plan-op" + (plan[o.prop] ? " on" : "");
+      b.textContent = o.icon;
+      b.title = forageOnly ? "Only forage crops (e.g. corn) can be baled" : o.title;
+      b.disabled = forageOnly;
+      b.addEventListener("click", () => {
+        plan[o.prop] = !plan[o.prop];
+        editPlans();
+      });
+      row.appendChild(b);
+    }
+
+    if (plans.length > 1) {
+      const del = document.createElement("button");
+      del.className = "plan-del";
+      del.textContent = "✕";
+      del.title = "Remove this rotation year";
+      del.addEventListener("click", () => {
+        plans.splice(i, 1);
+        editPlans();
+      });
+      row.appendChild(del);
+    }
+    container.appendChild(row);
+  });
+
+  const add = document.createElement("button");
+  add.className = "plan-add";
+  add.textContent = "＋ Add rotation year";
+  add.disabled = plans.length >= 5;
+  add.addEventListener("click", () => {
+    if (plans.length >= 5) return;
+    // Default the new year to a DIFFERENT crop for an easy rotation.
+    const crops = Object.keys(gameConfig.crops) as CropId[];
+    const nextCrop = crops.find((c) => c !== plans[plans.length - 1]!.crop) ?? crops[0]!;
+    plans.push({ crop: nextCrop, bale: !!gameConfig.crops[nextCrop].producesForage });
+    editPlans();
+  });
+  container.appendChild(add);
 }
 
 /** Rebuild the panel contents from the selected field's current state. */
@@ -1357,7 +1823,11 @@ function refreshFieldPanel(force = false) {
     Math.round(growthProgress(field, now) * 100),
     dateOf(now).month, // planting windows open/close on month boundaries
     Math.round(save.money), // affordability of input costs
+    field.forageReady ? 1 : 0, field.windrowed ? 1 : 0, field.baleLocations?.length ?? 0, // forage/bale state
   ].join("|");
+  // The rotation planner has its OWN change-detection (below) so its dropdowns
+  // don't get rebuilt under the cursor on every money/status tick.
+  refreshPlanEditor(field, now, auto);
   if (!force && key === lastPanelKey) return;
   lastPanelKey = key;
 
@@ -1389,49 +1859,98 @@ function refreshFieldPanel(force = false) {
     );
   }
 
-  if (canPlow(eff)) {
-    // --- Plow first (§10 lifecycle: stubble → tilled → planted) ---
-    const cost = taskCost(field, "plow");
-    if (auto) {
-      body.insertAdjacentHTML("beforeend", `<div class="auto-note">🤖 Will queue plowing (needs $${cost.toLocaleString()})…</div>`);
+  // --- Bales sitting in the field (persist until sold) — the field's market ---
+  const bales = field.baleLocations?.length ?? 0;
+  if (bales > 0) {
+    const value = Math.round(bales * gameConfig.forage.balePricePerBale);
+    const tons = (bales * gameConfig.forage.baleTons).toFixed(0);
+    body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">📦 <b>${bales}</b> bales (${tons} t) · $${gameConfig.forage.balePricePerBale.toLocaleString()}/bale</div>`);
+    const btn = document.createElement("button");
+    btn.className = "primary";
+    btn.innerHTML = `💰 Sell Bales <span class="small">$${value.toLocaleString()}</span>`;
+    btn.addEventListener("click", () => {
+      const { bales: sold, revenue } = sellBales(save, field);
+      if (sold <= 0) return;
+      updateHud();
+      refreshFieldPanel(true);
+      updateBaleMarkers();
+      toast(`💰 Sold ${sold} bales for $${revenue.toLocaleString()}`);
+    });
+    actions.appendChild(btn);
+  }
+
+  // --- Manual controls (only when NOT auto-managed; the planner drives the rest). ---
+  // --- Forage loop: a harvested forage field gets raked + baled before it can
+  // re-plow (only when the farm owns the gear; otherwise it just plows under). ---
+  if (!auto && field.status === "harvested" && field.forageReady) {
+    if (forageDue(save, field)) {
+      const rakeCost = taskCost(field, "rake");
+      const baleCost = taskCost(field, "bale");
+      body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">Rake, then bale the forage (the baler follows the rake). Baling drops bales you can sell.</div>`);
+      const row = document.createElement("div");
+      row.className = "cropbtns";
+      const hasRake = tasksFor(save, field.id, "rake").length > 0;
+      const hasBale = tasksFor(save, field.id, "bale").length > 0;
+      if (!hasRake) {
+        const btn = document.createElement("button");
+        btn.innerHTML = `🧹 Rake<br><span class="small">$${rakeCost.toLocaleString()}</span>`;
+        btn.addEventListener("click", () => queueFromPanel(field, "rake"));
+        row.appendChild(btn);
+      }
+      if (!hasBale) {
+        const btn = document.createElement("button");
+        btn.innerHTML = `📦 Bale<br><span class="small">$${baleCost.toLocaleString()}</span>`;
+        const canBale = field.windrowed || hasRake;
+        if (!canBale) {
+          btn.disabled = true;
+          btn.title = "Rake the field first — the baler follows the rake";
+          btn.style.opacity = "0.45";
+        }
+        btn.addEventListener("click", () => queueFromPanel(field, "bale"));
+        row.appendChild(btn);
+      }
+      if (row.children.length > 0) body.appendChild(row);
     } else {
-      body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">Plow to prepare for planting.</div>`);
-      const btn = document.createElement("button");
-      btn.className = "primary";
-      btn.innerHTML = `🚜 Queue Plow <span class="small">$${cost.toLocaleString()}</span>`;
-      btn.addEventListener("click", () => queueFromPanel(field, "plow"));
-      actions.appendChild(btn);
+      body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">Forage left on the field. Buy a 🧹 rake &amp; 📦 baler to bale it, or plow it under.</div>`);
     }
   }
 
-  if (eff === "tilled") {
-    if (auto) {
-      body.insertAdjacentHTML("beforeend", `<div class="auto-note">🤖 Waiting for a planting window…</div>`);
-    } else {
-      // --- Plant chooser (queues a task for the tractor) ---
-      body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">Plant a crop:</div>`);
-      const row = document.createElement("div");
-      row.className = "cropbtns";
-      for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
-        const cfg = gameConfig.crops[cropId];
-        const cost = taskCost(field, "plant", cropId);
-        const btn = document.createElement("button");
-        const open = inPlantingWindow(cropId, now);
-        btn.innerHTML = `${cfg.emoji} ${cfg.name}<br><span class="small">$${cost.toLocaleString()}</span>`;
-        if (!open) {
-          btn.disabled = true;
-          btn.title = `Plant in ${cfg.plantMonths.map((mo) => MONTH_SHORT[mo]).join("–")}`;
-          btn.style.opacity = "0.45";
-        }
-        btn.addEventListener("click", () => queueFromPanel(field, "plant", cropId));
-        row.appendChild(btn);
+  const plowable = canPlow(eff) && !(eff === "harvested" && forageDue(save, field));
+  if (!auto && plowable) {
+    // --- Plow first (§10 lifecycle: stubble → tilled → planted) ---
+    const cost = taskCost(field, "plow");
+    body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">Plow to prepare for planting.</div>`);
+    const btn = document.createElement("button");
+    btn.className = "primary";
+    btn.innerHTML = `🚜 Queue Plow <span class="small">$${cost.toLocaleString()}</span>`;
+    btn.addEventListener("click", () => queueFromPanel(field, "plow"));
+    actions.appendChild(btn);
+  }
+
+  if (!auto && eff === "tilled") {
+    // --- Plant chooser (queues a task for the tractor) ---
+    body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">Plant a crop:</div>`);
+    const row = document.createElement("div");
+    row.className = "cropbtns";
+    for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
+      const cfg = gameConfig.crops[cropId];
+      const cost = taskCost(field, "plant", cropId);
+      const btn = document.createElement("button");
+      const open = inPlantingWindow(cropId, now);
+      btn.innerHTML = `${cfg.emoji} ${cfg.name}<br><span class="small">$${cost.toLocaleString()}</span>`;
+      if (!open) {
+        btn.disabled = true;
+        btn.title = `Plant in ${cfg.plantMonths.map((mo) => MONTH_SHORT[mo]).join("–")}`;
+        btn.style.opacity = "0.45";
       }
-      body.appendChild(row);
-      const windows = (Object.keys(gameConfig.crops) as CropId[])
-        .map((c) => `${gameConfig.crops[c].emoji} ${gameConfig.crops[c].plantMonths.map((mo) => MONTH_SHORT[mo]).join("–")}`)
-        .join("   ");
-      body.insertAdjacentHTML("beforeend", `<div class="small">${windows}</div>`);
+      btn.addEventListener("click", () => queueFromPanel(field, "plant", cropId));
+      row.appendChild(btn);
     }
+    body.appendChild(row);
+    const windows = (Object.keys(gameConfig.crops) as CropId[])
+      .map((c) => `${gameConfig.crops[c].emoji} ${gameConfig.crops[c].plantMonths.map((mo) => MONTH_SHORT[mo]).join("–")}`)
+      .join("   ");
+    body.insertAdjacentHTML("beforeend", `<div class="small">${windows}</div>`);
   }
 
   if (field.crop) {
@@ -1455,16 +1974,46 @@ function refreshFieldPanel(force = false) {
     }
     body.insertAdjacentHTML("beforeend", html);
 
-    if (field.status === "ready" && tasksFor(save, field.id, "harvest").length === 0) {
-      if (auto) {
-        body.insertAdjacentHTML("beforeend", `<div class="auto-note">🤖 Harvest will be queued automatically…</div>`);
-      } else {
+    // --- Weed & fertilize: independent side-tasks, no chaining with the
+    // plow/plant/harvest lifecycle. Only offered while the crop is standing. ---
+    if (!auto && hasStandingCrop(field.status)) {
+      const row = document.createElement("div");
+      row.className = "cropbtns";
+      if (tasksFor(save, field.id, "weed").length === 0) {
+        const cost = taskCost(field, "weed");
+        const open = inWeedingWindow(now);
         const btn = document.createElement("button");
-        btn.className = "primary";
-        btn.textContent = "🌾 Queue Harvest";
-        btn.addEventListener("click", () => queueFromPanel(field, "harvest"));
-        actions.appendChild(btn);
+        btn.innerHTML = `💦 Weed<br><span class="small">$${cost.toLocaleString()}</span>`;
+        if (!open) {
+          btn.disabled = true;
+          btn.title = "Weeding opens in June";
+          btn.style.opacity = "0.45";
+        }
+        btn.addEventListener("click", () => queueFromPanel(field, "weed"));
+        row.appendChild(btn);
       }
+      if (tasksFor(save, field.id, "fertilize").length === 0) {
+        const cost = taskCost(field, "fertilize");
+        const open = canFertilizeNow(field, now);
+        const btn = document.createElement("button");
+        btn.innerHTML = `🌿 Fertilize<br><span class="small">$${cost.toLocaleString()}</span>`;
+        if (!open) {
+          btn.disabled = true;
+          btn.title = "Opens the month after planting";
+          btn.style.opacity = "0.45";
+        }
+        btn.addEventListener("click", () => queueFromPanel(field, "fertilize"));
+        row.appendChild(btn);
+      }
+      if (row.children.length > 0) body.appendChild(row);
+    }
+
+    if (!auto && field.status === "ready" && tasksFor(save, field.id, "harvest").length === 0) {
+      const btn = document.createElement("button");
+      btn.className = "primary";
+      btn.textContent = "🌾 Queue Harvest";
+      btn.addEventListener("click", () => queueFromPanel(field, "harvest"));
+      actions.appendChild(btn);
     }
   }
 }
@@ -1473,7 +2022,132 @@ function prettyId(id: string): string {
   return id.replace("-", " ").replace(/^\w/, (c) => c.toUpperCase());
 }
 
+// --- To-do list management ---
+let todoCollapsed = false;
+
+function renderTodos(): void {
+  if (!save) return;
+  const todos = save.todos ?? [];
+  const container = $("todo-items");
+  container.innerHTML = "";
+
+  const active = todos.filter((t) => !t.done);
+  const done = todos.filter((t) => t.done);
+
+  // Active items first
+  for (const todo of active) {
+    const item = document.createElement("div");
+    item.className = "todo-item";
+    item.innerHTML = `
+      <input type="checkbox" />
+      <div class="text">${escapeHtml(todo.text)}</div>
+      <div class="del">✕</div>
+    `;
+    const checkbox = item.querySelector("input[type='checkbox']") as HTMLInputElement;
+    const text = item.querySelector(".text") as HTMLElement;
+    const del = item.querySelector(".del") as HTMLElement;
+
+    checkbox.addEventListener("change", () => toggleTodo(todo.id));
+    text.addEventListener("click", () => toggleTodo(todo.id));
+    del.addEventListener("click", () => deleteTodo(todo.id));
+
+    container.appendChild(item);
+  }
+
+  // Done items at the bottom
+  if (done.length > 0) {
+    for (const todo of done) {
+      const item = document.createElement("div");
+      item.className = "todo-item done";
+      item.innerHTML = `
+        <input type="checkbox" checked />
+        <div class="text done">${escapeHtml(todo.text)}</div>
+        <div class="del">✕</div>
+      `;
+      const checkbox = item.querySelector("input[type='checkbox']") as HTMLInputElement;
+      const text = item.querySelector(".text") as HTMLElement;
+      const del = item.querySelector(".del") as HTMLElement;
+
+      checkbox.addEventListener("change", () => toggleTodo(todo.id));
+      text.addEventListener("click", () => toggleTodo(todo.id));
+      del.addEventListener("click", () => deleteTodo(todo.id));
+
+      container.appendChild(item);
+    }
+  }
+}
+
+function addTodo(text: string): void {
+  if (!save || !text.trim()) return;
+  if (!save.todos) save.todos = [];
+  save.todos.push({
+    id: `todo-${Date.now()}-${Math.random()}`,
+    text: text.trim(),
+    done: false,
+  });
+  ($("todo-input") as HTMLInputElement).value = "";
+  renderTodos();
+  persistGame({ save, clockNow: clock.time(), daysPerMonth: getDaysPerMonth() });
+}
+
+function deleteTodo(id: string): void {
+  if (!save || !save.todos) return;
+  save.todos = save.todos.filter((t) => t.id !== id);
+  renderTodos();
+  persistGame({ save, clockNow: clock.time(), daysPerMonth: getDaysPerMonth() });
+}
+
+function toggleTodo(id: string): void {
+  if (!save || !save.todos) return;
+  const todo = save.todos.find((t) => t.id === id);
+  if (todo) {
+    todo.done = !todo.done;
+    renderTodos();
+    persistGame({ save, clockNow: clock.time(), daysPerMonth: getDaysPerMonth() });
+  }
+}
+
+function escapeHtml(text: string): string {
+  const map: Record<string, string> = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  };
+  return text.replace(/[&<>"']/g, (c) => map[c]!);
+}
+
 main().catch((err) => {
   devStatus("status-naip", "Failed to load county: " + (err as Error).message, "err");
   console.error(err);
 });
+
+// Hook up to-do list after main() so `save` is initialized
+setTimeout(() => {
+  const input = $("todo-input") as HTMLInputElement;
+  const addBtn = $("todo-add") as HTMLButtonElement;
+  const collapseBtn = $("todo-collapse") as HTMLButtonElement;
+  const todoList = $("todolist") as HTMLElement;
+  const todoItems = $("todo-items") as HTMLElement;
+
+  addBtn.addEventListener("click", () => addTodo(input.value));
+  input.addEventListener("keypress", (e) => {
+    if (e.key === "Enter") addTodo(input.value);
+  });
+
+  collapseBtn.addEventListener("click", () => {
+    todoCollapsed = !todoCollapsed;
+    if (todoCollapsed) {
+      todoItems.style.display = "none";
+      collapseBtn.textContent = "+";
+      todoList.style.height = "auto";
+    } else {
+      todoItems.style.display = "block";
+      collapseBtn.textContent = "−";
+      todoList.style.height = "auto";
+    }
+  });
+
+  renderTodos();
+}, 100);
