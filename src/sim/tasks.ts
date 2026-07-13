@@ -1091,9 +1091,34 @@ function tickAgent(
         continue;
       }
 
-      // Default / "toHarvester": drive to the combine's current spot (it's
-      // stationary while full — see the harvest-pause block below).
+      // Default / "staging" / "toHarvester": don't chase a combine that's
+      // still cutting — stage at the field's access gate and wait until it
+      // actually STOPS for unloading: hopper full, field finished, or
+      // otherwise sitting idle with grain (maintainer request, 2026-07-13).
       {
+        const cap = harvesterCapacityTons(harvester.size ?? "medium");
+        const full = (harvester.grainOnboard ?? 0) >= cap - 1e-9;
+        const stillCutting = save.tasks.some(
+          (t) => t.type === "harvest" && t.status === "active" && t.agentId === harvester.id,
+        );
+        if (!full && stillCutting) {
+          task.unloadPhase = "staging";
+          const field = save.fields.find((f) => f.id === task.fieldId);
+          const gate = field?.accessPoints && field.accessPoints.length >= 2
+            ? nearestGate(field, harvester.pos)
+            : null;
+          if (gate && !samePos(agent.pos, gate)) {
+            agent.state = "traveling";
+            budget = driveToward(save, agent, gate, speed, budget);
+            continue;
+          }
+          // Parked at the gate (or in place, for a gateless legacy field) —
+          // engine idling until the combine stops.
+          agent.state = "working";
+          budget = 0;
+          continue;
+        }
+        task.unloadPhase = "toHarvester";
         const target = harvester.pos;
         agent.state = "traveling";
         if (!samePos(agent.pos, target)) {

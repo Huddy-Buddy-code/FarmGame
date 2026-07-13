@@ -201,8 +201,11 @@ export interface FarmTask {
   agentId?: string;
   /** unloadHarvester-only: which combine this trip services. */
   harvesterAgentId?: string;
-  /** unloadHarvester-only: which leg of the trip the tractor+trailer is on. */
-  unloadPhase?: "toHarvester" | "onloading" | "toSilo" | "dumping";
+  /** unloadHarvester-only: which leg of the trip the tractor+trailer is on.
+   * "staging" = parked at the field's access gate, waiting for the combine to
+   * actually STOP for unloading (full hopper / finished field) before driving
+   * in (maintainer request, 2026-07-13). */
+  unloadPhase?: "staging" | "toHarvester" | "onloading" | "toSilo" | "dumping";
   /** unloadHarvester-only: sim-minutes left in the current onload/dump pause. */
   phaseTimer?: number;
   /** unloadHarvester-only: true while parked with nowhere to dump (no silo

@@ -109,6 +109,45 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     expect(unloadTaskFor(save, combineOf(save).id)).toBeDefined();
   });
 
+  it("the trailer STAGES at the field gate while the combine is still cutting, then moves in once it stops full (maintainer request, 2026-07-13)", () => {
+    const save = gameWithAgents();
+    // Big field + heavy yield: the 50t hopper fills long before the field ends.
+    const field = readyField(40, 6);
+    const side = Math.sqrt(40 * 4046.8564224);
+    const gate: Meters = [side / 2, 0];
+    field.accessPoints = [gate, [side / 2, side]];
+    save.fields.push(field);
+    buyImplement(save, "grainTrailer", "medium");
+    const silo = buyBuildingAt(save, "silo", [-800, -800], "large");
+    assignSiloCrop(save, silo.id, "corn");
+    const combine = combineOf(save);
+    const tractor = tractorOf(save);
+
+    let now = APRIL_1;
+    enqueueTask(save, field, "harvest", now);
+    // Run until the trailer's trip exists and has parked (fine steps so we can
+    // observe positions between phases).
+    let stagedWhileCutting = false;
+    let approachedWhileCutting = false;
+    for (let i = 0; i < 400_000 && (combine.grainOnboard ?? 0) < harvesterCapacityTons("medium") - 1e-9; i++) {
+      now += 1;
+      tickFarming(save, now);
+      tickTasks(save, now, 1, () => 0.5);
+      const trip = unloadTaskFor(save, combine.id);
+      if (!trip) continue;
+      if (trip.unloadPhase === "staging" && samePos(tractor.pos, gate)) stagedWhileCutting = true;
+      // "Approached" = tractor at the combine while it's still cutting UNDER capacity.
+      if (samePos(tractor.pos, combine.pos) && (combine.grainOnboard ?? 0) < harvesterCapacityTons("medium") - 5) {
+        approachedWhileCutting = true;
+      }
+    }
+    expect(stagedWhileCutting).toBe(true); // parked at the gate during cutting
+    expect(approachedWhileCutting).toBe(false); // never chased a moving combine
+    // Hopper's full now — the trailer moves in and the cycle completes.
+    now = runUntil(save, now, () => save.grain.corn > 0, 300_000, 5);
+    expect(save.grain.corn).toBeGreaterThan(0);
+  });
+
   it("a full haul cycle (toHarvester → onloading → toSilo → dumping) lands grain in the assigned silo's crop bin", () => {
     const save = gameWithAgents();
     const silo = buyBuildingAt(save, "silo", [-50, -50], "large");

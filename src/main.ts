@@ -1177,6 +1177,7 @@ function harvesterWaitingText(agent: Agent): string | null {
 }
 
 const UNLOAD_PHASE_TEXT: Record<string, string> = {
+  staging: "Waiting at the gate for the combine…",
   toHarvester: "Driving to the combine…",
   onloading: "Loading grain…",
   toSilo: "Hauling to the silo…",
