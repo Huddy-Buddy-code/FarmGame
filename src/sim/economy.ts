@@ -14,6 +14,7 @@ import type { SaveState, Field, Agent, Implement } from "../state/saveState";
 import { areaAcres } from "../geo/geometry";
 import { agentPrice, implementPrice } from "./tasks";
 import type { EquipmentKind } from "./tasks";
+import { recordCash } from "./ledger";
 
 export interface SaleResult {
   tons: number;
@@ -31,6 +32,7 @@ export function sellGrain(save: SaveState, crop: CropId, tons: number): SaleResu
   const revenue = Math.round(sold * gameConfig.crops[crop].sellPricePerTon);
   save.grain[crop] -= sold;
   save.money += revenue;
+  recordCash(save, "cropRevenue", gameConfig.crops[crop].name, revenue);
   return { tons: sold, revenue };
 }
 
@@ -45,6 +47,7 @@ export function sellBales(save: SaveState, field: Field): { bales: number; reven
   const revenue = Math.round(bales * gameConfig.forage.balePricePerBale);
   field.baleLocations = [];
   save.money += revenue;
+  recordCash(save, "cropRevenue", "Bales", revenue);
   return { bales, revenue };
 }
 

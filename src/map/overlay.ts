@@ -25,9 +25,11 @@ import type { Meters } from "../geo/coords";
 import type { BoundsMeters } from "../geo/geometry";
 
 /** Raster resolution of the overlay, in meters per pixel. Technical quality knob,
- * NOT game balance — it does not live in gameConfig. ~1 m/px matches NAIP's native
- * ground resolution, so painted textures read at the same sharpness as the imagery. */
-export const OVERLAY_METERS_PER_PIXEL = 1.0;
+ * NOT game balance — it does not live in gameConfig. 0.5 m/px is deliberately
+ * SHARPER than NAIP's ~1 m ground resolution (maintainer request, 2026-07-12):
+ * field textures read crisper than the surrounding imagery, with real row-scale
+ * detail. Memory: a 500 m field ≈ 1000×1000 px canvas — cheap per field. */
+export const OVERLAY_METERS_PER_PIXEL = 0.5;
 
 /** Hard cap on a single surface's pixel dimensions, so a stray huge polygon can't
  * allocate a runaway canvas. 4096 px @ 1 m/px = a 4 km patch, ample for one field. */

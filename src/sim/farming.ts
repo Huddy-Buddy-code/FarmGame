@@ -96,9 +96,12 @@ export function applyPlant(field: Field, crop: CropId, now: SimTime, rand: () =>
   field.trueYieldTonsPerAcre = cfg.baseYieldTonsPerAcre * (1 - u + rand() * 2 * u);
   field.harvestedAcres = 0;
   field.status = "planted";
-  // Fresh crop → a new season: let the auto-manager weed/fertilize once again.
+  // Fresh crop → a new season: let the auto-manager weed/fertilize once again,
+  // and reset the weed cycle (a new flush can come with the new crop).
   field.autoWeedDone = undefined;
   field.autoFertDone = undefined;
+  field.weedy = undefined;
+  field.weeded = undefined;
 }
 
 /** Harvest-complete effect: back to bare ground, crop state cleared. A forage
@@ -184,7 +187,19 @@ export function tickFarming(save: SaveState, now: SimTime): TickResult {
   for (const field of save.fields) {
     const before = field.status;
     field.status = deriveStatus(field, now);
-    if (field.status !== before) changed.push(field);
+    let dirty = field.status !== before;
+    // Weed flush: once the weeding window opens on a standing, not-yet-sprayed
+    // crop, weeds show up (and stay until a weeding pass clears them).
+    if (!field.weedy && !field.weeded && hasStandingCrop(field.status) && inWeedingWindow(now)) {
+      field.weedy = true;
+      dirty = true;
+    }
+    // Weeds don't outlive the crop: harvest/plow resets the pressure.
+    if (field.weedy && !hasStandingCrop(field.status) && field.status !== "ready") {
+      field.weedy = undefined;
+      dirty = true;
+    }
+    if (dirty) changed.push(field);
   }
   return { changed };
 }

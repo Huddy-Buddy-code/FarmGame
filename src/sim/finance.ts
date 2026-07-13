@@ -28,6 +28,7 @@ import { gameConfig } from "../config/gameConfig";
 import type { SaveState, Loan } from "../state/saveState";
 import type { SimTime } from "./clock";
 import { dateOf, minutesPerMonth } from "./calendar";
+import { recordCash } from "./ledger";
 
 /** The fixed monthly payment for a standard fixed-rate amortized loan. */
 export function monthlyPaymentFor(principal: number, ratePercent: number, termMonths: number): number {
@@ -70,6 +71,7 @@ export function paydownLoan(save: SaveState, loanId: string, amount: number): vo
     throw new Error(`That's $${Math.round(pay).toLocaleString()} — not enough cash`);
   }
   save.money -= pay;
+  recordCash(save, "loanExpenses", "Extra principal payments", -pay);
   loan.principal -= pay;
   if (loan.principal <= 0.01) {
     save.finance.loans.splice(save.finance.loans.indexOf(loan), 1);
@@ -117,6 +119,8 @@ export function tickLoans(save: SaveState, now: SimTime): void {
       const interest = (loan.principal * loan.ratePercent) / 100 / 12;
       const principalPortion = Math.min(loan.monthlyPayment - interest, loan.principal);
       save.money -= interest + principalPortion;
+      recordCash(save, "loanExpenses", "Interest", -interest);
+      recordCash(save, "loanExpenses", "Principal (scheduled)", -principalPortion);
       loan.principal -= principalPortion;
       loan.nextPaymentAt += minutesPerMonth();
       if (loan.principal <= 0.01) {

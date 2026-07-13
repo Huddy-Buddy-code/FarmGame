@@ -52,12 +52,20 @@ import {
   buyAgent, sellAgent, buyImplement, sellImplement, attachImplement, detachImplement,
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
   reorderTask, estimateTaskHours, forageDue, defaultPlan,
-  harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop,
+  harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop, setRoadNetwork,
 } from "./sim/tasks";
+import { buildRoadNetwork } from "./sim/roadNet";
+import {
+  MACHINE_ICON, IMPLEMENT_ICON_SVG, tractorIconSvg, combineIconSvg, baleIconSvg,
+  plowIconSvg, planterIconSvg, sprayerIconSvg, rakeIconSvg, balerIconSvg, grainTrailerIconSvg,
+} from "./ui/icons";
 import type { EquipmentKind } from "./sim/tasks";
 import {
   tickLoans, borrowOpen, paydownOpen, paydownLoan, refinanceLoan,
 } from "./sim/finance";
+import {
+  CASHFLOW_CATEGORIES, CASHFLOW_LABEL, categoryTotal, netCashflow, ledgerYears,
+} from "./sim/ledger";
 import type { FarmTask, Agent, Implement, FieldStatus, TaskType } from "./state/saveState";
 import { gameConfig } from "./config/gameConfig";
 import type { CropId, EquipmentSize } from "./config/gameConfig";
@@ -128,6 +136,8 @@ async function main() {
   // the farmstead-to-be. Also upgrades pre-agent saves. New purchases park here too.
   homePos = toMeters(m.center as LngLat);
   ensureAgents(save, homePos);
+  // Machines navigate the county's real road graph between jobs (brief §9).
+  setRoadNetwork(buildRoadNetwork(county.roads, (p) => toMeters(p)));
   devStatus("status-osm", `Roads: ${county.roads.features.length} ✓`, "ok");
   $("attr").innerHTML = `${m.imagery.attribution} · ${m.roads.attribution}`;
 
@@ -296,42 +306,9 @@ function repaintGrowthStages(now: number, alreadyPainted: { id: string }[]) {
 // game's own cozy palette, not a real manufacturer's colors/logo.
 const AGENT_EMOJI: Record<string, string> = { tractor: "🚜", harvester: "🌾" };
 
-/** A big row-crop tractor: large rear drive wheel, small front wheel, cab. */
-function tractorIconSvg(size = 22): string {
-  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-    <path d="M2 19a3 3 0 1 0 6 0 3 3 0 0 0-6 0Z" fill="#e0a63c" stroke="#6b4426" stroke-width="1"/>
-    <path d="M2 19a3 3 0 1 0 6 0 3 3 0 0 0-6 0Z" fill="none" stroke="#4a3520" stroke-width="0.6" opacity="0.5"/>
-    <circle cx="5" cy="19" r="1.1" fill="#4a3520"/>
-    <circle cx="17" cy="19" r="1.6" fill="#4a3520"/>
-    <path d="M14 19.6a3.6 3.6 0 1 0 7.2 0 3.6 3.6 0 0 0-7.2 0Z" fill="#e0a63c" stroke="#6b4426" stroke-width="1"/>
-    <path d="M9 8h4.5l1.5 4h3.8a2 2 0 0 1 2 2v2.2h-3.2a3.6 3.6 0 0 0-7.1 0H10a3 3 0 0 0-5.8-1.1L3 15v-2.3L9 10Z" fill="#6da144" stroke="#55832f" stroke-width="1"/>
-    <rect x="9.6" y="4" width="4.4" height="4.4" rx="0.6" fill="#6da144" stroke="#55832f" stroke-width="1"/>
-    <rect x="10.4" y="4.7" width="2.8" height="2.4" rx="0.3" fill="#dff2ff" opacity="0.9"/>
-    <rect x="16" y="6.5" width="1" height="4" fill="#4a3520"/>
-  </svg>`;
-}
-
-/** A combine harvester: boxy cab/body with a wide grain header out front. */
-function combineIconSvg(size = 22): string {
-  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-    <path d="M1 15.5h4.5l1-2.2h4.8l0.6 2.2H15v3.3H1Z" fill="#e0a63c" stroke="#6b4426" stroke-width="1"/>
-    <line x1="2.5" y1="13.6" x2="2.5" y2="18.4" stroke="#6b4426" stroke-width="0.8"/>
-    <line x1="4.3" y1="13.6" x2="4.3" y2="18.4" stroke="#6b4426" stroke-width="0.8"/>
-    <line x1="6.1" y1="13.6" x2="6.1" y2="18.4" stroke="#6b4426" stroke-width="0.8"/>
-    <line x1="7.9" y1="13.6" x2="7.9" y2="18.4" stroke="#6b4426" stroke-width="0.8"/>
-    <rect x="13.5" y="6.5" width="8" height="9.5" rx="1.2" fill="#6da144" stroke="#55832f" stroke-width="1"/>
-    <rect x="14.6" y="8" width="3" height="3" rx="0.3" fill="#dff2ff" opacity="0.9"/>
-    <circle cx="17.5" cy="19" r="3" fill="#4a3520"/>
-    <circle cx="17.5" cy="19" r="1.9" fill="#e0a63c" stroke="#6b4426" stroke-width="0.8"/>
-    <circle cx="21.2" cy="18.2" r="1.6" fill="#4a3520"/>
-    <circle cx="21.2" cy="18.2" r="0.9" fill="#e0a63c"/>
-  </svg>`;
-}
-
-const AGENT_ICON: Record<string, (size?: number) => string> = {
-  tractor: tractorIconSvg,
-  harvester: combineIconSvg,
-};
+// Realistic side-profile machinery SVGs live in ui/icons.ts (maintainer
+// request, 2026-07-12) — one shared set for map dots, panels, and the shop.
+const AGENT_ICON = MACHINE_ICON;
 
 /** Human verb for a task, present participle ("plowing Field 1"). */
 function taskVerb(task: FarmTask): string {
@@ -434,15 +411,6 @@ function updateAgentMarkers(): void {
 // ---------------------------------------------------------------------------
 const MAX_BALE_MARKERS = 600; // per-field perf ceiling; real fields sit well under this
 
-/** A round hay bale: a stubby tan cylinder seen from the side. */
-function baleIconSvg(size = 14): string {
-  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-    <ellipse cx="12" cy="13" rx="9" ry="8" fill="#d9c187" stroke="#9c8348" stroke-width="1.2"/>
-    <path d="M5 10.5c3 1.6 11 1.6 14 0M4 14c3.5 2 12.5 2 16 0" stroke="#b39a5c" stroke-width="0.9" fill="none"/>
-    <ellipse cx="12" cy="13" rx="3.4" ry="3" fill="#c7ad72" stroke="#9c8348" stroke-width="0.8"/>
-  </svg>`;
-}
-
 function makeBaleMarker(p: Meters): maplibregl.Marker {
   const el = document.createElement("div");
   el.className = "bale-dot";
@@ -512,18 +480,19 @@ interface Reveal {
 // the rake laying windrows and the baler laying mulch behind it.
 const reveals = new Map<string, Reveal>();
 
-function revealTargetStatus(task: FarmTask): FieldStatus {
+function revealTargetStatus(task: FarmTask, field: Field): FieldStatus {
   if (task.type === "plow") return "tilled";
   if (task.type === "plant") return "planted";
   if (task.type === "bale") return "mulched";
+  if (task.type === "weed") return field.status; // same look, minus the weeds
   return "harvested";
 }
 
 /** Task types whose completion actually changes the field's texture — the only
- * ones worth the reveal-stamping treatment. Weed/fertilize don't change
- * status, so there's no "new" texture to reveal; the machine still visibly
- * drives its coverage path, it just doesn't repaint anything as it goes. */
-const REVEALS_TEXTURE: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "rake", "bale"]);
+ * ones worth the reveal-stamping treatment. Weeding is here now too: its baked
+ * target is the SAME status with the weed overlay off, so the sprayer visibly
+ * cleans the field strip-by-strip. Fertilize alone changes nothing visible. */
+const REVEALS_TEXTURE: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "rake", "bale", "weed"]);
 
 function updateReveals(): void {
   if (!overlay) return;
@@ -559,9 +528,12 @@ function updateReveals(): void {
       const bctx = baked.getContext("2d");
       if (!bctx) continue;
       drawFieldTexture(bctx, baked.width, baked.height, (mtr) => surface.toPixel(mtr), field.boundary, {
-        status: revealTargetStatus(task),
+        status: revealTargetStatus(task, field),
         crop: field.crop,
-        progress: 0,
+        // Weeding repaints the crop AS IT IS (weeds off); everything else
+        // reveals a fresh post-work surface where progress starts at 0.
+        progress: task.type === "weed" ? growthProgress(field, clock.time()) : 0,
+        weedy: false,
         // Raking reveals windrows over the harvested surface strip-by-strip; the
         // baler then reveals clean/mulched over those windrows as it collects.
         windrowed: task.type === "rake",
@@ -930,6 +902,13 @@ function loanAmtLabel(n: number): string {
   return n % 1000 === 0 ? `$${(n / 1000).toFixed(0)}k` : `$${n.toLocaleString()}`;
 }
 
+/** $-formatting for cashflow cells: rounded, parenthesized-red handled in CSS. */
+function cfAmount(n: number): string {
+  const r = Math.round(n);
+  if (r === 0) return "—";
+  return (r < 0 ? "−$" : "$") + Math.abs(r).toLocaleString();
+}
+
 let lastFinanceKey = "";
 function refreshFinanceTab(force = false) {
   const el = $("financetab");
@@ -939,7 +918,8 @@ function refreshFinanceTab(force = false) {
     `${save.finance.openYear}:${Math.round(save.finance.pendingPrincipal)}` +
     "#" +
     save.finance.loans.map((l) => `${l.id}:${Math.round(l.principal)}:${Math.round(l.monthlyPayment)}`).join(",") +
-    `|$${Math.round(save.money)}`;
+    `|$${Math.round(save.money)}` +
+    `|L${JSON.stringify(save.ledger ?? {})}`;
   if (!force && key === lastFinanceKey) return;
   lastFinanceKey = key;
 
@@ -947,38 +927,31 @@ function refreshFinanceTab(force = false) {
   rows.innerHTML = "";
   const inc = gameConfig.loan.incrementAmount;
 
-  // --- This year's open (not-yet-locked) borrowing ---
+  // --- Loans, CONDENSED (maintainer request, 2026-07-12): one compact line
+  // each — open borrowing first, then locked loans newest-first, actions inline.
+  rows.insertAdjacentHTML("beforeend", `<div class="fin-heading">Loans</div>`);
   const pending = save.finance.pendingPrincipal;
-  const openRow = document.createElement("div");
-  openRow.className = "loan-row";
-  openRow.innerHTML = `
-    <div class="lr-top">
-      <span class="lr-icon">🏦</span>
-      <span class="lr-info">
-        <div class="lr-name">Year ${save.finance.openYear} borrowing</div>
-        <div class="lr-sub">${
-          pending > 0
-            ? `$${pending.toLocaleString()} — locks in as a ${gameConfig.loan.termMonths / 12}-yr loan at ${gameConfig.loan.ratePercent}% when the year turns`
-            : "Nothing borrowed yet this year"
-        }</div>
-      </span>
-    </div>`;
-  const openActions = document.createElement("div");
-  openActions.className = "lr-actions";
+  const openLine = document.createElement("div");
+  openLine.className = "loan-line open";
+  openLine.innerHTML = `
+    <span class="ll-name">Yr ${save.finance.openYear} · open</span>
+    <span class="ll-sub">${pending > 0
+      ? `$${pending.toLocaleString()} pending — locks in at ${gameConfig.loan.ratePercent}% / ${gameConfig.loan.termMonths / 12} yr on Jan 1`
+      : "Nothing borrowed this year"}</span>`;
   const borrowBtn = document.createElement("button");
-  borrowBtn.className = "amt-btn borrow";
-  borrowBtn.textContent = `+ ${loanAmtLabel(inc)}`;
+  borrowBtn.className = "ll-btn borrow";
+  borrowBtn.textContent = `+${loanAmtLabel(inc)}`;
   borrowBtn.title = `Borrow ${loanAmtLabel(inc)} now`;
   borrowBtn.addEventListener("click", () => {
     borrowOpen(save, inc);
     updateHud();
     refreshFinanceTab(true);
   });
-  openActions.appendChild(borrowBtn);
+  openLine.appendChild(borrowBtn);
   const openPayAmount = Math.min(inc, pending);
   const openPayBtn = document.createElement("button");
-  openPayBtn.className = "amt-btn payoff";
-  openPayBtn.textContent = `− ${loanAmtLabel(inc)}`;
+  openPayBtn.className = "ll-btn";
+  openPayBtn.textContent = `−${loanAmtLabel(inc)}`;
   openPayBtn.disabled = openPayAmount <= 0 || openPayAmount > save.money;
   openPayBtn.title = openPayAmount <= 0 ? "Nothing pending to pay down" : `Pay down ${loanAmtLabel(openPayAmount)}`;
   openPayBtn.addEventListener("click", () => {
@@ -990,32 +963,22 @@ function refreshFinanceTab(force = false) {
       toast("❌ " + (err as Error).message, 3500);
     }
   });
-  openActions.appendChild(openPayBtn);
-  openRow.appendChild(openActions);
-  rows.appendChild(openRow);
+  openLine.appendChild(openPayBtn);
+  rows.appendChild(openLine);
 
-  // --- Locked loans, newest first ---
   const loans = [...save.finance.loans].sort((a, b) => b.originYear - a.originYear);
   for (const loan of loans) {
-    const row = document.createElement("div");
-    row.className = "loan-row";
-    row.innerHTML = `
-      <div class="lr-top">
-        <span class="lr-icon">🏦</span>
-        <span class="lr-info">
-          <div class="lr-name">Year ${loan.originYear} loan</div>
-          <div class="lr-sub">$${Math.round(loan.principal).toLocaleString()} owed · $${Math.round(loan.monthlyPayment).toLocaleString()}/mo · ${loan.ratePercent}%</div>
-        </span>
-      </div>`;
-
-    const actions = document.createElement("div");
-    actions.className = "lr-actions";
+    const line = document.createElement("div");
+    line.className = "loan-line";
+    line.innerHTML = `
+      <span class="ll-name">Yr ${loan.originYear} loan</span>
+      <span class="ll-sub">$${Math.round(loan.principal).toLocaleString()} owed · $${Math.round(loan.monthlyPayment).toLocaleString()}/mo · ${loan.ratePercent}%</span>`;
     const payAmount = Math.min(inc, loan.principal);
     const payBtn = document.createElement("button");
-    payBtn.className = "amt-btn payoff";
-    payBtn.style.width = "100%";
-    payBtn.textContent = payAmount < inc ? `Pay off remaining $${Math.round(payAmount).toLocaleString()}` : `− ${loanAmtLabel(inc)}`;
+    payBtn.className = "ll-btn";
+    payBtn.textContent = payAmount < inc ? `Pay off $${Math.round(payAmount).toLocaleString()}` : `−${loanAmtLabel(inc)}`;
     payBtn.disabled = payAmount > save.money;
+    payBtn.title = "Extra principal — retires the loan sooner (payment unchanged)";
     payBtn.addEventListener("click", () => {
       try {
         const payingOff = payAmount >= loan.principal - 0.01;
@@ -1027,15 +990,12 @@ function refreshFinanceTab(force = false) {
         toast("❌ " + (err as Error).message, 3500);
       }
     });
-    actions.appendChild(payBtn);
-    row.appendChild(actions);
-
-    // Refinance: only on locked loans, deliberately smaller, and the one
-    // button that warns + requires confirmation (maintainer request — the
-    // +/- buttons stay silent so rapid clicking isn't interrupted).
+    line.appendChild(payBtn);
+    // Refinance: the one action that warns + confirms (maintainer request).
     const refi = document.createElement("button");
-    refi.className = "refi-btn";
-    refi.textContent = `🔄 Refinance · $${gameConfig.loan.refinanceFee.toLocaleString()} fee`;
+    refi.className = "ll-btn refi";
+    refi.textContent = "🔄";
+    refi.title = `Refinance — fresh ${gameConfig.loan.termMonths / 12}-yr term, $${gameConfig.loan.refinanceFee.toLocaleString()} fee added to principal`;
     refi.addEventListener("click", () => {
       const ok = confirm(
         `Refinance the Year ${loan.originYear} loan?\n\n` +
@@ -1049,10 +1009,47 @@ function refreshFinanceTab(force = false) {
       refreshFinanceTab(true);
       toast(`🔄 Refinanced the Year ${loan.originYear} loan`);
     });
-    row.appendChild(refi);
-
-    rows.appendChild(row);
+    line.appendChild(refi);
+    rows.appendChild(line);
   }
+
+  // --- Cashflow table (maintainer request, 2026-07-12): last 5 campaign
+  // years, current on top. Hover any figure for the item-level breakdown.
+  rows.insertAdjacentHTML("beforeend", `<div class="fin-heading">Cashflow · last 5 years</div>`);
+  const table = document.createElement("div");
+  table.className = "cf-table";
+  table.insertAdjacentHTML(
+    "beforeend",
+    `<div class="cf-row cf-head"><div>Year</div>` +
+      CASHFLOW_CATEGORIES.map((c) => `<div>${CASHFLOW_LABEL[c]}</div>`).join("") +
+      `<div>Net Cashflow</div></div>`,
+  );
+  for (const year of ledgerYears(save)) {
+    const y = save.ledger?.[year];
+    const row = document.createElement("div");
+    row.className = "cf-row" + (year === save.finance.openYear ? " current" : "");
+    row.insertAdjacentHTML("beforeend", `<div class="cf-year">Yr ${year}${year === save.finance.openYear ? " ·" : ""}</div>`);
+    for (const cat of CASHFLOW_CATEGORIES) {
+      const total = categoryTotal(y, cat);
+      const cell = document.createElement("div");
+      cell.className = "cf-cell" + (total < 0 ? " neg" : total > 0 ? " pos" : "");
+      cell.textContent = cfAmount(total);
+      const items = Object.entries(y?.[cat] ?? {}).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+      if (items.length > 0) {
+        const tip = document.createElement("div");
+        tip.className = "cf-tip";
+        tip.innerHTML =
+          `<div class="cf-tip-title">${CASHFLOW_LABEL[cat]} · Yr ${year}</div>` +
+          items.map(([name, v]) => `<div class="cf-tip-row"><span>${name}</span><span class="${v < 0 ? "neg" : "pos"}">${cfAmount(v)}</span></div>`).join("");
+        cell.appendChild(tip);
+      }
+      row.appendChild(cell);
+    }
+    const net = netCashflow(y);
+    row.insertAdjacentHTML("beforeend", `<div class="cf-cell cf-net ${net < 0 ? "neg" : net > 0 ? "pos" : ""}">${cfAmount(net)}</div>`);
+    table.appendChild(row);
+  }
+  rows.appendChild(table);
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,168 +1211,147 @@ function refreshEquipTab(force = false) {
   buildEquipImplements();
 }
 
-/** The "buy" shop: tractors & plows in each size, plus the combine. */
+/**
+ * The equipment shop, rebuilt (maintainer request, 2026-07-12): a dealer-lot
+ * layout. Three sections — Machines, Implements, Buildings — each row a
+ * product line with its icon + name on the left and ALIGNED size-tier cards
+ * across fixed columns (Small/Medium/Large), so prices and specs compare at a
+ * glance. Tiers a line doesn't come in show as an em-dash placeholder rather
+ * than shifting the grid.
+ */
 function buildEquipShop(): void {
   const shop = $("equip-shop");
   shop.innerHTML = "";
 
-  const group = (label: string, iconSvg: string) => {
-    const g = document.createElement("div");
-    g.className = "shop-group";
-    g.innerHTML = `<div class="shop-label"><span class="icon">${iconSvg}</span>${label}</div>`;
-    shop.appendChild(g);
-    return g;
+  const section = (label: string) => {
+    const h = document.createElement("div");
+    h.className = "shop-section";
+    h.textContent = label;
+    shop.appendChild(h);
+    const head = document.createElement("div");
+    head.className = "shop-row shop-head";
+    head.innerHTML = `<div></div><div>Small</div><div>Medium</div><div>Large</div>`;
+    shop.appendChild(head);
   };
 
-  const tractors = group("Tractors", tractorIconSvg(16));
-  for (const size of SIZES) {
-    const price = agentPrice("tractor", size);
-    tractors.appendChild(
-      buyButton(`${SIZE_LABEL[size]}`, price, () => {
-        const a = buyAgent(save, "tractor", size, spawnPos());
-        afterFleetChange();
-        toast(`Bought ${a.name} — parked at the yard`);
-      }),
-    );
-  }
+  /** One product line: label cell + one cell per size column. */
+  const line = (
+    label: string, iconSvg: string,
+    cells: Partial<Record<EquipmentSize, { spec: string; price: number; onBuy: () => void }>>,
+  ) => {
+    const row = document.createElement("div");
+    row.className = "shop-row";
+    row.innerHTML = `<div class="shop-line-label"><span class="icon">${iconSvg}</span><span>${label}</span></div>`;
+    for (const size of SIZES) {
+      const c = cells[size];
+      if (!c) {
+        row.insertAdjacentHTML("beforeend", `<div class="shop-na">—</div>`);
+        continue;
+      }
+      const btn = document.createElement("button");
+      btn.className = "shop-card";
+      btn.innerHTML = `<span class="spec">${c.spec}</span><span class="price">$${c.price.toLocaleString()}</span>`;
+      btn.disabled = c.price > save.money;
+      btn.title = btn.disabled ? `Costs $${c.price.toLocaleString()} — not enough cash` : `Buy ${SIZE_LABEL[size]} ${label}`;
+      btn.addEventListener("click", () => {
+        try {
+          c.onBuy();
+        } catch (err) {
+          toast("❌ " + (err as Error).message, 3500);
+        }
+      });
+      row.appendChild(btn);
+    }
+    shop.appendChild(row);
+  };
 
-  const plows = group("Plows", "🔧");
-  for (const size of SIZES) {
-    const price = implementPrice("plow", size);
-    const ft = gameConfig.equipment.plow[size].widthFt;
-    plows.appendChild(
-      buyButton(`${SIZE_LABEL[size]} · ${ft}ft`, price, () => {
-        const i = buyImplement(save, "plow", size);
-        afterFleetChange();
-        toast(`Bought ${implementName(save, i)} — parked in the yard`);
-      }),
-    );
-  }
+  const buyImpl = (kind: Parameters<typeof buyImplement>[1], size: EquipmentSize) => () => {
+    const i = buyImplement(save, kind, size);
+    afterFleetChange();
+    toast(`Bought ${implementName(save, i)} — parked in the yard`);
+  };
 
-  const planters = group("Planters", "🌱");
-  for (const size of SIZES) {
-    const price = implementPrice("planter", size);
-    const ft = gameConfig.equipment.planter[size].widthFt;
-    planters.appendChild(
-      buyButton(`${SIZE_LABEL[size]} · ${ft}ft`, price, () => {
-        const i = buyImplement(save, "planter", size);
-        afterFleetChange();
-        toast(`Bought ${implementName(save, i)} — parked in the yard`);
-      }),
-    );
-  }
-
-  // Sprayers only come in Medium/Large (design choice — a big-acreage tool).
-  const sprayers = group("Sprayers", "💦");
-  for (const size of ["medium", "large"] as EquipmentSize[]) {
-    const price = implementPrice("sprayer", size);
-    const ft = gameConfig.equipment.sprayer[size].widthFt;
-    sprayers.appendChild(
-      buyButton(`${SIZE_LABEL[size]} · ${ft}ft`, price, () => {
-        const i = buyImplement(save, "sprayer", size);
-        afterFleetChange();
-        toast(`Bought ${implementName(save, i)} — parked in the yard`);
-      }),
-    );
-  }
-
-  // Rake & baler: single-size forage tools (25 ft). Rake windrows a harvested
-  // forage field; the baler follows and drops bales you sell from the field.
-  const rakes = group("Rakes", "🧹");
-  rakes.appendChild(
-    buyButton(`Small · ${gameConfig.equipment.rake.small.widthFt}ft`, implementPrice("rake", "small"), () => {
-      const i = buyImplement(save, "rake", "small");
+  section("Machines");
+  line("Tractor", tractorIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${SIZE_LABEL[s]} power unit`,
+    price: agentPrice("tractor", s),
+    onBuy: () => {
+      const a = buyAgent(save, "tractor", s, spawnPos());
       afterFleetChange();
-      toast(`Bought ${implementName(save, i)} — parked in the yard`);
-    }),
-  );
-
-  const balers = group("Balers", "📦");
-  balers.appendChild(
-    buyButton(`Medium · ${gameConfig.equipment.bailer.medium.widthFt}ft`, implementPrice("bailer", "medium"), () => {
-      const i = buyImplement(save, "bailer", "medium");
+      toast(`Bought ${a.name} — parked at the yard`);
+    },
+  }])));
+  line("Combine", combineIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.harvester[s].widthFt} ft header · ${harvesterCapacityTons(s)} t hopper`,
+    price: agentPrice("harvester", s),
+    onBuy: () => {
+      const a = buyAgent(save, "harvester", s, spawnPos());
       afterFleetChange();
-      toast(`Bought ${implementName(save, i)} — parked in the yard`);
-    }),
-  );
+      toast(`Bought ${a.name} — parked at the yard`);
+    },
+  }])));
 
-  // Combines are sized like tractors (maintainer request, 2026-07-12) — each
-  // tier its own hopper capacity, shown so the player can size it against
-  // the Grain Trailer(s) they'll pair it with.
-  const combine = group("Combine", combineIconSvg(16));
-  for (const size of SIZES) {
-    const price = agentPrice("harvester", size);
-    const tons = harvesterCapacityTons(size);
-    combine.appendChild(
-      buyButton(`${SIZE_LABEL[size]} · ${tons}t`, price, () => {
-        const a = buyAgent(save, "harvester", size, spawnPos());
-        afterFleetChange();
-        toast(`Bought ${a.name} — parked at the yard`);
-      }),
-    );
-  }
+  section("Implements");
+  const widthSpec = (kind: "plow" | "planter" | "sprayer", s: EquipmentSize) =>
+    `${gameConfig.equipment[kind][s].widthFt} ft working width`;
+  line("Plow", plowIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: widthSpec("plow", s), price: implementPrice("plow", s), onBuy: buyImpl("plow", s),
+  }])));
+  line("Planter", planterIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: widthSpec("planter", s), price: implementPrice("planter", s), onBuy: buyImpl("planter", s),
+  }])));
+  // Sprayers only come in Medium/Large (a big-acreage tool).
+  line("Sprayer", sprayerIconSvg(26), Object.fromEntries((["medium", "large"] as EquipmentSize[]).map((s) => [s, {
+    spec: `${widthSpec("sprayer", s)} boom`, price: implementPrice("sprayer", s), onBuy: buyImpl("sprayer", s),
+  }])));
+  // Rake & baler: single-size forage tools.
+  line("Rake", rakeIconSvg(26), {
+    small: { spec: `${gameConfig.equipment.rake.small.widthFt} ft · windrows forage`, price: implementPrice("rake", "small"), onBuy: buyImpl("rake", "small") },
+  });
+  line("Baler", balerIconSvg(26), {
+    medium: { spec: `${gameConfig.equipment.bailer.medium.widthFt} ft pickup · drops bales`, price: implementPrice("bailer", "medium"), onBuy: buyImpl("bailer", "medium") },
+  });
+  line("Grain Trailer", grainTrailerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${grainTrailerCapacityTons(s)} t cargo`, price: implementPrice("grainTrailer", s), onBuy: buyImpl("grainTrailer", s),
+  }])));
 
-  // Grain Trailer: hauls a full combine to a silo. A normal implement (one
-  // tractor hitch slot) — sized like plow/planter.
-  const trailers = group("Grain Trailers", "🚛");
-  for (const size of SIZES) {
-    const price = implementPrice("grainTrailer", size);
-    const tons = grainTrailerCapacityTons(size);
-    trailers.appendChild(
-      buyButton(`${SIZE_LABEL[size]} · ${tons}t`, price, () => {
-        const i = buyImplement(save, "grainTrailer", size);
-        afterFleetChange();
-        toast(`Bought ${implementName(save, i)} — parked in the yard`);
-      }),
-    );
+  section("Buildings");
+  const placeBuilding = (kind: BuildingKind, size?: EquipmentSize) => () => {
+    mode = `building:${kind}`;
+    if (kind === "silo") pendingSiloSize = size ?? "small";
+    $("equiptab").style.display = "none";
+    toast(`🏗️ Click the map to place your ${buildingDisplayName(kind, size)}`);
+  };
+  line("Silo", `<span class="shop-emoji">${BUILDING_ICON.silo}</span>`, Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${siloCapacityOf(s).toLocaleString()} t grain`,
+    price: buildingPrice("silo", s),
+    onBuy: placeBuilding("silo", s),
+  }])));
+  const OTHER_BUILDINGS: Array<[Exclude<BuildingKind, "silo">, string]> = [
+    ["baleBarn", `${gameConfig.buildings.baleBarn.capacityBales} bales · indoor`],
+    ["baleArea", `${gameConfig.buildings.baleArea.capacityBales} bales · outdoor`],
+    ["tractorBarn", `${gameConfig.buildings.tractorBarn.slots} machine slots`],
+    ["implementBarn", `${gameConfig.buildings.implementBarn.slots} implement slots`],
+    ["farmYard", "rally point — gear parks here"],
+  ];
+  const grid = document.createElement("div");
+  grid.className = "shop-bgrid";
+  for (const [kind, spec] of OTHER_BUILDINGS) {
+    const price = buildingPrice(kind);
+    const btn = document.createElement("button");
+    btn.className = "shop-card";
+    btn.innerHTML = `<span class="spec">${BUILDING_ICON[kind]} ${BUILDING_NAME[kind]}</span><span class="sub">${spec}</span><span class="price">$${price.toLocaleString()}</span>`;
+    btn.disabled = price > save.money;
+    btn.addEventListener("click", placeBuilding(kind));
+    grid.appendChild(btn);
   }
-
-  // Buildings: click-to-place fixtures (silo/barns/yard), not instant buys —
-  // the button just arms placement mode; the map click pays and drops it.
-  const buildings = group("Buildings", "🏗️");
-  // Silos come in three sizes (maintainer request, 2026-07-12), like tractors.
-  for (const size of SIZES) {
-    const tons = siloCapacityOf(size);
-    buildings.appendChild(
-      buyButton(`${BUILDING_ICON.silo} ${buildingDisplayName("silo", size)} · ${tons.toLocaleString()}t`, buildingPrice("silo", size), () => {
-        mode = "building:silo";
-        pendingSiloSize = size;
-        $("equiptab").style.display = "none";
-        toast(`🏗️ Click the map to place your ${buildingDisplayName("silo", size)}`);
-      }),
-    );
-  }
-  const OTHER_BUILDINGS: Exclude<BuildingKind, "silo">[] = ["baleBarn", "baleArea", "tractorBarn", "implementBarn", "farmYard"];
-  for (const kind of OTHER_BUILDINGS) {
-    buildings.appendChild(
-      buyButton(`${BUILDING_ICON[kind]} ${BUILDING_NAME[kind]}`, buildingPrice(kind), () => {
-        mode = `building:${kind}`;
-        $("equiptab").style.display = "none";
-        toast(`🏗️ Click the map to place your ${BUILDING_NAME[kind]}`);
-      }),
-    );
-  }
+  shop.appendChild(grid);
 }
 
 /** Where a newly bought machine parks: the nearest Farm Yard if the farm has
  * built one, else the county-center fallback used before buildings existed. */
 function spawnPos(): Meters {
   return nearestFarmYard(save, homePos)?.pos ?? homePos;
-}
-
-function buyButton(label: string, price: number, onBuy: () => void): HTMLButtonElement {
-  const btn = document.createElement("button");
-  btn.className = "shop-buy";
-  btn.innerHTML = `${label}<span class="small">$${price.toLocaleString()}</span>`;
-  btn.disabled = price > save.money;
-  btn.addEventListener("click", () => {
-    try {
-      onBuy();
-    } catch (err) {
-      toast("❌ " + (err as Error).message, 3500);
-    }
-  });
-  return btn;
 }
 
 /** MACHINES you drive: tractors + the combine. A tractor shows the plow it's
@@ -1445,9 +1421,7 @@ function buildEquipMachines(): void {
   }
 }
 
-const IMPLEMENT_ICON: Record<string, string> = {
-  plow: "🔧", planter: "🌱", sprayer: "💦", rake: "🧹", bailer: "📦", grainTrailer: "🚛",
-};
+const IMPLEMENT_ICON = IMPLEMENT_ICON_SVG;
 
 /** IMPLEMENTS you attach: every plow/planter, with a selector to hitch it to a
  * tractor (or park it in the yard) and a sell button. */
@@ -1470,7 +1444,7 @@ function buildEquipImplements(): void {
     const row = document.createElement("div");
     row.className = "equip-row implement";
     row.innerHTML = `
-      <span class="icon">${IMPLEMENT_ICON[impl.kind] ?? "🔧"}</span>
+      <span class="icon">${(IMPLEMENT_ICON[impl.kind] ?? plowIconSvg)(22)}</span>
       <span class="er-info">
         <div class="er-name">${implementName(save, impl)}</div>
         <div class="er-status">${where} · ${sizeLine}</div>
@@ -2106,6 +2080,7 @@ function refreshFieldPanel(force = false) {
     dateOf(now).month, // planting windows open/close on month boundaries
     Math.round(save.money), // affordability of input costs
     field.forageReady ? 1 : 0, field.windrowed ? 1 : 0, field.baleLocations?.length ?? 0, // forage/bale state
+    field.weedy ? 1 : 0,
   ].join("|");
   // The rotation planner has its OWN change-detection (below) so its dropdowns
   // don't get rebuilt under the cursor on every money/status tick.
@@ -2242,6 +2217,9 @@ function refreshFieldPanel(force = false) {
     const range = yieldRange(field, now);
 
     let html = `<div style="margin-top:8px">${cfg.emoji} <b>${cfg.name}</b></div>`;
+    if (field.weedy) {
+      html += `<div class="small" style="color:var(--red)">🌿 Weeds are spreading — a weeding pass clears them</div>`;
+    }
     if (!harvestingNow) {
       html += `<div class="small">Growth</div>
         <div class="progress"><div class="fill" style="width:${(progress * 100).toFixed(0)}%"></div></div>`;

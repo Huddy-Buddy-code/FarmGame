@@ -43,6 +43,47 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   if sold now.
 - **95/95 tests passing** (added 5 rotation-planner tests). Typecheck clean.
 
+## Latest changes (2026-07-12, deep-sim pass: roads, weeds, textures, icons, shop, cashflow)
+
+Five systems in one pass (maintainer request, "take some liberty"):
+
+- **Road navigation** (`src/sim/roadNet.ts` + `driveToward` in `tasks.ts`): the
+  county OSM extract now ingests into a node/edge graph (UTM, snapped at 1.5 m
+  so separate ways connect at intersections); A* routes every point-to-point
+  agent trip — to field, home, to combine, to silo — as off-road → nearest road
+  point → roads → off-road. Falls back to straight for short hops (<120 m),
+  detours >3.5× straight, or no network (tests set none, so all old behavior is
+  preserved there). Routes are runtime-only (replan after reload); a moving
+  combine only triggers a replan when it's drifted >25 m from the planned target.
+- **Weeds**: standing crops flush weeds when the weeding window opens
+  (`field.weedy`, once per crop via `field.weeded`, both reset at planting).
+  Weed texture is painted on top of the crop; the weeding task is now in the
+  sweep-reveal set with a "same status, weeds off" baked target, so the sprayer
+  visibly cleans strip-by-strip. Field panel warns in red. No yield effect yet
+  (visual/time/cost only — hook for a weed-pressure yield model later).
+- **Textures**: overlay bumped to 0.5 m/px (sharper than NAIP, deliberate);
+  every status texture enriched — real ~0.8 m row spacing, sprayer tramlines
+  (paired ruts every ~24 m, fade as canopy closes), plow clods + dead furrows,
+  header-width pass striping, chaff windrow + shadow, stubble volunteers.
+- **Icons** (`src/ui/icons.ts`): realistic side-profile SVGs for tractor,
+  combine (header+reel), plow, planter, sprayer, rake, baler, grain trailer,
+  bale — one shared set for map dots, panels, queue rows, and shop. All face
+  west (heading-mirror contract unchanged).
+- **Equipment shop**: rebuilt as a dealer-lot grid — Machines / Implements /
+  Buildings sections, one product line per row, size tiers in fixed aligned
+  columns with spec + price on each card, em-dash placeholders for absent tiers.
+- **Finance**: new cashflow ledger (`src/sim/ledger.ts`, persisted as
+  `save.ledger`, last 5 years) — every money mutation books to
+  year/category/item (Land & Equipment, Loan Expenses, Field Expenses, Crop
+  Revenue; refunds net against their category). Finance tab: loans condensed to
+  one line each (inline borrow/paydown/refi), plus a 5-year cashflow table
+  (current year on top) with per-item hover-tooltip breakdowns and a Net column.
+- 15 new tests (roadNet graph/routing + drive-the-road integration, weed
+  lifecycle, ledger booking/pruning); 152/152 passing, typecheck clean.
+- **UX needs eyes** (no Browser Preview): new textures at 0.5 m/px, weed patch
+  look, icon rendering at small sizes, shop grid layout, cashflow tooltips,
+  and machines visibly following roads.
+
 ## Latest changes (2026-07-13, harvester self-heal follow-up)
 
 - **Investigated a report of a harvester still stuck** after the self-heal

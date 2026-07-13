@@ -15,6 +15,7 @@ import { gameConfig } from "../config/gameConfig";
 import type { CropId, EquipmentSize } from "../config/gameConfig";
 import type { BuildingKind, Building, SaveState } from "../state/saveState";
 import type { Meters } from "../geo/coords";
+import { recordCash } from "./ledger";
 
 const seq: Record<string, number> = {};
 const nextId = (prefix: string) => `${prefix}-${(seq[prefix] = (seq[prefix] ?? 0) + 1)}`;
@@ -65,6 +66,7 @@ export function buyBuildingAt(save: SaveState, kind: BuildingKind, pos: Meters, 
     throw new Error(`A ${buildingDisplayName(kind, size)} costs $${price.toLocaleString()} — not enough cash`);
   }
   save.money -= price;
+  recordCash(save, "landEquipment", "Buildings", -price);
   const building: Building = { id: nextId("bld"), kind, pos, size: kind === "silo" ? (size ?? "small") : undefined };
   save.buildings.push(building);
   return building;
@@ -78,6 +80,7 @@ export function sellBuilding(save: SaveState, buildingId: string): { building: B
   const refund = buildingPrice(building.kind, building.size);
   save.buildings.splice(idx, 1);
   save.money += refund;
+  recordCash(save, "landEquipment", "Buildings", refund);
   return { building, refund };
 }
 

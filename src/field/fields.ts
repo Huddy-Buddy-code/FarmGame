@@ -23,6 +23,7 @@ import type { OverlayEngine } from "../map/overlay";
 import { paintField, fieldEdgeColor } from "./fieldRender";
 import { growthProgress } from "../sim/farming";
 import { releaseFieldTasks } from "../sim/tasks";
+import { recordCash } from "../sim/ledger";
 import type { SimTime } from "../sim/clock";
 
 const seq: Record<string, number> = {};
@@ -68,6 +69,7 @@ export function buyFieldFromBoundary(
   const field: Field = { id: fieldId, parcelId, boundary, status: "stubble", purchaseCost: cost };
   save.fields.push(field);
   save.money -= cost;
+  recordCash(save, "landEquipment", "Land", -cost);
 
   renderField(map, overlay, field, 0); // fresh stubble; growth time is irrelevant
   return { field, acres, cost };
@@ -97,6 +99,7 @@ export function sellField(map: MlMap, overlay: OverlayEngine, save: SaveState, f
   const parcelIdx = save.parcels.findIndex((p) => p.id === field.parcelId);
   if (parcelIdx !== -1) save.parcels.splice(parcelIdx, 1);
   save.money += refund;
+  recordCash(save, "landEquipment", "Land", refund);
 
   removeFieldRender(map, overlay, field);
   return { field, refund };
@@ -121,6 +124,7 @@ export function renderField(map: MlMap, overlay: OverlayEngine, field: Field, no
     crop: field.crop,
     progress: growthProgress(field, now),
     windrowed: field.status === "harvested" && !!field.windrowed,
+    weedy: !!field.weedy,
     seed: hashSeed(field.id),
   };
   // Seed the texture from the field id so repaints stay stable across a session.

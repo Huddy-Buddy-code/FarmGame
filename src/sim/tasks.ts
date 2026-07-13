@@ -35,6 +35,9 @@ import { buildCoveragePath, sampleAt, workDoneAt, distanceAtWork } from "./cover
 import type { CoveragePath } from "./coverage";
 import { nearestFarmYard, nearestSiloForCrop, siloCapacityForCrop } from "./buildings";
 import type { Building } from "../state/saveState";
+import { planRoute } from "./roadNet";
+import type { RoadNetwork } from "./roadNet";
+import { recordCash } from "./ledger";
 
 const ACRE_M2 = 4046.8564224;
 
@@ -73,6 +76,13 @@ const IMPLEMENT_NAME: Record<ImplementKind, string> = {
   grainTrailer: "Grain Trailer",
 };
 const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
+
+/** Ledger item label for each field-expense task type (hover breakdown in the
+ * Finance tab's cashflow table). */
+const FIELD_EXPENSE_ITEM: Partial<Record<TaskType, string>> = {
+  plow: "Plowing", plant: "Planting", weed: "Weeding", fertilize: "Fertilizing",
+  rake: "Raking", bale: "Baling",
+};
 
 /** Which implement kind a task type needs (undefined = none, e.g. harvest).
  * Weed and fertilize both use a sprayer; rake/bale use their own tools;
@@ -225,6 +235,7 @@ export function buyAgent(save: SaveState, kind: EquipmentKind, size: EquipmentSi
     throw new Error(`A ${SIZE_LABEL[size].toLowerCase()} ${EQUIPMENT_NAME[kind].toLowerCase()} costs $${price.toLocaleString()} — not enough cash`);
   }
   save.money -= price;
+  recordCash(save, "landEquipment", `${EQUIPMENT_NAME[kind]}s`, -price);
   const agent = makeAgent(save, kind, size, home);
   save.agents.push(agent);
   return agent;
@@ -237,6 +248,7 @@ export function buyImplement(save: SaveState, kind: ImplementKind, size: Equipme
     throw new Error(`A ${SIZE_LABEL[size].toLowerCase()} ${IMPLEMENT_NAME[kind].toLowerCase()} costs $${price.toLocaleString()} — not enough cash`);
   }
   save.money -= price;
+  recordCash(save, "landEquipment", `${IMPLEMENT_NAME[kind]}s`, -price);
   const impl = makeImplement(save, kind, size);
   save.implements.push(impl);
   return impl;
@@ -267,6 +279,7 @@ export function sellAgent(save: SaveState, agentId: string): { agent: Agent; ref
   const refund = agent.purchaseCost ?? (agent.size ? agentPrice(agent.kind as EquipmentKind, agent.size) : 0);
   save.agents.splice(idx, 1);
   save.money += refund;
+  recordCash(save, "landEquipment", `${EQUIPMENT_NAME[agent.kind as EquipmentKind] ?? "Machine"}s`, refund);
   return { agent, refund };
 }
 
@@ -285,6 +298,7 @@ export function sellImplement(save: SaveState, implId: string): { impl: Implemen
   const refund = impl.purchaseCost ?? implementPrice(impl.kind, impl.size);
   save.implements.splice(idx, 1);
   save.money += refund;
+  recordCash(save, "landEquipment", `${IMPLEMENT_NAME[impl.kind]}s`, refund);
   return { impl, refund };
 }
 
@@ -459,6 +473,7 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
     throw new Error(`That costs $${cost.toLocaleString()} — not enough cash`);
   }
   save.money -= cost;
+  recordCash(save, "fieldExpenses", FIELD_EXPENSE_ITEM[type] ?? "Other", -cost);
   const task: FarmTask = {
     id: `task-${++taskSeq}`,
     type,
@@ -485,6 +500,7 @@ export function cancelTask(save: SaveState, taskId: string): FarmTask {
   save.tasks.splice(idx, 1);
   clearTaskRuntime(taskId);
   save.money += task.costPaid;
+  recordCash(save, "fieldExpenses", FIELD_EXPENSE_ITEM[task.type] ?? "Other", task.costPaid);
   return task;
 }
 
@@ -671,6 +687,99 @@ function samePos(a: Meters, b: Meters): boolean {
   return Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.5;
 }
 
+// --- Road-following travel (brief §9: "routes via roads") -------------------
+// The county road graph, injected by main.ts once the county package loads.
+// Null (tests, load failure) = the old straight-line travel, unchanged.
+let roadNet: RoadNetwork | null = null;
+export function setRoadNetwork(net: RoadNetwork | null): void {
+  roadNet = net;
+  agentRoutes.clear();
+}
+
+interface AgentRoute {
+  /** The destination this route was planned for (replanned if it changes). */
+  target: Meters;
+  pts: Meters[];
+  /** Cumulative distance at each pt. */
+  cum: number[];
+  /** How far along the polyline the agent has driven. */
+  dist: number;
+}
+// Runtime-only (not persisted): after a reload the agent just replans.
+const agentRoutes = new Map<string, AgentRoute>();
+
+/**
+ * Drive `agent` toward `target` for up to `budget` sim-minutes at `speed`
+ * (m/min), following roads when the network serves the trip (leave the field
+ * to the nearest road, drive the roads, leave the road at the point nearest
+ * the destination), else straight. Returns the unused budget; `agent.pos`
+ * equals `target` exactly on arrival (same contract as the old inline code).
+ */
+function driveToward(agent: Agent, target: Meters, speed: number, budget: number): number {
+  let route = agentRoutes.get(agent.id);
+  // Replan when the destination moved meaningfully (a combine still cutting
+  // creeps along its lanes — don't re-run A* every tick chasing half-meter
+  // drift; the final approach closes the gap as a short straight hop).
+  if (!route || Math.hypot(route.target[0] - target[0], route.target[1] - target[1]) > 25) {
+    const pts = roadNet ? planRoute(roadNet, agent.pos, target) : null;
+    if (pts) {
+      const cum: number[] = [0];
+      for (let i = 1; i < pts.length; i++) {
+        cum.push(cum[i - 1]! + Math.hypot(pts[i]![0] - pts[i - 1]![0], pts[i]![1] - pts[i - 1]![1]));
+      }
+      route = { target: [target[0], target[1]], pts, cum, dist: 0 };
+      agentRoutes.set(agent.id, route);
+    } else {
+      route = undefined as unknown as AgentRoute;
+      agentRoutes.delete(agent.id);
+    }
+  }
+
+  if (!route) {
+    // Straight-line fallback (no network / short hop / bad coverage).
+    const dx = target[0] - agent.pos[0];
+    const dy = target[1] - agent.pos[1];
+    const dist = Math.hypot(dx, dy);
+    if (dist <= 1e-9) {
+      agent.pos = [target[0], target[1]];
+      return budget;
+    }
+    agent.heading = Math.atan2(dy, dx);
+    const timeNeeded = dist / speed;
+    if (timeNeeded <= budget) {
+      agent.pos = [target[0], target[1]];
+      return budget - timeNeeded;
+    }
+    const f = (budget * speed) / dist;
+    agent.pos = [agent.pos[0] + dx * f, agent.pos[1] + dy * f];
+    return 0;
+  }
+
+  const total = route.cum[route.cum.length - 1]!;
+  const travel = Math.min(speed * budget, total - route.dist);
+  route.dist += travel;
+  const used = travel / speed;
+  // Sample position + heading at route.dist.
+  let i = 1;
+  while (i < route.cum.length - 1 && route.cum[i]! < route.dist) i++;
+  const a = route.pts[i - 1]!, b = route.pts[i]!;
+  const segLen = route.cum[i]! - route.cum[i - 1]!;
+  const t = segLen > 1e-9 ? (route.dist - route.cum[i - 1]!) / segLen : 1;
+  agent.pos = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+  if (segLen > 1e-9) agent.heading = Math.atan2(b[1] - a[1], b[0] - a[0]);
+  if (route.dist >= total - 1e-6) {
+    agent.pos = [target[0], target[1]];
+    agentRoutes.delete(agent.id);
+    return budget - used;
+  }
+  return 0;
+}
+
+/** Drop any planned route (agent is switching activities / going idle). */
+function clearAgentRoute(agentId: string): void {
+  agentRoutes.delete(agentId);
+}
+
 /** Where an idle tractor/harvester with no queued work should park: the
  * nearest Tractor Barn with a free slot (occupancy = other idle machines
  * already sitting at that barn's spot), else the nearest Farm Yard, else
@@ -786,21 +895,9 @@ function tickAgent(
         // stay exactly where it stopped (pre-buildings behavior).
         const home = homeTargetFor(save, agent);
         if (home && !samePos(agent.pos, home)) {
-          const dx = home[0] - agent.pos[0];
-          const dy = home[1] - agent.pos[1];
-          const dist = Math.hypot(dx, dy);
           const speed = (gameConfig.work.travelSpeedKmh * 1000) / 60; // meters per sim-minute
-          if (dist > 1e-6) agent.heading = Math.atan2(dy, dx);
           agent.state = "traveling";
-          const timeNeeded = dist / speed;
-          if (timeNeeded <= budget) {
-            agent.pos = home;
-            budget -= timeNeeded;
-          } else {
-            const f = (budget * speed) / dist;
-            agent.pos = [agent.pos[0] + dx * f, agent.pos[1] + dy * f];
-            budget = 0;
-          }
+          budget = driveToward(agent, home, speed, budget);
           continue;
         }
         agent.state = "idle";
@@ -846,6 +943,7 @@ function tickAgent(
         // guard) or trailer detached mid-job — don't strand the tractor.
         save.tasks.splice(save.tasks.indexOf(task), 1);
         agent.taskId = undefined;
+      clearAgentRoute(agent.id);
         agent.state = "idle";
         continue;
       }
@@ -882,22 +980,10 @@ function tickAgent(
           budget = 0;
           continue;
         }
-        const dx = silo.pos[0] - agent.pos[0];
-        const dy = silo.pos[1] - agent.pos[1];
-        const dist = Math.hypot(dx, dy);
-        if (dist > 0.5) {
+        if (!samePos(agent.pos, silo.pos)) {
           task.waitingForSilo = false;
           agent.state = "traveling";
-          if (dist > 1e-6) agent.heading = Math.atan2(dy, dx);
-          const timeNeeded = dist / speed;
-          if (timeNeeded <= budget) {
-            agent.pos = silo.pos;
-            budget -= timeNeeded;
-          } else {
-            const f = (budget * speed) / dist;
-            agent.pos = [agent.pos[0] + dx * f, agent.pos[1] + dy * f];
-            budget = 0;
-          }
+          budget = driveToward(agent, silo.pos, speed, budget);
           continue;
         }
         // Arrived — dump only if the crop's pooled silo capacity has room.
@@ -941,6 +1027,7 @@ function tickAgent(
         events.push({ kind: "finished", task, agent });
         save.tasks.splice(save.tasks.indexOf(task), 1);
         agent.taskId = undefined;
+      clearAgentRoute(agent.id);
         agent.state = "idle";
         continue;
       }
@@ -949,21 +1036,9 @@ function tickAgent(
       // stationary while full — see the harvest-pause block below).
       {
         const target = harvester.pos;
-        const dx = target[0] - agent.pos[0];
-        const dy = target[1] - agent.pos[1];
-        const dist = Math.hypot(dx, dy);
         agent.state = "traveling";
-        if (dist > 0.5) {
-          if (dist > 1e-6) agent.heading = Math.atan2(dy, dx);
-          const timeNeeded = dist / speed;
-          if (timeNeeded <= budget) {
-            agent.pos = target;
-            budget -= timeNeeded;
-          } else {
-            const f = (budget * speed) / dist;
-            agent.pos = [agent.pos[0] + dx * f, agent.pos[1] + dy * f];
-            budget = 0;
-          }
+        if (!samePos(agent.pos, target)) {
+          budget = driveToward(agent, target, speed, budget);
           continue;
         }
         task.unloadPhase = "onloading";
@@ -978,6 +1053,7 @@ function tickAgent(
       // Field vanished mid-task (sold) — drop the job.
       save.tasks.splice(save.tasks.indexOf(task), 1);
       agent.taskId = undefined;
+      clearAgentRoute(agent.id);
       agent.state = "idle";
       continue;
     }
@@ -987,21 +1063,9 @@ function tickAgent(
       // begins exactly where the first lane does.
       const path = getActivePath(save, task, field, agent);
       const target = path.pts[0]!;
-      const dx = target[0] - agent.pos[0];
-      const dy = target[1] - agent.pos[1];
-      const dist = Math.hypot(dx, dy);
       const speed = (gameConfig.work.travelSpeedKmh * 1000) / 60; // meters per sim-minute
-      if (dist > 1e-6) agent.heading = Math.atan2(dy, dx);
-      const timeNeeded = dist / speed;
-      if (timeNeeded <= budget) {
-        agent.pos = target;
-        budget -= timeNeeded;
-        agent.state = "working";
-      } else {
-        const f = (budget * speed) / dist;
-        agent.pos = [agent.pos[0] + dx * f, agent.pos[1] + dy * f];
-        budget = 0;
-      }
+      budget = driveToward(agent, target, speed, budget);
+      if (samePos(agent.pos, target)) agent.state = "working";
       continue;
     }
 
@@ -1094,6 +1158,7 @@ function tickAgent(
         clearTaskRuntime(task.id);
         save.tasks.splice(save.tasks.indexOf(task), 1);
         agent.taskId = undefined;
+      clearAgentRoute(agent.id);
         agent.state = "idle";
       }
       continue;
@@ -1183,6 +1248,7 @@ function tickAgent(
       clearTaskRuntime(task.id);
       save.tasks.splice(save.tasks.indexOf(task), 1);
       agent.taskId = undefined;
+      clearAgentRoute(agent.id);
       agent.state = "idle";
       // The last partial hopper (never hit "full" mid-job) still needs a ride
       // — usually already queued by the post-banking check above, but the
@@ -1220,9 +1286,13 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
       applyBaleDone(field);
       break;
     case "weed":
+      // Clears the weed flush; no new one comes until the next crop goes in.
+      field.weedy = undefined;
+      field.weeded = true;
+      break;
     case "fertilize":
-      // No persistent field effect yet — a time/cost sink until a weed-
-      // pressure or fertility system exists to hook into (out of scope here).
+      // No persistent field effect yet — a fertility system to hook into is
+      // still out of scope; it's a time/cost sink for now.
       break;
   }
 }

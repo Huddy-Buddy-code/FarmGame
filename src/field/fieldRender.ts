@@ -30,6 +30,10 @@ export interface FieldPaintParams {
   /** Raked: overlay windrows (gathered forage in spaced rows) on the harvested
    * surface. Visual-only — the field's lifecycle status stays "harvested". */
   windrowed?: boolean;
+  /** Weed pressure: ragged bright-green weed patches scattered over the crop.
+   * The weeding task's sweep-reveal repaints WITHOUT this flag strip-by-strip,
+   * so the sprayer visibly cleans the field as it works. */
+  weedy?: boolean;
   seed?: number;
 }
 
@@ -70,50 +74,76 @@ export function drawFieldTexture(
     const { base, dark, light } = palette(p);
     ground(ctx, w, h, seed, base, dark, light);
 
+    // NOTE on scale: the overlay renders at 0.5 m/px, so "spacing 1.6" ≈ 0.8 m —
+    // true corn-row scale. Constants below are px at that resolution.
     switch (p.status) {
       case "stubble":
-        rows(ctx, w, h, angle, 3, "#c8b98f", 1, 0.16); // faint combine passes
+        rows(ctx, w, h, angle, 6, "#c8b98f", 1.6, 0.14); // faint old combine passes
+        rows(ctx, w, h, angle, 1.8, "#a89a72", 0.7, 0.1); // relic row stubs
+        weedPatches(ctx, w, h, seed + 11, 0.35, "#6f7f4a", "#8b9a5d"); // volunteer growth
         break;
 
       case "tilled":
-        // Fresh-turned soil: clear plow furrows.
-        rows(ctx, w, h, angle, 2.5, "#54432f", 1.1, 0.35);
-        rows(ctx, w, h, angle, 2.5, "#837056", 0.7, 0.25, 1.25); // lit furrow edges
+        // Fresh-turned soil: crisp plow furrows with lit shoulders + clod litter.
+        rows(ctx, w, h, angle, 2.2, "#54432f", 1.2, 0.4);
+        rows(ctx, w, h, angle, 2.2, "#837056", 0.7, 0.3, 1.1); // lit furrow edges
+        clods(ctx, w, h, seed + 3, "#4c3d2b", "#8d7a5e", angle);
+        deadFurrows(ctx, w, h, angle, seed + 5, "#46372a");
         break;
 
       case "planted":
-        // Seeded soil: faint green rows emerging.
-        rows(ctx, w, h, angle, 3, "#5d7444", 1, 0.3);
+        // Seeded soil: planter row marks + the first faint green flush.
+        rows(ctx, w, h, angle, 1.6, "#6b5a42", 0.6, 0.25); // seed trenches
+        rows(ctx, w, h, angle, 1.6, "#5d7444", 0.8, 0.28, 0.5); // emerging seedlings
+        tramlines(ctx, w, h, angle, "#6b5a42", 0.5);
         break;
 
       case "growing": {
         const t = clamp01(((p.progress ?? 0) - 0.15) / 0.85); // 0 at emergence → 1 at ready
-        // Young crop: crisp green rows that thicken, then dissolve into canopy.
-        const rowAlpha = t < 0.5 ? 0.55 : 0.55 - (t - 0.5) * 0.8; // fade as canopy closes
-        rows(ctx, w, h, angle, 3, "#4a6a35", 1 + t * 1.6, Math.max(0.12, rowAlpha));
+        // Young crop: crisp green rows over visible soil that thicken with the
+        // canopy, then dissolve into it.
+        const rowAlpha = t < 0.5 ? 0.6 : 0.6 - (t - 0.5) * 0.9; // fade as canopy closes
+        rows(ctx, w, h, angle, 1.6, "#4a6a35", 0.7 + t * 1.1, Math.max(0.12, rowAlpha));
+        rows(ctx, w, h, angle, 1.6, "#5f8244", 0.4, Math.max(0.08, rowAlpha * 0.6), 0.4); // lit leaf rows
+        // Sprayer wheel tracks stay visible until the canopy swallows them.
+        tramlines(ctx, w, h, angle, "#6b5a42", Math.max(0, 0.5 - t * 0.6));
         // Late season: canopy micro-texture (crown mottling).
-        if (t > 0.5) canopyMottle(ctx, w, h, seed + 7, "#3f5a2d", "#61814a", (t - 0.5) * 2);
+        if (t > 0.4) canopyMottle(ctx, w, h, seed + 7, "#3f5a2d", "#61814a", (t - 0.4) * 1.6);
         break;
       }
 
       case "ready":
-        canopyMottle(ctx, w, h, seed + 7, dark, light, 0.8);
-        rows(ctx, w, h, angle, 3, dark, 0.8, 0.18);
+        canopyMottle(ctx, w, h, seed + 7, dark, light, 0.9);
+        rows(ctx, w, h, angle, 1.6, dark, 0.6, 0.16);
+        rows(ctx, w, h, angle, 12, dark, 2.2, 0.1); // lodged/leaning bands
+        tramlines(ctx, w, h, angle, dark, 0.25);
         break;
 
       case "harvested":
-        // Cut stubble: strong parallel cut lines + chaff rows.
-        rows(ctx, w, h, angle, 3, "#93835a", 1.2, 0.3);
-        rows(ctx, w, h, angle, 9, "#c9ba90", 2.2, 0.28, 4.5); // windrowed chaff lines
+        // Cut stubble: strong parallel cut lines, header-width pass stripes,
+        // and pale chaff windrows out the back of the combine.
+        rows(ctx, w, h, angle, 2.2, "#93835a", 0.9, 0.3);
+        passStripes(ctx, w, h, angle, 18, 0.07); // alternating header passes
+        rows(ctx, w, h, angle, 18, "#cfc094", 3.4, 0.3, 9); // chaff lines
+        rows(ctx, w, h, angle, 18, "#a2905f", 1.2, 0.2, 11.5); // chaff shadow
         break;
 
       case "mulched":
         // Baled/mulched: clean, tidy surface with grass showing through — soft,
         // evenly-spaced mown lines, no rough stubble. (Bales themselves are drawn
         // as separate map markers.)
-        rows(ctx, w, h, angle, 6, "#7f8f5e", 0.9, 0.22);
-        rows(ctx, w, h, angle, 6, "#aebd88", 0.6, 0.18, 3); // lit mown edges
+        rows(ctx, w, h, angle, 5, "#7f8f5e", 1.1, 0.22);
+        rows(ctx, w, h, angle, 5, "#aebd88", 0.7, 0.18, 2.5); // lit mown edges
+        passStripes(ctx, w, h, angle, 25, 0.05);
         break;
+    }
+
+    // Weed pressure: rank, bright patches strewn over whatever's underneath.
+    // Painted LAST so weeds sit on top of rows/canopy; the weeding task's
+    // reveal repaints without this flag, wiping them strip-by-strip.
+    if (p.weedy) {
+      weedPatches(ctx, w, h, seed + 23, 1, "#55712f", "#84a648");
+      weedPatches(ctx, w, h, seed + 41, 0.5, "#6e8f3a", "#9cb45e");
     }
 
     // Windrows (raked forage): thick, widely-spaced rows of gathered residue
@@ -137,7 +167,7 @@ export function drawFieldTexture(
     ctx.globalCompositeOperation = "destination-out";
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
-    const featherPx = 3; // inward fade width (≈ metres at 1 m/px) — a tight, crisp margin
+    const featherPx = 6; // inward fade width (6 px ≈ 3 m at 0.5 m/px) — a tight, crisp margin
     const passes = 6;
     for (let k = 0; k < passes; k++) {
       ctx.globalAlpha = 0.3;
@@ -249,6 +279,100 @@ function rows(
     ctx.lineTo(diag / 2, d);
   }
   ctx.stroke();
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+/**
+ * Weed patches: ragged clusters of overlapping tufts in rank greens, plus a
+ * scatter of lone volunteers. Density scales with `strength` (0..1+). Used at
+ * full strength for weed pressure and low strength for stubble volunteers.
+ */
+function weedPatches(
+  ctx: CanvasRenderingContext2D, w: number, h: number,
+  seed: number, strength: number, dark: string, light: string,
+): void {
+  const rng = mulberry32(seed);
+  // Clumps: each an irregular blob of 6–14 overlapping soft circles.
+  const clumps = Math.floor(((w * h) / 5200) * strength);
+  for (let i = 0; i < clumps; i++) {
+    const cx = rng() * w, cy = rng() * h;
+    const n = 6 + Math.floor(rng() * 9);
+    const spread = 3 + rng() * 9;
+    for (let k = 0; k < n; k++) {
+      ctx.fillStyle = rng() < 0.55 ? dark : light;
+      ctx.globalAlpha = 0.18 + rng() * 0.3;
+      const a = rng() * Math.PI * 2, r = rng() * spread;
+      ctx.beginPath();
+      ctx.arc(cx + Math.cos(a) * r, cy + Math.sin(a) * r * 0.7, 0.8 + rng() * 2.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  // Lone tufts between the clumps.
+  const tufts = Math.floor(((w * h) / 900) * strength);
+  for (let i = 0; i < tufts; i++) {
+    ctx.fillStyle = rng() < 0.5 ? dark : light;
+    ctx.globalAlpha = 0.12 + rng() * 0.2;
+    ctx.beginPath();
+    ctx.arc(rng() * w, rng() * h, 0.5 + rng() * 1.1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+/** Clod litter on fresh-plowed ground: short dark/lit dashes lying roughly
+ * along the furrow direction — reads as turned earth, not flat paint. */
+function clods(ctx: CanvasRenderingContext2D, w: number, h: number, seed: number, dark: string, light: string, angleRad: number): void {
+  const rng = mulberry32(seed);
+  const n = Math.floor((w * h) / 260);
+  ctx.save();
+  ctx.lineCap = "round";
+  for (let i = 0; i < n; i++) {
+    ctx.strokeStyle = rng() < 0.6 ? dark : light;
+    ctx.globalAlpha = 0.1 + rng() * 0.22;
+    ctx.lineWidth = 0.6 + rng() * 1.1;
+    const x = rng() * w, y = rng() * h;
+    const a = angleRad + (rng() - 0.5) * 0.9;
+    const len = 1 + rng() * 3;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len);
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+/** A couple of "dead furrows" — the deeper trenches where plow passes meet —
+ * spaced far apart, giving big fields the segmented look they have from the air. */
+function deadFurrows(ctx: CanvasRenderingContext2D, w: number, h: number, angleRad: number, seed: number, color: string): void {
+  const rng = mulberry32(seed);
+  rows(ctx, w, h, angleRad, 60 + rng() * 30, color, 1.8, 0.28, rng() * 40);
+}
+
+/** Sprayer wheel tracks: PAIRED soil-colored lines on a wide spacing (a real
+ * tramline is two wheel ruts ~2 m apart, every ~24 m). Fades with `alpha`. */
+function tramlines(ctx: CanvasRenderingContext2D, w: number, h: number, angleRad: number, color: string, alpha: number): void {
+  if (alpha <= 0.01) return;
+  rows(ctx, w, h, angleRad, 48, color, 0.9, alpha, -2);
+  rows(ctx, w, h, angleRad, 48, color, 0.9, alpha, 2);
+}
+
+/** Alternating light/dark bands at machine-pass width — the subtle striping
+ * every worked field shows from the air (opposite driving directions lay the
+ * residue differently). */
+function passStripes(ctx: CanvasRenderingContext2D, w: number, h: number, angleRad: number, spacing: number, alpha: number): void {
+  const diag = Math.hypot(w, h);
+  ctx.save();
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate(angleRad);
+  let flip = false;
+  for (let d = -diag / 2; d <= diag / 2; d += spacing) {
+    flip = !flip;
+    ctx.fillStyle = flip ? "#ffffff" : "#000000";
+    ctx.globalAlpha = alpha;
+    ctx.fillRect(-diag / 2, d, diag, spacing);
+  }
   ctx.restore();
   ctx.globalAlpha = 1;
 }

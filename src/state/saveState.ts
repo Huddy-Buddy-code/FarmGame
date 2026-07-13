@@ -86,6 +86,12 @@ export interface Field {
   /** Set true the moment a rake starts working this field — unlocks the baler
    * (which may start before the rake finishes). Cleared once baled/plowed. */
   windrowed?: boolean;
+  /** Weed pressure (visual + weeding-task target): set once per crop when the
+   * weeding window opens on a standing crop that hasn't been sprayed; the
+   * weeding task's sweep clears it strip-by-strip. */
+  weedy?: boolean;
+  /** This crop has been weeded — no more weed flushes until the next planting. */
+  weeded?: boolean;
   /** Physical bales sitting in the field — one entry per bale, at the UTM-meter
    * spot the baler dropped it. They accumulate as the baler works and persist
    * (exactly where dropped, across save/reload) until the player sells them.
@@ -256,6 +262,9 @@ export interface SaveState {
   implements: Implement[];
   tasks: FarmTask[];
   finance: FinanceState;
+  /** Cashflow ledger: campaign year -> category -> item -> net dollars (see
+   * `sim/ledger.ts`). Only the most recent 5 years are kept. */
+  ledger?: Record<number, import("../sim/ledger").LedgerYear>;
   contracts: unknown[]; // shape defined when the contract slice lands (brief §6)
   /** Lite to-do list for player notes. */
   todos?: TodoItem[];

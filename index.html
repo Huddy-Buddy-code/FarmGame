@@ -314,25 +314,55 @@
         position: absolute; top: 10px; right: 12px; border: none; background: none;
         font-size: 16px; padding: 2px 6px; color: #8a7658;
       }
-      .loan-row {
+      .fin-heading {
+        font-size: 11px; font-weight: 700; color: #8a7658; text-transform: uppercase;
+        letter-spacing: 0.05em; margin: 10px 0 4px; padding-bottom: 2px;
+        border-bottom: 2px solid var(--cream-2);
+      }
+      /* Condensed loans: one line per loan, actions inline. */
+      .loan-line {
+        display: flex; align-items: center; gap: 8px;
         background: var(--cream-2); border: 1.5px solid var(--wood);
-        border-radius: 12px; padding: 10px 12px; margin: 8px 0;
+        border-radius: 9px; padding: 5px 10px; margin: 4px 0; font-size: 12px;
       }
-      .loan-row .lr-top { display: flex; align-items: center; gap: 10px; }
-      .loan-row .lr-icon { font-size: 22px; }
-      .loan-row .lr-info { flex: 1; min-width: 0; }
-      .loan-row .lr-name { font-weight: 700; }
-      .loan-row .lr-sub { font-size: 12px; color: #8a7658; }
-      .loan-row .lr-actions { display: flex; gap: 8px; margin-top: 8px; }
-      .amt-btn { flex: 1; padding: 7px 4px; font-size: 13px; }
-      .amt-btn.borrow { background: var(--green); color: #fff; border-color: var(--green-dark); }
-      .amt-btn.borrow:hover { background: var(--green-dark); }
-      .amt-btn:disabled { opacity: 0.4; cursor: default; }
-      .refi-btn {
-        display: block; margin-top: 6px; padding: 3px 8px; font-size: 11px;
-        width: auto; background: var(--cream); color: var(--ink);
+      .loan-line.open { border-style: dashed; }
+      .loan-line .ll-name { font-weight: 700; white-space: nowrap; }
+      .loan-line .ll-sub { flex: 1; min-width: 0; color: #8a7658; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .ll-btn { padding: 3px 8px; font-size: 11px; border-radius: 7px; white-space: nowrap; }
+      .ll-btn.borrow { background: var(--green); color: #fff; border-color: var(--green-dark); }
+      .ll-btn.borrow:hover { background: var(--green-dark); }
+      .ll-btn.refi { padding: 3px 6px; }
+      .ll-btn:disabled { opacity: 0.4; cursor: default; }
+
+      /* Cashflow table: Year | four categories | Net. Hover a figure for the
+         per-item breakdown tooltip. */
+      .cf-table { display: flex; flex-direction: column; margin-top: 2px; }
+      .cf-row {
+        display: grid; grid-template-columns: 64px repeat(5, 1fr);
+        align-items: center; gap: 4px; padding: 4px 6px; border-radius: 7px;
+        font-size: 12px;
       }
-      .refi-btn:disabled { opacity: 0.4; cursor: default; }
+      .cf-row:nth-child(even) { background: rgba(138, 90, 51, 0.06); }
+      .cf-row.current { background: var(--cream-2); border: 1.5px solid var(--wood); }
+      .cf-head {
+        font-size: 10px; font-weight: 700; color: #8a7658; text-transform: uppercase;
+        letter-spacing: 0.03em; background: none !important; border: none;
+      }
+      .cf-head div:not(:first-child) { text-align: right; }
+      .cf-year { font-weight: 700; }
+      .cf-cell { position: relative; text-align: right; font-variant-numeric: tabular-nums; cursor: default; }
+      .cf-cell.neg, .cf-tip-row .neg { color: var(--red); }
+      .cf-cell.pos, .cf-tip-row .pos { color: var(--green-dark); }
+      .cf-net { font-weight: 700; }
+      .cf-tip {
+        display: none; position: absolute; right: 0; bottom: calc(100% + 4px);
+        z-index: 60; min-width: 190px; padding: 8px 10px; text-align: left;
+        background: var(--cream); border: 2px solid var(--wood); border-radius: 10px;
+        box-shadow: var(--shadow); font-size: 11px; color: var(--ink);
+      }
+      .cf-cell:hover .cf-tip { display: block; }
+      .cf-tip-title { font-weight: 700; margin-bottom: 4px; color: #8a7658; }
+      .cf-tip-row { display: flex; justify-content: space-between; gap: 12px; padding: 1px 0; }
 
       /* ---------- Fields tab (bottom-toolbar panel listing owned fields) ---------- */
       #fieldstab h2 { margin: 0 0 8px; font-size: 18px; }
@@ -360,22 +390,44 @@
         position: absolute; top: 10px; right: 12px; border: none; background: none;
         font-size: 16px; padding: 2px 6px; color: #8a7658;
       }
-      /* Buy shop: grouped size buttons. */
-      #equip-shop { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-      .shop-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-      .shop-label {
-        display: flex; align-items: center; gap: 5px; font-weight: 700; font-size: 12px;
-        width: 84px; flex-shrink: 0; color: var(--ink);
+      /* Buy shop: a dealer-lot grid — one product line per row, size tiers in
+         fixed aligned columns so specs/prices compare straight down. */
+      #equip-shop { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+      .shop-section {
+        font-size: 11px; font-weight: 700; color: #8a7658; text-transform: uppercase;
+        letter-spacing: 0.05em; margin: 8px 0 0; padding-bottom: 2px;
+        border-bottom: 2px solid var(--cream-2);
       }
-      .shop-label .icon { display: inline-flex; }
+      .shop-row { display: grid; grid-template-columns: 128px repeat(3, 1fr); gap: 5px; align-items: stretch; }
+      .shop-head { font-size: 10px; font-weight: 700; color: #b3a184; text-align: center; text-transform: uppercase; letter-spacing: 0.05em; }
+      .shop-head div { padding-top: 2px; }
+      .shop-line-label {
+        display: flex; align-items: center; gap: 7px; font-weight: 700; font-size: 13px;
+        color: var(--ink); min-width: 0;
+      }
+      .shop-line-label .icon { display: inline-flex; flex-shrink: 0; }
+      .shop-emoji { font-size: 20px; }
+      .shop-na { display: flex; align-items: center; justify-content: center; color: #cbbc9d; font-weight: 700; }
+      .shop-card {
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 1px; padding: 5px 6px; font-size: 11px; line-height: 1.25;
+        background: var(--cream-2); border: 1.5px solid var(--wood); border-radius: 9px;
+        color: var(--ink); text-align: center;
+      }
+      .shop-card:hover { background: #ead9b5; }
+      .shop-card .spec { font-weight: 700; }
+      .shop-card .sub { font-size: 10px; color: #8a7658; }
+      .shop-card .price { font-size: 11px; font-weight: 700; color: var(--green-dark); }
+      .shop-card:disabled { opacity: 0.4; cursor: default; }
+      .shop-card:disabled .price { color: var(--red); }
+      .shop-bgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-top: 5px; }
+      /* Building popup's sell button reuses this class. */
       .shop-buy {
-        flex: 1; min-width: 78px; display: flex; flex-direction: column; align-items: center;
+        display: flex; flex-direction: column; align-items: center;
         gap: 1px; padding: 5px 6px; font-size: 12px; background: var(--green); color: #fff;
         border-color: var(--green-dark);
       }
       .shop-buy:hover { background: var(--green-dark); }
-      .shop-buy .small { color: rgba(255, 255, 255, 0.85); font-size: 11px; }
-      .shop-buy:disabled { opacity: 0.4; cursor: default; background: var(--cream-2); color: var(--ink); border-color: var(--wood); }
       .equip-heading {
         font-size: 11px; font-weight: 700; color: #8a7658; text-transform: uppercase;
         letter-spacing: 0.04em; margin: 4px 0 2px;
