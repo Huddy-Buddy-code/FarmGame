@@ -148,6 +148,84 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     expect(save.grain.corn).toBeGreaterThan(0);
   });
 
+  it("the staging gate is LOCKED — the cart doesn't bounce between gates as the combine sweeps (maintainer report, 2026-07-13)", () => {
+    const save = gameWithAgents();
+    const field = readyField(40, 6);
+    const side = Math.sqrt(40 * 4046.8564224);
+    field.accessPoints = [[side / 2, 0], [side / 2, side]]; // south + north gates
+    save.fields.push(field);
+    buyImplement(save, "grainTrailer", "medium");
+    const silo = buyBuildingAt(save, "silo", [-800, -800], "large");
+    assignSiloCrop(save, silo.id, "corn");
+    const combine = combineOf(save);
+    const tractor = tractorOf(save);
+
+    let now = APRIL_1;
+    enqueueTask(save, field, "harvest", now);
+    // Once the cart first parks at a gate, it must not move until the combine
+    // is actually full — even as the combine's sweep flips which gate is nearer.
+    let parkedAt: Meters | null = null;
+    let moved = false;
+    for (let i = 0; i < 400_000 && (combine.grainOnboard ?? 0) < harvesterCapacityTons("medium") - 1e-9; i++) {
+      now += 1;
+      tickFarming(save, now);
+      tickTasks(save, now, 1, () => 0.5);
+      const trip = unloadTaskFor(save, combine.id);
+      if (trip?.unloadPhase !== "staging") continue;
+      if (!parkedAt && tractor.state === "working") parkedAt = [tractor.pos[0], tractor.pos[1]];
+      else if (parkedAt && !samePos(tractor.pos, parkedAt)) moved = true;
+    }
+    expect(parkedAt).not.toBeNull();
+    expect(moved).toBe(false);
+  });
+
+  it("multi-load: a 60t cart drains the 50t combine, waits IN FIELD, tops off at the next stop, and dumps ~60t in one silo run", () => {
+    const save = gameWithAgents(); // medium combine, 50t hopper
+    const field = readyField(40, 6); // 240t total — several hopper fills
+    const side = Math.sqrt(40 * 4046.8564224);
+    field.accessPoints = [[side / 2, 0], [side / 2, side]];
+    save.fields.push(field);
+    buyImplement(save, "grainTrailer", "medium"); // 60t cart
+    const silo = buyBuildingAt(save, "silo", [-800, -800], "large");
+    assignSiloCrop(save, silo.id, "corn");
+    const combine = combineOf(save);
+
+    let now = APRIL_1;
+    enqueueTask(save, field, "harvest", now);
+    now = runUntil(save, now, () => save.grain.corn > 0, 400_000, 5);
+    // First silo delivery is a FULL cart (50t first stop + 10t top-off), not
+    // the old one-drain-one-trip 50t.
+    expect(save.grain.corn).toBeGreaterThan(55);
+    expect(save.grain.corn).toBeLessThanOrEqual(60.5);
+  });
+
+  it("partial cart heads to the silo once the harvest is over and the combine is drained", () => {
+    const save = gameWithAgents();
+    // ~55t total: one 50t stop mid-field, ~5t tail when the field finishes.
+    const field = readyField(9.2, 6);
+    const side = Math.sqrt(9.2 * 4046.8564224);
+    field.accessPoints = [[side / 2, 0], [side / 2, side]];
+    save.fields.push(field);
+    buyImplement(save, "grainTrailer", "medium"); // 60t — never fills
+    const silo = buyBuildingAt(save, "silo", [-800, -800], "large");
+    assignSiloCrop(save, silo.id, "corn");
+
+    let now = APRIL_1;
+    enqueueTask(save, field, "harvest", now);
+    // No mid-harvest silo run: grain stays at 0 until the harvest task is gone.
+    while (save.tasks.some((t) => t.type === "harvest") && now < APRIL_1 + 400_000) {
+      now += 5;
+      tickFarming(save, now);
+      tickTasks(save, now, 5, () => 0.5);
+      expect(save.grain.corn).toBe(0);
+    }
+    // Then the whole crop arrives in one partial-cart delivery.
+    const total = 9.2 * 6;
+    now = runUntil(save, now, () => save.grain.corn > 0, 300_000, 5);
+    expect(save.grain.corn).toBeGreaterThan(total * 0.95);
+    expect(save.grain.corn).toBeLessThanOrEqual(total * 1.05);
+  });
+
   it("a full haul cycle (toHarvester → onloading → toSilo → dumping) lands grain in the assigned silo's crop bin", () => {
     const save = gameWithAgents();
     const silo = buyBuildingAt(save, "silo", [-50, -50], "large");

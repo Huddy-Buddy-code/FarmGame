@@ -235,9 +235,11 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     runUntil(save, ready + 120, () => field.status === "harvested");
     expect(field.status).toBe("harvested");
     expect(field.crop).toBeUndefined();
-    // Field's done, but the last hopper-load may still be en route to the
-    // silo — drive on until it's actually landed in the farm bin.
-    runUntil(save, ready + 120, () => save.grain.corn > 0);
+    // Field's done, but the grain cart may still be topping off / en route —
+    // drive on until EVERYTHING has landed in the farm bin (the cart only
+    // heads to the silo when full, or partially full once the combine's
+    // drained — maintainer request, 2026-07-13).
+    runUntil(save, ready + 120, () => save.grain.corn >= 100 * truth - 0.5);
     expect(save.grain.corn).toBeCloseTo(100 * truth, 0);
   });
 

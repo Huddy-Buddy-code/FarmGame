@@ -610,6 +610,11 @@ const baleLastInside = new Map<string, Meters>();
 // ±10% jitter on the CURRENT pending bale's spacing, so bales don't land on an
 // obvious grid. Rolled once per bale, held until it drops, then re-rolled.
 const baleJitter = new Map<string, number>();
+// The staging gate a grain cart committed to for an unload trip. Locked on
+// first choice — re-picking "nearest gate to the combine" every tick made the
+// cart bounce between gates as the combine swept back and forth (maintainer
+// report, 2026-07-13). Cleared with the task; a reload just re-picks once.
+const stageGateRuntime = new Map<string, Meters>();
 
 /** Working width (meters) for a task: from the attached implement (plow/
  * planter), or the config combine header width for harvest. */
@@ -647,6 +652,7 @@ function clearTaskRuntime(taskId: string): void {
   baleTieRemaining.delete(taskId);
   baleLastInside.delete(taskId);
   baleJitter.delete(taskId);
+  stageGateRuntime.delete(taskId);
 }
 
 /** Things that happened during a tick, for the UI to toast. */
@@ -1025,7 +1031,12 @@ function tickAgent(
         trailer.cargoTons = (trailer.cargoTons ?? 0) + amount;
         trailer.cargoCrop = task.crop; // captured at task creation — see ensureUnloadTask
         task.phaseTimer = undefined;
-        task.unloadPhase = "toSilo";
+        // Multi-load grain-cart behavior (maintainer request, 2026-07-13):
+        // don't run to the silo after every drain — drop back into the
+        // staging decision, which sends the cart to the silo only when IT'S
+        // full (or the harvest is over), and otherwise parks it back at the
+        // gate to service the combine's next stop.
+        task.unloadPhase = "staging";
         continue;
       }
 
@@ -1091,22 +1102,54 @@ function tickAgent(
         continue;
       }
 
-      // Default / "staging" / "toHarvester": don't chase a combine that's
-      // still cutting — stage at the field's access gate and wait until it
+      // Default / "staging" / "toHarvester": the grain-cart brain. Don't
+      // chase a combine that's still cutting — stage at the field's access
+      // gate (ONE gate, locked on first choice) and move in only when it
       // actually STOPS for unloading: hopper full, field finished, or
-      // otherwise sitting idle with grain (maintainer request, 2026-07-13).
+      // otherwise sitting idle with grain. After each drain the cart comes
+      // back through here: silo only when the CART's full or the harvest is
+      // over; otherwise back to the gate for the combine's next stop
+      // (maintainer requests, 2026-07-13).
       {
         const cap = harvesterCapacityTons(harvester.size ?? "medium");
-        const full = (harvester.grainOnboard ?? 0) >= cap - 1e-9;
+        const combineFull = (harvester.grainOnboard ?? 0) >= cap - 1e-9;
+        const combineEmpty = (harvester.grainOnboard ?? 0) <= 1e-9;
         const stillCutting = save.tasks.some(
           (t) => t.type === "harvest" && t.status === "active" && t.agentId === harvester.id,
         );
-        if (!full && stillCutting) {
+        const trailerCap = grainTrailerCapacityTons(trailer.size);
+        const cargo = trailer.cargoTons ?? 0;
+        const trailerFull = cargo >= trailerCap - 1e-9;
+
+        // Head for the silo: cart full, or carrying a partial load with the
+        // harvest over and the combine drained (nothing more coming).
+        if (trailerFull || (cargo > 1e-9 && !stillCutting && combineEmpty)) {
+          task.unloadPhase = "toSilo";
+          continue;
+        }
+        // Nothing loaded, nothing coming: the trip's moot — stand down.
+        if (cargo <= 1e-9 && combineEmpty && !stillCutting) {
+          save.tasks.splice(save.tasks.indexOf(task), 1);
+          clearTaskRuntime(task.id);
+          agent.taskId = undefined;
+          clearAgentRoute(agent.id);
+          agent.state = "idle";
+          continue;
+        }
+
+        if (!combineFull && stillCutting) {
           task.unloadPhase = "staging";
-          const field = save.fields.find((f) => f.id === task.fieldId);
-          const gate = field?.accessPoints && field.accessPoints.length >= 2
-            ? nearestGate(field, harvester.pos)
-            : null;
+          // Lock the staging gate on first choice — re-picking "nearest to
+          // the combine" every tick bounced the cart between gates as the
+          // combine swept back and forth.
+          let gate = stageGateRuntime.get(task.id);
+          if (!gate) {
+            const field = save.fields.find((f) => f.id === task.fieldId);
+            if (field?.accessPoints && field.accessPoints.length >= 2) {
+              gate = nearestGate(field, harvester.pos);
+              stageGateRuntime.set(task.id, gate);
+            }
+          }
           if (gate && !samePos(agent.pos, gate)) {
             agent.state = "traveling";
             budget = driveToward(save, agent, gate, speed, budget);
