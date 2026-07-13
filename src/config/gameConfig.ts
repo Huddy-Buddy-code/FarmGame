@@ -140,6 +140,11 @@ export interface GameConfig {
   hauling: {
     loadMinutes: number;
     dumpMinutes: number;
+    /** After fully draining the combine, a cart at or above this fraction of
+     * its capacity makes a silo run right away instead of waiting in-field —
+     * a nearly-full cart would have almost no room at the combine's next
+     * stop (maintainer request, 2026-07-13). */
+    cartSiloRunFraction: number;
   };
 
   /** Forage baling (maintainer request, 2026-07-11). After a forage crop is
@@ -301,6 +306,7 @@ export const gameConfig: GameConfig = {
   hauling: {
     loadMinutes: 0.17, // ≈ 10 s at 1×
     dumpMinutes: 0.17,
+    cartSiloRunFraction: 0.75,
   },
   forage: {
     rakeSpeedKmh: 13, // slightly faster than the baler

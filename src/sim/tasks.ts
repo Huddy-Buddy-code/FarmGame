@@ -1121,9 +1121,17 @@ function tickAgent(
         const cargo = trailer.cargoTons ?? 0;
         const trailerFull = cargo >= trailerCap - 1e-9;
 
-        // Head for the silo: cart full, or carrying a partial load with the
-        // harvest over and the combine drained (nothing more coming).
-        if (trailerFull || (cargo > 1e-9 && !stillCutting && combineEmpty)) {
+        // Head for the silo: cart full; carrying a partial load with the
+        // harvest over and the combine drained (nothing more coming); or —
+        // with the combine fully drained — already ≥75% full, since a
+        // nearly-full cart would have almost no room at the combine's next
+        // stop (maintainer request, 2026-07-13).
+        const siloRunAt = trailerCap * gameConfig.hauling.cartSiloRunFraction;
+        if (
+          trailerFull ||
+          (cargo > 1e-9 && !stillCutting && combineEmpty) ||
+          (cargo >= siloRunAt - 1e-9 && combineEmpty)
+        ) {
           task.unloadPhase = "toSilo";
           continue;
         }
@@ -1139,6 +1147,15 @@ function tickAgent(
 
         if (!combineFull && stillCutting) {
           task.unloadPhase = "staging";
+          // A cart that's already carrying grain has been to the combine —
+          // it waits right where it drained it (maintainer request,
+          // 2026-07-13), not back at the gate. Only a still-empty cart
+          // stages at the field's gate on its way in.
+          if (cargo > 1e-9) {
+            agent.state = "working";
+            budget = 0;
+            continue;
+          }
           // Lock the staging gate on first choice — re-picking "nearest to
           // the combine" every tick bounced the cart between gates as the
           // combine swept back and forth.

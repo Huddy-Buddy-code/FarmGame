@@ -4,7 +4,7 @@ import type { Meters } from "../src/geo/coords";
 import { newGame } from "../src/state/saveState";
 import type { Field, SaveState } from "../src/state/saveState";
 import {
-  ensureAgents, tickTasks, enqueueTask, buyImplement, sellAgent, harvesterCapacityTons, setHarvesterCrop,
+  ensureAgents, tickTasks, enqueueTask, buyImplement, buyAgent, sellAgent, harvesterCapacityTons, setHarvesterCrop,
 } from "../src/sim/tasks";
 import { tickFarming } from "../src/sim/farming";
 import { sellGrain } from "../src/sim/economy";
@@ -179,31 +179,71 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     expect(moved).toBe(false);
   });
 
-  it("multi-load: a 60t cart drains the 50t combine, waits IN FIELD, tops off at the next stop, and dumps ~60t in one silo run", () => {
+  it("multi-load: a 100t cart drains the 50t combine, waits IN FIELD (in place, not at the gate), tops off, and dumps ~100t in one run", () => {
     const save = gameWithAgents(); // medium combine, 50t hopper
-    const field = readyField(40, 6); // 240t total — several hopper fills
-    const side = Math.sqrt(40 * 4046.8564224);
-    field.accessPoints = [[side / 2, 0], [side / 2, side]];
+    const field = readyField(60, 6); // 360t total — several hopper fills
+    const side = Math.sqrt(60 * 4046.8564224);
+    const gates: Meters[] = [[side / 2, 0], [side / 2, side]];
+    field.accessPoints = gates;
     save.fields.push(field);
-    buyImplement(save, "grainTrailer", "medium"); // 60t cart
+    buyImplement(save, "grainTrailer", "large"); // 100t cart — 50t drain = 50% < 75%
+    // A large tractor to pull the large cart (the starting medium can't).
+    const hauler = buyAgent(save, "tractor", "large", [0, 0]);
     const silo = buyBuildingAt(save, "silo", [-800, -800], "large");
     assignSiloCrop(save, silo.id, "corn");
     const combine = combineOf(save);
+    const tractor = hauler;
+
+    let now = APRIL_1;
+    enqueueTask(save, field, "harvest", now);
+    // While the cart is staging WITH cargo (post-drain), it must be parked
+    // where it drained the combine — never back at a gate.
+    let waitedInPlaceWithCargo = false;
+    let waitedAtGateWithCargo = false;
+    while (save.grain.corn <= 0 && now < APRIL_1 + 400_000) {
+      now += 1;
+      tickFarming(save, now);
+      tickTasks(save, now, 1, () => 0.5);
+      const trip = unloadTaskFor(save, combine.id);
+      const trailer = save.implements.find((i) => i.kind === "grainTrailer")!;
+      if (trip?.unloadPhase === "staging" && (trailer.cargoTons ?? 0) > 1 && tractor.state === "working") {
+        if (gates.some((g) => samePos(tractor.pos, g))) waitedAtGateWithCargo = true;
+        else waitedInPlaceWithCargo = true;
+      }
+    }
+    expect(waitedInPlaceWithCargo).toBe(true);
+    expect(waitedAtGateWithCargo).toBe(false);
+    // First silo delivery is a FULL cart (two 50t stops), not one drain's 50t.
+    expect(save.grain.corn).toBeGreaterThan(95);
+    expect(save.grain.corn).toBeLessThanOrEqual(100.5);
+  });
+
+  it("a cart ≥75% full after fully draining the combine makes a silo run instead of waiting in-field", () => {
+    const save = gameWithAgents(); // medium combine, 50t hopper
+    const field = readyField(40, 6);
+    const side = Math.sqrt(40 * 4046.8564224);
+    field.accessPoints = [[side / 2, 0], [side / 2, side]];
+    save.fields.push(field);
+    buyImplement(save, "grainTrailer", "medium"); // 60t: one 50t drain = 83% ≥ 75%
+    const silo = buyBuildingAt(save, "silo", [-800, -800], "large");
+    assignSiloCrop(save, silo.id, "corn");
 
     let now = APRIL_1;
     enqueueTask(save, field, "harvest", now);
     now = runUntil(save, now, () => save.grain.corn > 0, 400_000, 5);
-    // First silo delivery is a FULL cart (50t first stop + 10t top-off), not
-    // the old one-drain-one-trip 50t.
-    expect(save.grain.corn).toBeGreaterThan(55);
-    expect(save.grain.corn).toBeLessThanOrEqual(60.5);
+    // Delivered the single 50t drain while the harvest was still running —
+    // it did NOT sit in the field holding 83% of a cart.
+    expect(save.grain.corn).toBeGreaterThan(45);
+    expect(save.grain.corn).toBeLessThanOrEqual(50.5);
+    expect(save.tasks.some((t) => t.type === "harvest")).toBe(true);
   });
 
   it("partial cart heads to the silo once the harvest is over and the combine is drained", () => {
     const save = gameWithAgents();
-    // ~55t total: one 50t stop mid-field, ~5t tail when the field finishes.
-    const field = readyField(9.2, 6);
-    const side = Math.sqrt(9.2 * 4046.8564224);
+    // ~35t total: never fills the 50t hopper, so the ONLY stop is the end of
+    // the field — and 35t is under 75% of the 60t cart, so no early silo run.
+    const field = readyField(5.8, 6);
+    const side = Math.sqrt(5.8 * 4046.8564224);
     field.accessPoints = [[side / 2, 0], [side / 2, side]];
     save.fields.push(field);
     buyImplement(save, "grainTrailer", "medium"); // 60t — never fills
@@ -220,7 +260,7 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
       expect(save.grain.corn).toBe(0);
     }
     // Then the whole crop arrives in one partial-cart delivery.
-    const total = 9.2 * 6;
+    const total = 5.8 * 6;
     now = runUntil(save, now, () => save.grain.corn > 0, 300_000, 5);
     expect(save.grain.corn).toBeGreaterThan(total * 0.95);
     expect(save.grain.corn).toBeLessThanOrEqual(total * 1.05);
