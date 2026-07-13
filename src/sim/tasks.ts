@@ -699,8 +699,11 @@ export function setRoadNetwork(net: RoadNetwork | null): void {
 interface AgentRoute {
   /** The destination this route was planned for (replanned if it changes). */
   target: Meters;
-  pts: Meters[];
-  /** Cumulative distance at each pt. */
+  /** Route polyline, or null = "planned and rejected, drive straight" — the
+   * negative result is cached too, so a straight-line trip doesn't re-run
+   * snapping + A* every tick of the drive. */
+  pts: Meters[] | null;
+  /** Cumulative distance at each pt (empty for straight-line trips). */
   cum: number[];
   /** How far along the polyline the agent has driven. */
   dist: number;
@@ -720,34 +723,35 @@ function driveToward(agent: Agent, target: Meters, speed: number, budget: number
   // Replan when the destination moved meaningfully (a combine still cutting
   // creeps along its lanes — don't re-run A* every tick chasing half-meter
   // drift; the final approach closes the gap as a short straight hop).
+  // A rejected plan is cached as pts=null so the straight-line drive doesn't
+  // re-run snapping + A* every tick until arrival.
   if (!route || Math.hypot(route.target[0] - target[0], route.target[1] - target[1]) > 25) {
     const pts = roadNet ? planRoute(roadNet, agent.pos, target) : null;
+    const cum: number[] = [0];
     if (pts) {
-      const cum: number[] = [0];
       for (let i = 1; i < pts.length; i++) {
         cum.push(cum[i - 1]! + Math.hypot(pts[i]![0] - pts[i - 1]![0], pts[i]![1] - pts[i - 1]![1]));
       }
-      route = { target: [target[0], target[1]], pts, cum, dist: 0 };
-      agentRoutes.set(agent.id, route);
-    } else {
-      route = undefined as unknown as AgentRoute;
-      agentRoutes.delete(agent.id);
     }
+    route = { target: [target[0], target[1]], pts, cum, dist: 0 };
+    agentRoutes.set(agent.id, route);
   }
 
-  if (!route) {
+  if (!route.pts) {
     // Straight-line fallback (no network / short hop / bad coverage).
     const dx = target[0] - agent.pos[0];
     const dy = target[1] - agent.pos[1];
     const dist = Math.hypot(dx, dy);
     if (dist <= 1e-9) {
       agent.pos = [target[0], target[1]];
+      agentRoutes.delete(agent.id);
       return budget;
     }
     agent.heading = Math.atan2(dy, dx);
     const timeNeeded = dist / speed;
     if (timeNeeded <= budget) {
       agent.pos = [target[0], target[1]];
+      agentRoutes.delete(agent.id);
       return budget - timeNeeded;
     }
     const f = (budget * speed) / dist;
