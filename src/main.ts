@@ -55,6 +55,8 @@ import {
   harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop, setRoadNetwork,
 } from "./sim/tasks";
 import { buildRoadNetwork } from "./sim/roadNet";
+import type { RoadNetwork } from "./sim/roadNet";
+import { defaultAccessPoints } from "./sim/access";
 import {
   MACHINE_ICON, IMPLEMENT_ICON_SVG, tractorIconSvg, combineIconSvg, baleIconSvg,
   plowIconSvg, planterIconSvg, sprayerIconSvg, rakeIconSvg, balerIconSvg, grainTrailerIconSvg,
@@ -115,6 +117,7 @@ let pendingSiloSize: EquipmentSize = "small";
 
 let overlay: OverlayEngine;
 let mapRef: maplibregl.Map;
+let roadNetRef: RoadNetwork | null = null;
 let selectedFieldId: string | null = null;
 /** Where new machines park (county center / farmstead-to-be), in UTM meters. */
 let homePos: Meters = [0, 0];
@@ -137,7 +140,12 @@ async function main() {
   homePos = toMeters(m.center as LngLat);
   ensureAgents(save, homePos);
   // Machines navigate the county's real road graph between jobs (brief §9).
-  setRoadNetwork(buildRoadNetwork(county.roads, (p) => toMeters(p)));
+  roadNetRef = buildRoadNetwork(county.roads, (p) => toMeters(p));
+  setRoadNetwork(roadNetRef);
+  // Backfill gates for fields from saves that predate access points.
+  for (const f of save.fields) {
+    if (!f.accessPoints || f.accessPoints.length < 2) f.accessPoints = defaultAccessPoints(f.boundary, roadNetRef);
+  }
   devStatus("status-osm", `Roads: ${county.roads.features.length} ✓`, "ok");
   $("attr").innerHTML = `${m.imagery.attribution} · ${m.roads.attribution}`;
 
@@ -1784,6 +1792,8 @@ function wireFieldDrawing(map: maplibregl.Map) {
     }
     try {
       const { field, acres, cost } = buyFieldFromBoundary(map, overlay, save, boundary);
+      // Gates go in with the fence: auto-placed at the road side + opposite.
+      field.accessPoints = defaultAccessPoints(field.boundary, roadNetRef);
       updateHud();
       toast(`🌾 Bought ${acres.toFixed(1)} ac for $${cost.toLocaleString()}`);
       openFieldPanel(field.id);
@@ -1940,14 +1950,51 @@ function wireFieldSelection(map: maplibregl.Map) {
 }
 
 function openFieldPanel(fieldId: string) {
+  if (accessEditFieldId && accessEditFieldId !== fieldId) stopAccessEdit();
   selectedFieldId = fieldId;
   $("fieldpanel").style.display = "block";
   refreshFieldPanel();
 }
 
 function closeFieldPanel() {
+  stopAccessEdit();
   selectedFieldId = null;
   $("fieldpanel").style.display = "none";
+}
+
+// --- Access-point editing (maintainer request, 2026-07-12) -------------------
+// Gates are INVISIBLE on the map except while this edit mode is on: two
+// draggable 🚪 markers appear, dragging updates the field's accessPoints
+// live, and Done/close hides them again.
+let accessEditFieldId: string | null = null;
+const accessMarkers: maplibregl.Marker[] = [];
+
+function startAccessEdit(field: Field): void {
+  stopAccessEdit();
+  accessEditFieldId = field.id;
+  field.accessPoints ??= defaultAccessPoints(field.boundary, roadNetRef);
+  field.accessPoints.forEach((pt, i) => {
+    const el = document.createElement("div");
+    el.className = "access-dot";
+    el.innerHTML = `🚪<span class="n">${i + 1}</span>`;
+    el.title = `Access point ${i + 1} — drag to move`;
+    const marker = new maplibregl.Marker({ element: el, draggable: true })
+      .setLngLat(toLngLat(pt))
+      .addTo(mapRef);
+    marker.on("dragend", () => {
+      const ll = marker.getLngLat();
+      field.accessPoints![i] = toMeters([ll.lng, ll.lat]);
+    });
+    accessMarkers.push(marker);
+  });
+  refreshFieldPanel(true);
+}
+
+function stopAccessEdit(): void {
+  if (!accessEditFieldId) return;
+  for (const m of accessMarkers) m.remove();
+  accessMarkers.length = 0;
+  accessEditFieldId = null;
 }
 
 function fieldMsg(text: string) {
@@ -2097,6 +2144,7 @@ function refreshFieldPanel(force = false) {
     Math.round(save.money), // affordability of input costs
     field.forageReady ? 1 : 0, field.windrowed ? 1 : 0, field.baleLocations?.length ?? 0, // forage/bale state
     field.weedy ? 1 : 0,
+    accessEditFieldId === field.id ? "gates" : "",
   ].join("|");
   // The rotation planner has its OWN change-detection (below) so its dropdowns
   // don't get rebuilt under the cursor on every money/status tick.
@@ -2291,6 +2339,34 @@ function refreshFieldPanel(force = false) {
       btn.addEventListener("click", () => queueFromPanel(field, "harvest"));
       actions.appendChild(btn);
     }
+  }
+
+  // --- Access points: two gates machines enter/leave through. Invisible on
+  // the map until this edit mode shows their draggable markers. ---
+  {
+    const editing = accessEditFieldId === field.id;
+    const row = document.createElement("div");
+    row.className = "access-row";
+    if (editing) {
+      row.insertAdjacentHTML("beforeend", `<div class="small">Drag the two 🚪 markers on the map, then press Done.</div>`);
+    }
+    const btn = document.createElement("button");
+    btn.className = editing ? "primary" : "";
+    btn.style.width = "100%";
+    btn.textContent = editing ? "✅ Done — save access points" : "🚪 Edit access points";
+    btn.title = "The two gates machines use to enter and leave this field";
+    btn.addEventListener("click", () => {
+      if (accessEditFieldId === field.id) {
+        stopAccessEdit();
+        toast(`🚪 ${prettyId(field.id)}'s access points saved`);
+        refreshFieldPanel(true);
+      } else {
+        startAccessEdit(field);
+        toast("🚪 Drag the markers to move this field's gates");
+      }
+    });
+    row.appendChild(btn);
+    body.appendChild(row);
   }
 }
 

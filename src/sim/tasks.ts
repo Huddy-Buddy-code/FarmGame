@@ -711,14 +711,69 @@ interface AgentRoute {
 // Runtime-only (not persisted): after a reload the agent just replans.
 const agentRoutes = new Map<string, AgentRoute>();
 
+/** The field (with gates) containing `p`, if any — for gate-aware travel. */
+function fieldWithGatesAt(save: SaveState, p: Meters): Field | undefined {
+  return save.fields.find((f) => f.accessPoints && f.accessPoints.length >= 2 && pointInPolygon(p, f.boundary));
+}
+
+/** Whichever of a field's gates is closest to `p`. */
+function nearestGate(field: Field, p: Meters): Meters {
+  let best = field.accessPoints![0]!;
+  let bestD = Infinity;
+  for (const g of field.accessPoints!) {
+    const d = Math.hypot(g[0] - p[0], g[1] - p[1]);
+    if (d < bestD) {
+      bestD = d;
+      best = g;
+    }
+  }
+  return best;
+}
+
+/**
+ * Plan the full drivable polyline for a trip, honoring field gates: leave the
+ * origin field via its nearest gate, take the roads (when they serve the
+ * trip), and enter the destination field through the gate nearest the
+ * approach. Returns null when a plain straight line is correct — the two
+ * points are in the same field (or in none with gates), and roads don't help.
+ */
+function planAgentPath(save: SaveState, from: Meters, to: Meters): Meters[] | null {
+  const fromField = fieldWithGatesAt(save, from);
+  const toField = fieldWithGatesAt(save, to);
+  // Moving within one field never detours through a gate.
+  if (fromField && fromField === toField) return null;
+  const exitGate = fromField ? nearestGate(fromField, from) : null;
+  const entryGate = toField ? nearestGate(toField, exitGate ?? from) : null;
+  const roadFrom = exitGate ?? from;
+  const roadTo = entryGate ?? to;
+  const mid = roadNet ? planRoute(roadNet, roadFrom, roadTo) : null;
+  if (!mid && !exitGate && !entryGate) return null; // nothing to add — straight
+  const raw: Meters[] = [from];
+  if (exitGate) raw.push(exitGate);
+  if (mid) raw.push(...mid);
+  else {
+    raw.push(roadFrom);
+    raw.push(roadTo);
+  }
+  if (entryGate) raw.push(entryGate);
+  raw.push(to);
+  // Collapse duplicates (gate == road endpoint == etc.).
+  const pts: Meters[] = [];
+  for (const p of raw) {
+    const last = pts[pts.length - 1];
+    if (!last || Math.hypot(last[0] - p[0], last[1] - p[1]) > 0.25) pts.push(p);
+  }
+  return pts.length > 2 ? pts : null;
+}
+
 /**
  * Drive `agent` toward `target` for up to `budget` sim-minutes at `speed`
- * (m/min), following roads when the network serves the trip (leave the field
- * to the nearest road, drive the roads, leave the road at the point nearest
- * the destination), else straight. Returns the unused budget; `agent.pos`
- * equals `target` exactly on arrival (same contract as the old inline code).
+ * (m/min), following field gates + roads when they serve the trip (leave the
+ * field via its gate, drive the roads, enter the destination through its
+ * gate), else straight. Returns the unused budget; `agent.pos` equals
+ * `target` exactly on arrival (same contract as the old inline code).
  */
-function driveToward(agent: Agent, target: Meters, speed: number, budget: number): number {
+function driveToward(save: SaveState, agent: Agent, target: Meters, speed: number, budget: number): number {
   let route = agentRoutes.get(agent.id);
   // Replan when the destination moved meaningfully (a combine still cutting
   // creeps along its lanes — don't re-run A* every tick chasing half-meter
@@ -726,7 +781,7 @@ function driveToward(agent: Agent, target: Meters, speed: number, budget: number
   // A rejected plan is cached as pts=null so the straight-line drive doesn't
   // re-run snapping + A* every tick until arrival.
   if (!route || Math.hypot(route.target[0] - target[0], route.target[1] - target[1]) > 25) {
-    const pts = roadNet ? planRoute(roadNet, agent.pos, target) : null;
+    const pts = planAgentPath(save, agent.pos, target);
     const cum: number[] = [0];
     if (pts) {
       for (let i = 1; i < pts.length; i++) {
@@ -901,7 +956,7 @@ function tickAgent(
         if (home && !samePos(agent.pos, home)) {
           const speed = (gameConfig.work.travelSpeedKmh * 1000) / 60; // meters per sim-minute
           agent.state = "traveling";
-          budget = driveToward(agent, home, speed, budget);
+          budget = driveToward(save, agent, home, speed, budget);
           continue;
         }
         agent.state = "idle";
@@ -987,7 +1042,7 @@ function tickAgent(
         if (!samePos(agent.pos, silo.pos)) {
           task.waitingForSilo = false;
           agent.state = "traveling";
-          budget = driveToward(agent, silo.pos, speed, budget);
+          budget = driveToward(save, agent, silo.pos, speed, budget);
           continue;
         }
         // Arrived — dump only if the crop's pooled silo capacity has room.
@@ -1042,7 +1097,7 @@ function tickAgent(
         const target = harvester.pos;
         agent.state = "traveling";
         if (!samePos(agent.pos, target)) {
-          budget = driveToward(agent, target, speed, budget);
+          budget = driveToward(save, agent, target, speed, budget);
           continue;
         }
         task.unloadPhase = "onloading";
@@ -1068,7 +1123,7 @@ function tickAgent(
       const path = getActivePath(save, task, field, agent);
       const target = path.pts[0]!;
       const speed = (gameConfig.work.travelSpeedKmh * 1000) / 60; // meters per sim-minute
-      budget = driveToward(agent, target, speed, budget);
+      budget = driveToward(save, agent, target, speed, budget);
       if (samePos(agent.pos, target)) agent.state = "working";
       continue;
     }

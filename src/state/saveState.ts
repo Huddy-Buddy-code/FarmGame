@@ -96,6 +96,11 @@ export interface Field {
    * ~20% (wet liquid spray) for the rest of THAT month, then dries back to
    * normal on the month turn (tickFarming clears this). */
   fertilizedAt?: SimTime;
+  /** The field's two entrance/exit gates, on/near the boundary. Machines
+   * leave the field via the nearest gate and enter through one (tasks.ts
+   * route composition). Auto-placed at creation (`sim/access.ts`), draggable
+   * from the field panel's edit mode. No map icons outside edit mode. */
+  accessPoints?: Meters[];
   /** Physical bales sitting in the field — one entry per bale, at the UTM-meter
    * spot the baler dropped it. They accumulate as the baler works and persist
    * (exactly where dropped, across save/reload) until the player sells them.

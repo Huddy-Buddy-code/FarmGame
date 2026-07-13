@@ -507,6 +507,19 @@
       /* ⚠️ a tractor/harvester stuck on a silo with no room (maintainer
          request, 2026-07-12) — red ring, no bounce (they're stopped). */
       .agent-dot.warn { border-color: var(--red); box-shadow: 0 0 0 2px rgba(199, 81, 70, 0.35), var(--shadow); }
+      /* Field access gates — visible ONLY in the field panel's edit mode. */
+      .access-dot {
+        font-size: 18px; line-height: 1; cursor: grab;
+        background: var(--cream); border: 2px dashed var(--red);
+        border-radius: 999px; padding: 3px 6px; box-shadow: var(--shadow);
+        user-select: none;
+      }
+      .access-dot:active { cursor: grabbing; }
+      .access-dot .n {
+        font-size: 11px; font-weight: 700; color: var(--red); vertical-align: top;
+      }
+      .access-row { margin-top: 10px; padding-top: 8px; border-top: 1.5px dashed var(--cream-2); }
+
       /* Bales dropped in the field — decorative, must not eat field clicks. */
       .bale-dot { line-height: 0; pointer-events: none; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35)); }
 
