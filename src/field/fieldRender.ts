@@ -34,6 +34,10 @@ export interface FieldPaintParams {
    * The weeding task's sweep-reveal repaints WITHOUT this flag strip-by-strip,
    * so the sprayer visibly cleans the field as it works. */
   weedy?: boolean;
+  /** Freshly fertilized: the whole texture darkens ~20% (wet liquid spray).
+   * The fertilizing task's sweep-reveal stamps the darkened texture strip-by-
+   * strip; it dries back to normal on the month turn (visual-only). */
+  fertilized?: boolean;
   seed?: number;
 }
 
@@ -154,6 +158,14 @@ export function drawFieldTexture(
     if (p.weedy) {
       weedPatches(ctx, w, h, seed + 23, areaScale, "#55712f", "#84a648");
       weedPatches(ctx, w, h, seed + 41, 0.5 * areaScale, "#6e8f3a", "#9cb45e");
+    }
+
+    // Wet fertilizer spray: darken everything ~20% (still inside the field
+    // clip). Painted last so the whole look — rows, weeds, windrows — reads
+    // as sprayed-over, the way wet ground photographs darker from the air.
+    if (p.fertilized) {
+      ctx.fillStyle = "rgba(20, 14, 6, 0.2)";
+      ctx.fillRect(0, 0, w, h);
     }
 
     // Windrows (raked forage): thick, widely-spaced rows of gathered residue

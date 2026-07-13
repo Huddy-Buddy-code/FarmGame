@@ -194,6 +194,16 @@ export function tickFarming(save: SaveState, now: SimTime): TickResult {
       field.weedy = true;
       dirty = true;
     }
+    // The fertilizer spray dries off when the month turns — repaint back to
+    // the normal texture (the darkening is applied-month only, by request).
+    if (field.fertilizedAt !== undefined) {
+      const applied = dateOf(field.fertilizedAt);
+      const cur = dateOf(now);
+      if (applied.month !== cur.month || applied.year !== cur.year) {
+        field.fertilizedAt = undefined;
+        dirty = true;
+      }
+    }
     // Weeds don't outlive the crop: harvest/plow resets the pressure.
     if (field.weedy && !hasStandingCrop(field.status) && field.status !== "ready") {
       field.weedy = undefined;

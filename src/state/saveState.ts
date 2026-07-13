@@ -92,6 +92,10 @@ export interface Field {
   weedy?: boolean;
   /** This crop has been weeded — no more weed flushes until the next planting. */
   weeded?: boolean;
+  /** Sim-time the field was last fertilized. Visual-only: the texture darkens
+   * ~20% (wet liquid spray) for the rest of THAT month, then dries back to
+   * normal on the month turn (tickFarming clears this). */
+  fertilizedAt?: SimTime;
   /** Physical bales sitting in the field — one entry per bale, at the UTM-meter
    * spot the baler dropped it. They accumulate as the baler works and persist
    * (exactly where dropped, across save/reload) until the player sells them.

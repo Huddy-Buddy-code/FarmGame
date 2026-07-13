@@ -1295,8 +1295,10 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
       field.weeded = true;
       break;
     case "fertilize":
-      // No persistent field effect yet — a fertility system to hook into is
-      // still out of scope; it's a time/cost sink for now.
+      // Visual only: the wet-spray darkening lasts through this month
+      // (tickFarming clears it on the month turn). A fertility system to
+      // hook a yield effect into is still out of scope.
+      field.fertilizedAt = now;
       break;
   }
 }

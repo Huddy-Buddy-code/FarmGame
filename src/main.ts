@@ -492,15 +492,15 @@ function revealTargetStatus(task: FarmTask, field: Field): FieldStatus {
   if (task.type === "plow") return "tilled";
   if (task.type === "plant") return "planted";
   if (task.type === "bale") return "mulched";
-  if (task.type === "weed") return field.status; // same look, minus the weeds
+  if (task.type === "weed" || task.type === "fertilize") return field.status; // same status, different overlay
   return "harvested";
 }
 
 /** Task types whose completion actually changes the field's texture — the only
- * ones worth the reveal-stamping treatment. Weeding is here now too: its baked
- * target is the SAME status with the weed overlay off, so the sprayer visibly
- * cleans the field strip-by-strip. Fertilize alone changes nothing visible. */
-const REVEALS_TEXTURE: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "rake", "bale", "weed"]);
+ * ones worth the reveal-stamping treatment. Weeding bakes the SAME status with
+ * the weed overlay off (sprayer cleans strip-by-strip); fertilizing bakes it
+ * ~20% darker (wet liquid spray, dries off next month). */
+const REVEALS_TEXTURE: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "rake", "bale", "weed", "fertilize"]);
 
 function updateReveals(): void {
   if (!overlay) return;
@@ -537,10 +537,13 @@ function updateReveals(): void {
       drawFieldTexture(bctx, baked.width, baked.height, (mtr) => surface.toPixel(mtr), field.boundary, {
         status: revealTargetStatus(task, field),
         crop: field.crop,
-        // Weeding repaints the crop AS IT IS (weeds off); everything else
-        // reveals a fresh post-work surface where progress starts at 0.
-        progress: task.type === "weed" ? growthProgress(field, clock.time()) : 0,
-        weedy: false,
+        // Weeding/fertilizing repaint the crop AS IT IS (weeds off / spray
+        // darkened); everything else reveals a fresh post-work surface where
+        // progress starts at 0.
+        progress: task.type === "weed" || task.type === "fertilize" ? growthProgress(field, clock.time()) : 0,
+        // Fertilizing doesn't clear weeds — keep them under the wet sheen.
+        weedy: task.type === "fertilize" ? !!field.weedy : false,
+        fertilized: task.type === "fertilize",
         // Raking reveals windrows over the harvested surface strip-by-strip; the
         // baler then reveals clean/mulched over those windrows as it collects.
         windrowed: task.type === "rake",

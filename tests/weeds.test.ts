@@ -97,6 +97,27 @@ describe("weed pressure (maintainer request, 2026-07-12)", () => {
     expect(changed.some((f) => f.id === field.id)).toBe(true);
   });
 
+  it("fertilizing darkens for the applied month only (fertilizedAt set, cleared on month turn)", () => {
+    const save = newGame();
+    ensureAgents(save, [500, 500]);
+    save.implements.push({ id: "sprayer-1", kind: "sprayer", size: "medium" });
+    const field = plantedCornField(save, APRIL);
+    // Fertilize window opens the month after planting (May).
+    const MAY = 2 * minutesPerMonth();
+    let now = MAY + 1;
+    tickFarming(save, now);
+    enqueueTask(save, field, "fertilize", now);
+    now = runUntil(save, now, () => field.fertilizedAt !== undefined);
+    expect(field.fertilizedAt).toBeDefined();
+    // Still the same month: the wet look persists.
+    tickFarming(save, now + 60);
+    expect(field.fertilizedAt).toBeDefined();
+    // Month turns: it dries off, and the field is flagged for repaint.
+    const { changed } = tickFarming(save, 3 * minutesPerMonth() + 1);
+    expect(field.fertilizedAt).toBeUndefined();
+    expect(changed.some((f) => f.id === field.id)).toBe(true);
+  });
+
   it("weeding costs book to the cashflow ledger as Field Expenses", () => {
     const save = newGame();
     ensureAgents(save, [500, 500]);
