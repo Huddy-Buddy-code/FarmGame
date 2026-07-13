@@ -43,6 +43,24 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   if sold now.
 - **95/95 tests passing** (added 5 rotation-planner tests). Typecheck clean.
 
+## Latest changes (2026-07-13, fertilizer visual + field access points)
+
+- **Fertilizing is visible now**: the sprayer stamps a ~20% darkened copy of
+  the field's current texture strip-by-strip (wet liquid spray; weeds stay
+  visible under the sheen). `field.fertilizedAt` keeps the wet look through
+  the applied month; tickFarming dries it off (repaint) on the month turn.
+- **Field access points**: every field has two gates (`field.accessPoints`),
+  auto-placed at creation — perimeter point nearest a road + the point half a
+  perimeter away (`src/sim/access.ts`); older saves backfilled on load. ALL
+  agent travel is gate-aware (`planAgentPath` in tasks.ts): exit via the
+  origin field's nearest gate → roads → enter through the destination's gate;
+  within-field moves unaffected. No map icons except the field panel's
+  "Edit access points" mode (two draggable 🚪 markers, Done/close hides them).
+- Perf fixes landed earlier same session: heap A* + spatial-grid snapping +
+  cached route rejections (task-pickup lag), throttled reveal GPU uploads +
+  ground-area texture budgeting (reveal stutter). Maintainer confirmed fixed.
+- 157/157 tests, typecheck clean.
+
 ## Latest changes (2026-07-12, deep-sim pass: roads, weeds, textures, icons, shop, cashflow)
 
 Five systems in one pass (maintainer request, "take some liberty"):
