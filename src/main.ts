@@ -475,7 +475,15 @@ interface Reveal {
   baked: HTMLCanvasElement;
   /** How far along the route (full-route meters) we've stamped so far. */
   lastDist: number;
+  /** performance.now() of the last GPU upload — uploads are throttled (a
+   * 0.5 m/px field canvas is megabytes; re-uploading it every frame while a
+   * machine worked was the main source of sustained stutter). */
+  lastUpload: number;
 }
+
+/** Min real-ms between GPU uploads of a revealing surface (~8/s reads as
+ * continuous; the strips themselves are still stamped every tick). */
+const REVEAL_UPLOAD_MS = 120;
 // Keyed by TASK id — a single field can carry TWO concurrent reveals at once:
 // the rake laying windrows and the baler laying mulch behind it.
 const reveals = new Map<string, Reveal>();
@@ -499,13 +507,12 @@ function updateReveals(): void {
   const activeTasks = save.tasks.filter((t) => t.status === "active" && REVEALS_TEXTURE.has(t.type));
   const activeIds = new Set(activeTasks.map((t) => t.id));
 
-  // Drop reveals whose task ended; stop animating a surface only once NO reveal
-  // still uses it (a field may have both a rake and a baler reveal running).
+  // Drop reveals whose task ended — with one final upload so the last stamped
+  // strips aren't lost (a finished rake gets no completion repaint).
   for (const [tid, r] of reveals) {
     if (!activeIds.has(tid)) {
       reveals.delete(tid);
-      const stillRevealing = [...reveals.values()].some((x) => x.fieldId === r.fieldId);
-      if (!stillRevealing) overlay.get(r.fieldId)?.setAnimating(false);
+      overlay.get(r.fieldId)?.markDirty();
     }
   }
 
@@ -539,17 +546,23 @@ function updateReveals(): void {
         windrowed: task.type === "rake",
         seed: hashSeed(task.fieldId),
       });
-      r = { taskId: task.id, fieldId: task.fieldId, baked, lastDist: 0 };
+      r = { taskId: task.id, fieldId: task.fieldId, baked, lastDist: 0, lastUpload: 0 };
       reveals.set(task.id, r);
-      surface.setAnimating(true); // re-upload every frame while the sweep runs
     }
 
     // Reveal up to the swept in-field distance implied by how much is done.
+    // Stamping is cheap (a few clipped drawImage calls); the GPU upload of the
+    // whole canvas is what costs — throttle IT, not the stamping.
     const revealWork = Math.min(path.totalWork, (task.doneAcres * ACRE_M2) / path.swath);
     const revealDist = distanceAtWork(path, revealWork);
     if (revealDist > r.lastDist + 1e-6) {
       stampReveal(surface, r.baked, path, r.lastDist, revealDist);
       r.lastDist = revealDist;
+      const rt = performance.now();
+      if (rt - r.lastUpload > REVEAL_UPLOAD_MS) {
+        r.lastUpload = rt;
+        surface.markDirty();
+      }
     }
   }
 }

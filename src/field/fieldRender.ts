@@ -66,13 +66,23 @@ export function drawFieldTexture(
   const angle = dominantAngle(boundary, toPixel);
   const smoothed = smoothPolygon(boundary);
 
+  // Stochastic detail (speckle/clods/weeds) is budgeted per GROUND area, not
+  // per pixel — at 0.5 m/px a canvas has 4× the pixels of the old 1 m/px, and
+  // pixel-proportional counts made every repaint (and the reveal bake at task
+  // pickup) 4× slower for no extra visual density. `dot` converts a "draws
+  // per px² at 1 m/px" density into a count for this canvas.
+  const b0 = toPixel(boundary[0]!);
+  const b1 = toPixel([boundary[0]![0] + 1, boundary[0]![1]]);
+  const pxPerM = Math.max(0.5, Math.hypot(b1[0] - b0[0], b1[1] - b0[1]));
+  const areaScale = 1 / (pxPerM * pxPerM);
+
   {
     ctx.save();
     tracePolygon(ctx, smoothed, toPixel);
     ctx.clip();
 
     const { base, dark, light } = palette(p);
-    ground(ctx, w, h, seed, base, dark, light);
+    ground(ctx, w, h, seed, base, dark, light, areaScale);
 
     // NOTE on scale: the overlay renders at 0.5 m/px, so "spacing 1.6" ≈ 0.8 m —
     // true corn-row scale. Constants below are px at that resolution.
@@ -80,14 +90,14 @@ export function drawFieldTexture(
       case "stubble":
         rows(ctx, w, h, angle, 6, "#c8b98f", 1.6, 0.14); // faint old combine passes
         rows(ctx, w, h, angle, 1.8, "#a89a72", 0.7, 0.1); // relic row stubs
-        weedPatches(ctx, w, h, seed + 11, 0.35, "#6f7f4a", "#8b9a5d"); // volunteer growth
+        weedPatches(ctx, w, h, seed + 11, 0.35 * areaScale, "#6f7f4a", "#8b9a5d"); // volunteer growth
         break;
 
       case "tilled":
         // Fresh-turned soil: crisp plow furrows with lit shoulders + clod litter.
         rows(ctx, w, h, angle, 2.2, "#54432f", 1.2, 0.4);
         rows(ctx, w, h, angle, 2.2, "#837056", 0.7, 0.3, 1.1); // lit furrow edges
-        clods(ctx, w, h, seed + 3, "#4c3d2b", "#8d7a5e", angle);
+        clods(ctx, w, h, seed + 3, "#4c3d2b", "#8d7a5e", angle, areaScale);
         deadFurrows(ctx, w, h, angle, seed + 5, "#46372a");
         break;
 
@@ -108,12 +118,12 @@ export function drawFieldTexture(
         // Sprayer wheel tracks stay visible until the canopy swallows them.
         tramlines(ctx, w, h, angle, "#6b5a42", Math.max(0, 0.5 - t * 0.6));
         // Late season: canopy micro-texture (crown mottling).
-        if (t > 0.4) canopyMottle(ctx, w, h, seed + 7, "#3f5a2d", "#61814a", (t - 0.4) * 1.6);
+        if (t > 0.4) canopyMottle(ctx, w, h, seed + 7, "#3f5a2d", "#61814a", (t - 0.4) * 1.6, areaScale);
         break;
       }
 
       case "ready":
-        canopyMottle(ctx, w, h, seed + 7, dark, light, 0.9);
+        canopyMottle(ctx, w, h, seed + 7, dark, light, 0.9, areaScale);
         rows(ctx, w, h, angle, 1.6, dark, 0.6, 0.16);
         rows(ctx, w, h, angle, 12, dark, 2.2, 0.1); // lodged/leaning bands
         tramlines(ctx, w, h, angle, dark, 0.25);
@@ -142,8 +152,8 @@ export function drawFieldTexture(
     // Painted LAST so weeds sit on top of rows/canopy; the weeding task's
     // reveal repaints without this flag, wiping them strip-by-strip.
     if (p.weedy) {
-      weedPatches(ctx, w, h, seed + 23, 1, "#55712f", "#84a648");
-      weedPatches(ctx, w, h, seed + 41, 0.5, "#6e8f3a", "#9cb45e");
+      weedPatches(ctx, w, h, seed + 23, areaScale, "#55712f", "#84a648");
+      weedPatches(ctx, w, h, seed + 41, 0.5 * areaScale, "#6e8f3a", "#9cb45e");
     }
 
     // Windrows (raked forage): thick, widely-spaced rows of gathered residue
@@ -228,13 +238,13 @@ export function fieldEdgeColor(p: FieldPaintParams): string {
  * Ground fill: base color + large soft blotches (soil moisture patches) + fine
  * speckle. This is what makes the patch read as earth instead of flat paint.
  */
-function ground(ctx: CanvasRenderingContext2D, w: number, h: number, seed: number, base: string, dark: string, light: string): void {
+function ground(ctx: CanvasRenderingContext2D, w: number, h: number, seed: number, base: string, dark: string, light: string, areaScale = 1): void {
   const rng = mulberry32(seed);
   ctx.fillStyle = base;
   ctx.fillRect(0, 0, w, h);
 
   // Large-scale mottling: a few big, soft, squashed ellipses at low alpha.
-  const blobs = Math.max(6, Math.floor((w * h) / 2500));
+  const blobs = Math.max(6, Math.floor((w * h * areaScale) / 2500));
   for (let i = 0; i < blobs; i++) {
     ctx.fillStyle = rng() < 0.5 ? dark : light;
     ctx.globalAlpha = 0.04 + rng() * 0.08;
@@ -246,7 +256,7 @@ function ground(ctx: CanvasRenderingContext2D, w: number, h: number, seed: numbe
   }
 
   // Fine speckle on top.
-  const dots = Math.floor((w * h) / 45);
+  const dots = Math.floor((w * h * areaScale) / 45);
   for (let i = 0; i < dots; i++) {
     ctx.fillStyle = rng() < 0.5 ? dark : light;
     ctx.globalAlpha = 0.15 + rng() * 0.25;
@@ -322,9 +332,9 @@ function weedPatches(
 
 /** Clod litter on fresh-plowed ground: short dark/lit dashes lying roughly
  * along the furrow direction — reads as turned earth, not flat paint. */
-function clods(ctx: CanvasRenderingContext2D, w: number, h: number, seed: number, dark: string, light: string, angleRad: number): void {
+function clods(ctx: CanvasRenderingContext2D, w: number, h: number, seed: number, dark: string, light: string, angleRad: number, areaScale = 1): void {
   const rng = mulberry32(seed);
-  const n = Math.floor((w * h) / 260);
+  const n = Math.floor((w * h * areaScale) / 260);
   ctx.save();
   ctx.lineCap = "round";
   for (let i = 0; i < n; i++) {
@@ -378,9 +388,9 @@ function passStripes(ctx: CanvasRenderingContext2D, w: number, h: number, angleR
 }
 
 /** Clumpy crown texture for closed canopies (late corn / ready crops). */
-function canopyMottle(ctx: CanvasRenderingContext2D, w: number, h: number, seed: number, dark: string, light: string, strength: number): void {
+function canopyMottle(ctx: CanvasRenderingContext2D, w: number, h: number, seed: number, dark: string, light: string, strength: number, areaScale = 1): void {
   const rng = mulberry32(seed);
-  const clumps = Math.floor((w * h) / 60);
+  const clumps = Math.floor((w * h * areaScale) / 60);
   for (let i = 0; i < clumps; i++) {
     ctx.fillStyle = rng() < 0.5 ? dark : light;
     ctx.globalAlpha = (0.06 + rng() * 0.12) * strength;
