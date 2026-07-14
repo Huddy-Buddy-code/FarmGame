@@ -160,7 +160,7 @@ describe("silo sizes: Small/Medium/Large (maintainer request, 2026-07-12)", () =
     const save = newGame();
     const b = buyBuildingAt(save, "silo", [0, 0]);
     expect(b.size).toBe("small");
-    expect(buildingDisplayName("silo", undefined)).toBe("Small Silo");
+    expect(buildingDisplayName("silo", undefined)).toBe("Silo - Small");
   });
 
   it("buying a sized silo charges that size's price and stores its size", () => {
@@ -190,7 +190,7 @@ describe("silo sizes: Small/Medium/Large (maintainer request, 2026-07-12)", () =
   });
 
   it("buildingDisplayName includes the size tier for silos, not for other buildings", () => {
-    expect(buildingDisplayName("silo", "medium")).toBe("Medium Silo");
+    expect(buildingDisplayName("silo", "medium")).toBe("Silo - Medium");
     expect(buildingDisplayName("farmYard")).toBe("Farm Yard");
   });
 });

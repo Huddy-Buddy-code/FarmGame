@@ -145,14 +145,17 @@ export function canPull(tractorSize: EquipmentSize, implSize: EquipmentSize): bo
   return SIZE_RANK[implSize] <= SIZE_RANK[tractorSize];
 }
 
-/** Display name for a machine/implement including its size ("Medium Plow"). */
+/** Display name for a machine/implement including its size ("Plow - Medium",
+ * maintainer request, 2026-07-13 — "<Kind> - <Size>" everywhere, not the
+ * old "<Size> <Kind>" order). */
 function sizedName(base: string, size: EquipmentSize, n: number): string {
-  const sized = `${SIZE_LABEL[size]} ${base}`;
+  const sized = `${base} - ${SIZE_LABEL[size]}`;
   return n === 1 ? sized : `${sized} ${n}`;
 }
 
-/** A display name not already taken — "Medium Tractor", then "Medium Tractor 2",
- * 3, … — so names stay unique even after machines are bought and sold. */
+/** A display name not already taken — "Tractor - Medium", then
+ * "Tractor - Medium 2", 3, … — so names stay unique even after machines are
+ * bought and sold. */
 function uniqueName(taken: string[], base: string): string {
   if (!taken.includes(base)) return base;
   let n = 2;
@@ -202,8 +205,8 @@ export function ensureAgents(save: SaveState, home: Meters): void {
 function makeAgent(save: SaveState, kind: EquipmentKind, size: EquipmentSize, pos: Meters): Agent {
   let n = 1;
   while (save.agents.some((a) => a.id === `${kind}-${n}`)) n++;
-  // Unique display name within the fleet ("Medium Tractor", "Medium Tractor 2"…).
-  const base = `${SIZE_LABEL[size]} ${EQUIPMENT_NAME[kind]}`;
+  // Unique display name within the fleet ("Tractor - Medium", "Tractor - Medium 2"…).
+  const base = `${EQUIPMENT_NAME[kind]} - ${SIZE_LABEL[size]}`;
   return {
     id: `${kind}-${n}`,
     kind,

@@ -39,10 +39,11 @@ export const BUILDING_NAME: Record<BuildingKind, string> = {
 
 const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
 
-/** Display name including size tier for a silo ("Medium Silo"); everything
- * else is unsized (`BUILDING_NAME[kind]`). */
+/** Display name including size tier for a silo ("Silo - Medium", maintainer
+ * request 2026-07-13 — "<Kind> - <Size>" everywhere); everything else is
+ * unsized (`BUILDING_NAME[kind]`). */
 export function buildingDisplayName(kind: BuildingKind, size?: EquipmentSize): string {
-  if (kind === "silo") return `${SIZE_LABEL[size ?? "small"]} Silo`;
+  if (kind === "silo") return `Silo - ${SIZE_LABEL[size ?? "small"]}`;
   return BUILDING_NAME[kind];
 }
 

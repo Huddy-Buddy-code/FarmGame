@@ -327,7 +327,7 @@ describe("equipment: sizes, implements, buy/sell/attach (brief §8 capital)", ()
     const cash = save.money;
     const t2 = buyAgent(save, "tractor", "large", [0, 0]);
     expect(save.money).toBe(cash - agentPrice("tractor", "large"));
-    expect(t2.name).toBe("Large Tractor");
+    expect(t2.name).toBe("Tractor - Large");
     expect(t2.size).toBe("large");
     save.money = 0;
     expect(() => buyAgent(save, "harvester", "medium", [0, 0])).toThrow(/cash/);

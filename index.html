@@ -238,10 +238,12 @@
       #todo-items::-webkit-scrollbar-thumb { background: var(--wood); border-radius: 3px; }
 
       /* ---------- Semi-transparent panels on hover ---------- */
-      #queuepanel, #todolist {
+      /* Work Queue stays fully opaque always (maintainer request, 2026-07-13
+         — it now carries real per-task detail worth reading at a glance). */
+      #todolist {
         opacity: 0.5; transition: opacity 0.2s;
       }
-      #queuepanel:hover, #todolist:hover {
+      #todolist:hover {
         opacity: 1;
       }
 
@@ -489,7 +491,7 @@
       /* ---------- Work queue (right side): agents + queued jobs ---------- */
       #queuepanel {
         position: absolute; right: 12px; top: 170px; z-index: 18;
-        width: 240px; max-height: calc(100vh - 250px); overflow-y: auto;
+        width: 280px; max-height: calc(100vh - 250px); overflow-y: auto;
         padding: 12px 14px 14px;
       }
       #queuepanel h2 { margin: 0 0 8px; font-size: 16px; }
@@ -502,7 +504,7 @@
         background: var(--cream-2); border: 1.5px solid var(--wood);
         border-radius: 10px; padding: 6px 9px; margin: 5px 0;
       }
-      .queue-row .icon { font-size: 18px; line-height: 1.3; display: inline-flex; align-items: center; }
+      .queue-row .icon { font-size: 32px; line-height: 1; display: inline-flex; align-items: center; flex-shrink: 0; }
       .qr-info { flex: 1; min-width: 0; }
       .qr-name { font-weight: 700; font-size: 13px; }
       .qr-sub { font-size: 11px; color: #8a7658; }
@@ -523,18 +525,34 @@
 
       /* Per-task implement row (maintainer request, 2026-07-13): the tool
          actually doing the work, under the task's name/sub/progress but
-         still inside the same bordered box. Combine/baler/grain-trailer add
-         a small capacity fill bar next to their icon. */
-      .qr-impl { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
-      .qr-impl .impl-icon { display: inline-flex; align-items: center; line-height: 1; opacity: 0.9; }
-      .qr-impl .impl-fill {
-        flex: 1; height: 6px; border-radius: 999px; overflow: hidden;
-        background: var(--cream); border: 1px solid var(--wood);
+         still inside the same bordered box — a bigger icon, a plain-English
+         info line ("Plow - Medium, 10 ft Working Width"), and — for
+         Combine/Baler/Grain Wagon — a labeled fill bar (current · % on the
+         bar itself, total off to the right). */
+      .qr-impl {
+        display: flex; align-items: flex-start; gap: 8px; margin-top: 6px;
+        padding-top: 6px; border-top: 1.5px dashed var(--cream-2);
       }
-      .qr-impl .impl-fill-bar {
+      .qr-impl .impl-icon {
+        display: inline-flex; align-items: center; flex-shrink: 0; line-height: 1;
+      }
+      .qr-impl .impl-body { flex: 1; min-width: 0; }
+      .qr-impl .impl-info { font-size: 11px; font-weight: 600; color: var(--ink); margin-top: 2px; }
+      .impl-fillrow { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+      .impl-fill {
+        position: relative; flex: 1; height: 15px; border-radius: 999px; overflow: hidden;
+        background: var(--cream); border: 1.5px solid var(--wood);
+      }
+      .impl-fill-bar {
         display: block; height: 100%; width: 0%; background: var(--gold);
         transition: width 0.3s;
       }
+      .impl-fill-label {
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        font-size: 10px; font-weight: 700; color: var(--wood-dark);
+        text-shadow: 0 1px 0 rgba(255,255,255,0.55);
+      }
+      .impl-total { flex-shrink: 0; font-size: 10px; font-weight: 700; color: #8a7658; }
 
       /* Agent dots on the map (brief §9 "GPS dots", emoji edition). */
       .agent-dot {

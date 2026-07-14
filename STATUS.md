@@ -43,6 +43,31 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   if sold now.
 - **95/95 tests passing** (added 5 rotation-planner tests). Typecheck clean.
 
+## Latest changes (2026-07-13, Work Queue readability pass + equipment-name reorder)
+
+- **Work Queue stays opaque always** — dropped the hover-to-reveal fade
+  (`#queuepanel` split out of the shared `#todolist` opacity rule, which
+  keeps its own fade unchanged).
+- **Bigger icons**: the tractor/combine icon in each row's corner and the
+  per-task implement icon both bumped up (18px→32px, 16px→30px).
+- **Implement info line** for every active task ("Plow - Medium, 10 ft
+  Working Width", "Grain Trailer - Medium, 60 t Capacity", …) —
+  `implementInfoText()` in main.ts, reading straight from `gameConfig`.
+- **Labeled fill bars** for Combine/Baler/Grain Wagon: current amount + %
+  overlaid on the bar itself (e.g. "11.1 t · 23%"), total off to the right
+  ("50 t"). Baler shows whole bales dropped/total instead of tonnage (it has
+  no tonnage figure) — same current/total/% shape.
+- **Equipment name format flipped everywhere**: "Small Tractor" → "Tractor -
+  Small" (`sizedName`/`makeAgent` in tasks.ts, `buildingDisplayName`'s silo
+  case, the equipment-shop button tooltip). Natural-language sentences
+  ("a small tractor costs $X", "can't pull a small plow") were left as
+  prose, not touched — only actual entity NAMES changed format. 3 tests
+  updated for the new name strings; 174/174 total, typecheck clean.
+- **UX needs eyes** (no Browser Preview): the new implement-row layout at
+  280px queue-panel width — check nothing wraps awkwardly with long info
+  lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
+  longest case).
+
 ## Latest changes (2026-07-13, queue polish + weed/fertilize windows)
 
 - **Reset button removed** (top-left 🔄) — the Settings tab's per-farm Delete

@@ -66,7 +66,7 @@ import {
   plowIconSvg, planterIconSvg, sprayerIconSvg, rakeIconSvg, balerIconSvg, grainTrailerIconSvg,
   grainHeaderIconSvg,
 } from "./ui/icons";
-import type { EquipmentKind } from "./sim/tasks";
+import type { EquipmentKind, ImplementKind } from "./sim/tasks";
 import {
   tickLoans, borrowOpen, paydownOpen, paydownLoan, refinanceLoan,
 } from "./sim/finance";
@@ -654,51 +654,105 @@ function sectionDivider(label: string): HTMLElement {
   return d;
 }
 
+/** Display name + working-width/capacity line for an implement kind at a
+ * size ("Plow - Medium, 10 ft Working Width"; maintainer request,
+ * 2026-07-13 — mirrors the equipment-name reorder, "<Kind> - <Size>"). */
+const IMPLEMENT_KIND_NAME: Record<ImplementKind, string> = {
+  plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake",
+  bailer: "Baler", grainTrailer: "Grain Trailer",
+};
+function implementInfoText(kind: ImplementKind, size: EquipmentSize): string {
+  const name = IMPLEMENT_KIND_NAME[kind];
+  if (kind === "grainTrailer") {
+    return `${name} - ${SIZE_LABEL[size]}, ${grainTrailerCapacityTons(size)} t Capacity`;
+  }
+  const widthFt = gameConfig.equipment[kind][size].widthFt;
+  return `${name} - ${SIZE_LABEL[size]}, ${widthFt} ft Working Width`;
+}
+
+const IMPLEMENT_QUEUE_ICON_PX = 30;
+
 /**
  * The IMPLEMENT row for an active task's Work Queue box (maintainer request,
  * 2026-07-13) — a second line under the existing name/sub/progress, still
  * inside the same bordered box, showing the tool actually doing the work
- * (as opposed to the tractor/combine icon already shown at the row's left).
- * Combine/baler/grain-trailer additionally get a small fill bar next to
- * their icon, since those three fill up with something as the job runs.
- * Empty string for queued tasks (no agent/implement committed yet) or a
- * task type with no implement of its own (harvest's "implement" is a fixed
- * Grain Header — no separate buyable header exists, so it's assumed).
+ * (as opposed to the tractor/combine icon already shown at the row's left),
+ * a plain-English info line ("Plow - Medium, 10 ft Working Width"), and —
+ * for Combine/Baler/Grain Wagon, the three that fill up with something as
+ * the job runs — a fill bar labeled with the current amount + percent, plus
+ * the total off to the right. Empty string for queued tasks (no agent/
+ * implement committed yet) or a task type with no implement of its own.
  */
 function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
   if (!agent || task.status !== "active") return "";
 
   let iconSvg: string;
-  let fillPct: number | null = null;
+  let infoText: string;
+  let fill: { pct: number; current: string; total: string } | null = null;
 
   if (task.type === "harvest") {
-    iconSvg = grainHeaderIconSvg(16);
-    const capT = harvesterCapacityTons(agent.size ?? "medium");
-    fillPct = capT > 0 ? Math.min(100, ((agent.grainOnboard ?? 0) / capT) * 100) : 0;
+    const size = agent.size ?? "medium";
+    iconSvg = grainHeaderIconSvg(IMPLEMENT_QUEUE_ICON_PX);
+    infoText = `Grain Header - ${SIZE_LABEL[size]}, ${gameConfig.equipment.harvester[size].widthFt} ft Working Width`;
+    const capT = harvesterCapacityTons(size);
+    const onboard = agent.grainOnboard ?? 0;
+    fill = {
+      pct: capT > 0 ? Math.min(100, (onboard / capT) * 100) : 0,
+      current: `${onboard.toFixed(1)} t`,
+      total: `${capT} t`,
+    };
   } else if (task.type === "unloadHarvester") {
     const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "grainTrailer");
     if (!trailer) return "";
-    iconSvg = grainTrailerIconSvg(16);
+    iconSvg = grainTrailerIconSvg(IMPLEMENT_QUEUE_ICON_PX);
+    infoText = implementInfoText("grainTrailer", trailer.size);
     const capT = grainTrailerCapacityTons(trailer.size);
-    fillPct = capT > 0 ? Math.min(100, ((trailer.cargoTons ?? 0) / capT) * 100) : 0;
+    const cargo = trailer.cargoTons ?? 0;
+    fill = {
+      pct: capT > 0 ? Math.min(100, (cargo / capT) * 100) : 0,
+      current: `${cargo.toFixed(1)} t`,
+      total: `${capT} t`,
+    };
   } else if (task.type === "bale") {
-    iconSvg = balerIconSvg(16);
+    const impl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
+    const size = impl?.size ?? "medium";
+    iconSvg = balerIconSvg(IMPLEMENT_QUEUE_ICON_PX);
+    infoText = implementInfoText("bailer", size);
     // No persisted "current bale" fraction — bales are spaced evenly by work
-    // distance, so acres-worked-so-far mod one-bale's-worth tracks the real
+    // distance, so acres-worked-so-far ÷ one-bale's-worth tracks the real
     // gather → tie → drop → reset cycle closely without exposing tasks.ts's
-    // internal per-tick runtime maps.
-    const balesSoFar = task.doneAcres * gameConfig.forage.balesPerAcre;
-    fillPct = (balesSoFar % 1) * 100;
+    // internal per-tick runtime maps. Whole bales dropped so far / total
+    // bales stand in for "current"/"total" (a baler has no tonnage figure).
+    const balesPerAcre = gameConfig.forage.balesPerAcre;
+    const totalBales = Math.max(1, Math.round(task.totalAcres * balesPerAcre));
+    const balesSoFar = task.doneAcres * balesPerAcre;
+    const dropped = Math.min(totalBales, Math.floor(balesSoFar));
+    fill = { pct: (balesSoFar % 1) * 100, current: `${dropped} bales`, total: `${totalBales} bales` };
   } else {
     const kind = TASK_IMPLEMENT[task.type];
     if (!kind) return "";
-    iconSvg = (IMPLEMENT_ICON_SVG[kind] ?? plowIconSvg)(16);
+    const impl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === kind);
+    const size = impl?.size ?? "medium";
+    iconSvg = (IMPLEMENT_ICON_SVG[kind] ?? plowIconSvg)(IMPLEMENT_QUEUE_ICON_PX);
+    infoText = implementInfoText(kind, size);
   }
 
-  const fillHtml = fillPct !== null
-    ? `<span class="impl-fill"><span class="impl-fill-bar" style="width:${fillPct.toFixed(0)}%"></span></span>`
+  const fillHtml = fill
+    ? `<div class="impl-fillrow">
+        <span class="impl-fill">
+          <span class="impl-fill-bar" style="width:${fill.pct.toFixed(0)}%"></span>
+          <span class="impl-fill-label">${fill.current} · ${fill.pct.toFixed(0)}%</span>
+        </span>
+        <span class="impl-total">${fill.total}</span>
+      </div>`
     : "";
-  return `<div class="qr-impl"><span class="impl-icon">${iconSvg}</span>${fillHtml}</div>`;
+  return `<div class="qr-impl">
+      <span class="impl-icon">${iconSvg}</span>
+      <div class="impl-body">
+        <div class="impl-info">${infoText}</div>
+        ${fillHtml}
+      </div>
+    </div>`;
 }
 
 /** One row in the Jobs list. Active jobs are locked in place (an agent is
@@ -708,7 +762,7 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
 function buildQueueRow(task: FarmTask): HTMLElement {
   const isActive = task.status === "active";
   const agent = isActive && task.agentId ? save.agents.find((a) => a.id === task.agentId) : undefined;
-  const iconHtml = agent ? `<span class="icon">${(AGENT_ICON[agent.kind] ?? tractorIconSvg)(18)}</span>` : "";
+  const iconHtml = agent ? `<span class="icon">${(AGENT_ICON[agent.kind] ?? tractorIconSvg)(32)}</span>` : "";
 
   if (task.type === "unloadHarvester") {
     // Not acres-based — no %/hours estimate; show the phase instead.
@@ -1438,7 +1492,7 @@ function buildEquipShop(): void {
       btn.className = "shop-card";
       btn.innerHTML = `<span class="spec">${c.spec}</span><span class="price">$${c.price.toLocaleString()}</span>`;
       btn.disabled = c.price > save.money;
-      btn.title = btn.disabled ? `Costs $${c.price.toLocaleString()} — not enough cash` : `Buy ${SIZE_LABEL[size]} ${label}`;
+      btn.title = btn.disabled ? `Costs $${c.price.toLocaleString()} — not enough cash` : `Buy ${label} - ${SIZE_LABEL[size]}`;
       btn.addEventListener("click", () => {
         try {
           c.onBuy();
