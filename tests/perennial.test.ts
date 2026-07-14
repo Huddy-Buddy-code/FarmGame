@@ -20,9 +20,9 @@ beforeAll(() => setProjection(15, "N"));
 const MARCH = 0;
 const APRIL = 1 * minutesPerMonth();
 const MAY = 2 * minutesPerMonth();
-const JUNE = 3 * minutesPerMonth();
 const JULY = 4 * minutesPerMonth();
-const AUGUST = 5 * minutesPerMonth();
+const SEPTEMBER = 6 * minutesPerMonth();
+const OCTOBER = 7 * minutesPerMonth();
 
 const ACRES = 30;
 const side = Math.sqrt(ACRES * 4046.8564224);
@@ -85,7 +85,7 @@ describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-0
     expect(() => enqueueTask(save, field, "plow", 11 * minutesPerMonth())).toThrow(/perennial/i);
   });
 
-  it("becomes ready to cut in each of May/Jun/Jul, growing in between", () => {
+  it("becomes ready to cut in May/Jul/Sep, growing in the month between each", () => {
     const save = forageGame();
     const field = establish(save, "grass");
     // April: establishing, not yet a cutting window.
@@ -94,6 +94,12 @@ describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-0
     // May: first cutting window opens.
     tickFarming(save, MAY);
     expect(deriveStatus(field, MAY)).toBe("ready");
+    // June is a GROWING month between cuttings (no window opens there), but
+    // May's window is still un-cut, so the field stays mowable until cut.
+    expect((gameConfig.crops.grass.harvestMonths ?? []).includes(5)).toBe(false);
+    // Jul & Sep are the other two windows.
+    expect(deriveStatus(field, JULY)).toBe("ready");
+    expect(deriveStatus(field, SEPTEMBER)).toBe("ready");
   });
 
   it("runs a full cut → rake → bale cycle: forage becomes HAY, the stand regrows, crop persists", () => {
@@ -121,7 +127,7 @@ describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-0
   it("is cut 3× a year then stops; the next year it cuts again with no replanting", () => {
     const save = forageGame();
     const field = establish(save, "grass");
-    const windows = [MAY, JUNE, JULY];
+    const windows = [MAY, JULY, SEPTEMBER];
     for (const w of windows) {
       const before = field.cutsThisYear ?? 0;
       tickFarming(save, w);
@@ -133,8 +139,8 @@ describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-0
       tickFarming(save, w + minutesPerMonth() / 2);
     }
     expect(field.cutsThisYear).toBe(3);
-    // August: no fourth cutting — the field just regrows.
-    tickFarming(save, AUGUST);
+    // October: no fourth cutting — the field just regrows.
+    tickFarming(save, OCTOBER);
     expect(field.status).toBe("growing");
 
     // Next spring: the counter resets and it's ready again — same crop, no replant.

@@ -306,7 +306,7 @@ export const gameConfig: GameConfig = {
       producesForage: true,
       producesGrain: false,
       perennial: true,
-      harvestMonths: [4, 5, 6], // May / Jun / Jul cuttings
+      harvestMonths: [4, 6, 8], // May / Jul / Sep cuttings (a growing month between each)
       fertilizeMonth: 3, // April
       baleProduct: "hay",
     },
@@ -322,7 +322,7 @@ export const gameConfig: GameConfig = {
       producesForage: true,
       producesGrain: false,
       perennial: true,
-      harvestMonths: [4, 5, 6], // May / Jun / Jul cuttings
+      harvestMonths: [4, 6, 8], // May / Jul / Sep cuttings (a growing month between each)
       fertilizeMonth: 3, // April
       baleProduct: "alfalfaHay",
     },

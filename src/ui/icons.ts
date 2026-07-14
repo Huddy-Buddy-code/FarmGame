@@ -223,7 +223,8 @@ export function grainHeaderIconSvg(size = 22): string {
  * alfalfa. `color` keys match `gameConfig.baleProducts[*].color`. */
 const BALE_TINTS: Record<"hay" | "alfalfa", { fill: string; stroke: string; band: string; core: string }> = {
   hay: { fill: "#d9c187", stroke: "#9c8348", band: "#b39a5c", core: "#c7ad72" },
-  alfalfa: { fill: "#6f8a52", stroke: "#4c6336", band: "#5c7644", core: "#617e49" },
+  // Alfalfa bales read as a deep, dark forage green (maintainer request, 2026-07-14).
+  alfalfa: { fill: "#4a6234", stroke: "#2f4121", band: "#3b4f2a", core: "#425a2f" },
 };
 
 /** A round bale seen end-on: wound cylinder, tinted by product (`color`). */

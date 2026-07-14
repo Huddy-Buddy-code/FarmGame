@@ -39,7 +39,7 @@ import {
   switchFarm, deleteFarm, getActiveFarmId, loadGameFor,
 } from "./state/persistence";
 import type { PersistedGame } from "./state/persistence";
-import { sellGrain, sellBales, netWorth } from "./sim/economy";
+import { sellGrain, sellBales, netWorth, baleInventory, sellBalesOfProduct } from "./sim/economy";
 import { SimClock } from "./sim/clock";
 import {
   formatDate, dateOf, MONTH_NAMES, MONTH_SHORT,
@@ -1025,6 +1025,39 @@ function refreshInventory() {
     row.appendChild(btn);
     rows.appendChild(row);
     rows.appendChild(siloCapacityBar(cfg, tons, capacity));
+  }
+
+  // --- Bales (2026-07-14): every field's bales summed per product, sellable
+  // in one click here as well as from a field's own panel. ---
+  const stocks = baleInventory(save);
+  if (stocks.length > 0) {
+    rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">📦 Bales</div>`);
+    for (const stock of stocks) {
+      const tons = (stock.bales * gameConfig.forage.baleTons).toFixed(0);
+      const row = document.createElement("div");
+      row.className = "inv-row";
+      row.innerHTML = `
+        <span class="icon">${baleIconSvg(22, stock.color)}</span>
+        <span class="info">
+          <div class="name">${stock.name}</div>
+          <div class="qty">${stock.bales} bales · ${tons} t</div>
+        </span>
+        <span class="price">$${stock.pricePerBale.toLocaleString()}/bale</span>`;
+      const btn = document.createElement("button");
+      btn.className = "primary";
+      btn.textContent = `Sell all · $${stock.value.toLocaleString()}`;
+      btn.addEventListener("click", () => {
+        const { bales: sold, revenue } = sellBalesOfProduct(save, stock.product);
+        if (sold <= 0) return;
+        updateHud();
+        refreshInventory();
+        updateBaleMarkers();
+        if (selectedFieldId) refreshFieldPanel(true);
+        toast(`💰 Sold ${sold} ${stock.name.toLowerCase()} bales for $${revenue.toLocaleString()}`);
+      });
+      row.appendChild(btn);
+      rows.appendChild(row);
+    }
   }
 }
 

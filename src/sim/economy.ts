@@ -9,7 +9,7 @@
  */
 
 import { gameConfig } from "../config/gameConfig";
-import type { CropId } from "../config/gameConfig";
+import type { CropId, BaleProduct } from "../config/gameConfig";
 import type { SaveState, Field, Agent, Implement } from "../state/saveState";
 import { areaAcres } from "../geo/geometry";
 import { agentPrice, implementPrice } from "./tasks";
@@ -50,6 +50,49 @@ export function sellBales(save: SaveState, field: Field): { bales: number; reven
   save.money += revenue;
   // Book by product so the Finance cashflow breakdown separates hay/alfalfa/stover.
   recordCash(save, "cropRevenue", `${product.name} bales`, revenue);
+  return { bales, revenue };
+}
+
+/** One product's aggregated bale stock across every field (Inventory tab). */
+export interface BaleStock {
+  product: BaleProduct;
+  name: string;
+  bales: number;
+  pricePerBale: number;
+  value: number;
+  color: "hay" | "alfalfa";
+}
+
+/** Every bale sitting in every field, summed per product (2026-07-14) — the
+ * Inventory tab's bale section. Only products with at least one bale appear. */
+export function baleInventory(save: SaveState): BaleStock[] {
+  const counts = new Map<BaleProduct, number>();
+  for (const f of save.fields) {
+    const n = f.baleLocations?.length ?? 0;
+    if (n <= 0) continue;
+    const product = f.baleProduct ?? "cornStover";
+    counts.set(product, (counts.get(product) ?? 0) + n);
+  }
+  const out: BaleStock[] = [];
+  for (const [product, bales] of counts) {
+    const cfg = gameConfig.baleProducts[product];
+    out.push({ product, name: cfg.name, bales, pricePerBale: cfg.pricePerBale, value: Math.round(bales * cfg.pricePerBale), color: cfg.color });
+  }
+  // Stable, readable order (highest value first).
+  return out.sort((a, b) => b.value - a.value);
+}
+
+/** Sell EVERY field's bales of one product at once (Inventory "Sell all"). */
+export function sellBalesOfProduct(save: SaveState, product: BaleProduct): { bales: number; revenue: number } {
+  let bales = 0;
+  let revenue = 0;
+  for (const field of save.fields) {
+    if ((field.baleLocations?.length ?? 0) === 0) continue;
+    if ((field.baleProduct ?? "cornStover") !== product) continue;
+    const r = sellBales(save, field);
+    bales += r.bales;
+    revenue += r.revenue;
+  }
   return { bales, revenue };
 }
 

@@ -143,6 +143,15 @@ export function drawFieldTexture(
         break;
 
       case "harvested":
+        if (p.crop === "grass" || p.crop === "alfalfa") {
+          // Freshly-mown hay: dark green cut stubble with mower-swath stripes —
+          // regrowth already showing, not tan chaff like a combined grain field.
+          rows(ctx, w, h, angle, 2.2, dark, 0.9, 0.3);
+          rows(ctx, w, h, angle, 2.2, light, 0.6, 0.22, 1); // lit stubble tufts
+          passStripes(ctx, w, h, angle, 18, 0.06); // mower passes
+          canopyMottle(ctx, w, h, seed + 7, dark, light, 0.5, areaScale);
+          break;
+        }
         // Cut stubble: strong parallel cut lines, header-width pass stripes,
         // and pale chaff windrows out the back of the combine.
         rows(ctx, w, h, angle, 2.2, "#93835a", 0.9, 0.3);
@@ -245,6 +254,8 @@ function palette(p: FieldPaintParams): { base: string; dark: string; light: stri
         ? { base: "#a3924f", dark: "#8a7a3e", light: "#b5a563" }
         : { base: "#b09a58", dark: "#977f43", light: "#c2ad6d" };
     case "harvested":
+      // A freshly-cut hay stand is dark green stubble/regrowth, not tan chaff.
+      if (p.crop === "grass" || p.crop === "alfalfa") return { base: "#4f6537", dark: "#3f522c", light: "#63794a" };
       return { base: "#b3a375", dark: "#9a8a5e", light: "#c4b489" };
     case "mulched":
       // Greener than stubble — grass retained under a clean, mown/baled surface.
