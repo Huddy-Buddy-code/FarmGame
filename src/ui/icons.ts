@@ -218,13 +218,41 @@ export function grainHeaderIconSvg(size = 22): string {
   `);
 }
 
-/** A round hay bale seen end-on: wound tan cylinder. */
-export function baleIconSvg(size = 14): string {
+/** Bale color tints (2026-07-13): the same round-bale shape, different wrap
+ * color per product — light brown for hay/corn stover, darker green for
+ * alfalfa. `color` keys match `gameConfig.baleProducts[*].color`. */
+const BALE_TINTS: Record<"hay" | "alfalfa", { fill: string; stroke: string; band: string; core: string }> = {
+  hay: { fill: "#d9c187", stroke: "#9c8348", band: "#b39a5c", core: "#c7ad72" },
+  alfalfa: { fill: "#6f8a52", stroke: "#4c6336", band: "#5c7644", core: "#617e49" },
+};
+
+/** A round bale seen end-on: wound cylinder, tinted by product (`color`). */
+export function baleIconSvg(size = 14, color: "hay" | "alfalfa" = "hay"): string {
+  const t = BALE_TINTS[color];
   return svg(size, `
-    <ellipse cx="16" cy="17" rx="12" ry="10.5" fill="#d9c187" stroke="#9c8348" stroke-width="1.4"/>
-    <path d="M6.5 13.5 c4 2 15 2 19 0 M5.5 18 c4.6 2.6 16.4 2.6 21 0 M7 22 c4 2 14 2 18 0" stroke="#b39a5c" stroke-width="1" fill="none"/>
-    <ellipse cx="16" cy="17" rx="4.4" ry="3.9" fill="#c7ad72" stroke="#9c8348" stroke-width="0.9"/>
-    <ellipse cx="16" cy="17" rx="1.7" ry="1.5" fill="none" stroke="#9c8348" stroke-width="0.6"/>
+    <ellipse cx="16" cy="17" rx="12" ry="10.5" fill="${t.fill}" stroke="${t.stroke}" stroke-width="1.4"/>
+    <path d="M6.5 13.5 c4 2 15 2 19 0 M5.5 18 c4.6 2.6 16.4 2.6 21 0 M7 22 c4 2 14 2 18 0" stroke="${t.band}" stroke-width="1" fill="none"/>
+    <ellipse cx="16" cy="17" rx="4.4" ry="3.9" fill="${t.core}" stroke="${t.stroke}" stroke-width="0.9"/>
+    <ellipse cx="16" cy="17" rx="1.7" ry="1.5" fill="none" stroke="${t.stroke}" stroke-width="0.6"/>
+  `);
+}
+
+/** Mower (2026-07-13): a trailed disc mower — angled cutter bar carrying a row
+ * of spinning cutting discs, on a small transport wheel. Cuts perennial forage. */
+export function mowerIconSvg(size = 22): string {
+  const discs: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    const cx = 6 + i * 3.7, cy = 18 + i * 0.7;
+    discs.push(`<ellipse cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" rx="2" ry="1" fill="#b9c0c6" stroke="${STEEL_D}" stroke-width="0.5"/>` +
+      `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="0.5" fill="${STEEL_D}"/>`);
+  }
+  return svg(size, `
+    <rect x="1.5" y="11.6" width="3.8" height="1.4" rx="0.5" fill="${STEEL_D}"/>
+    <line x1="4.5" y1="12.4" x2="27" y2="17.2" stroke="${RED}" stroke-width="2.2"/>
+    <line x1="4.5" y1="12.4" x2="27" y2="17.2" stroke="${RED_D}" stroke-width="0.6" opacity="0.6"/>
+    <line x1="5" y1="16.2" x2="27.5" y2="21" stroke="${STEEL}" stroke-width="1.4"/>
+    ${discs.join("")}
+    ${wheel(26.5, 24, 2.6)}
   `);
 }
 
@@ -242,4 +270,5 @@ export const IMPLEMENT_ICON_SVG: Record<string, (size?: number) => string> = {
   rake: rakeIconSvg,
   bailer: balerIconSvg,
   grainTrailer: grainTrailerIconSvg,
+  mower: mowerIconSvg,
 };

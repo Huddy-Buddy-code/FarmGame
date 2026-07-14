@@ -18,10 +18,43 @@
  */
 
 import { gameConfig } from "../config/gameConfig";
-import type { CropId } from "../config/gameConfig";
+import type { CropId, BaleProduct } from "../config/gameConfig";
 import type { SimTime } from "./clock";
 import { minutesPerMonth, dateOf, MONTHS_PER_YEAR } from "./calendar";
 import type { SaveState, Field, FieldStatus } from "../state/saveState";
+
+/** Is `crop` a perennial forage crop (grass/alfalfa) — planted once, cut on
+ * fixed monthly windows, never plowed/replanted? */
+export function isPerennial(crop?: CropId): boolean {
+  return !!crop && !!gameConfig.crops[crop].perennial;
+}
+
+/** How many of THIS campaign year's cuttings a perennial field has already
+ * been mowed (0 if its stored count belongs to a prior year — the counter
+ * resets when the year turns). */
+function cutsThisYear(field: Field, now: SimTime): number {
+  return field.cutYear === dateOf(now).year ? (field.cutsThisYear ?? 0) : 0;
+}
+
+/** What the field's bales are, for pricing + tint (2026-07-13). Reads the
+ * crop's configured `baleProduct` (grass→hay, alfalfa→alfalfaHay); corn's crop
+ * is already cleared by harvest time, so it falls back to corn stover. */
+export function baleProductForField(field: Field): BaleProduct {
+  const cfg = field.crop ? gameConfig.crops[field.crop] : undefined;
+  return cfg?.baleProduct ?? "cornStover";
+}
+
+/** Bales dropped per acre for this field's product (corn 2.5, grass 1.5, …). */
+export function balesPerAcreForField(field: Field): number {
+  return gameConfig.baleProducts[baleProductForField(field)].balesPerAcre;
+}
+
+/** Can a perennial stand be seeded on a field in this status? Any bare ground —
+ * fresh stubble, freshly plowed, or the mulched remains of a prior crop — takes
+ * a perennial directly (no plow required, maintainer request). */
+export function canSeedPerennial(status: FieldStatus): boolean {
+  return status === "stubble" || status === "tilled" || status === "mulched";
+}
 
 /** Is `crop` plantable in the month containing `t`? */
 export function inPlantingWindow(crop: CropId, t: SimTime): boolean {
@@ -67,8 +100,15 @@ export function inWeedingWindow(field: Field, now: SimTime): boolean {
 
 /** Fertilizing opens once the crop is actually GROWING (not just planted),
  * the month after planting (maintainer request, 2026-07-13 — previously
- * allowed as soon as it was planted, before emergence). */
+ * allowed as soon as it was planted, before emergence). Perennials fertilize
+ * on a fixed annual month (`fertilizeMonth`, April) instead — the stand's
+ * long established, so "month after planting" doesn't apply. */
 export function canFertilizeNow(field: Field, now: SimTime): boolean {
+  if (!field.crop) return false;
+  const cfg = gameConfig.crops[field.crop];
+  if (cfg.perennial) {
+    return field.status !== "ready" && dateOf(now).month === (cfg.fertilizeMonth ?? 3);
+  }
   const m = monthsSincePlanting(field, now);
   return field.status === "growing" && m !== null && m >= 1;
 }
@@ -94,8 +134,11 @@ export function applyPlow(field: Field): void {
  */
 export function applyPlant(field: Field, crop: CropId, now: SimTime, rand: () => number = Math.random): void {
   const cfg = gameConfig.crops[crop];
-  if (field.status !== "tilled") {
-    throw new Error(`Plow ${field.id} before planting (status: ${field.status})`);
+  // Perennials (grass/alfalfa) establish directly on bare ground — no plow
+  // needed (maintainer request); annuals still require tilled soil.
+  const okStatus = cfg.perennial ? canSeedPerennial(field.status) : field.status === "tilled";
+  if (!okStatus) {
+    throw new Error(cfg.perennial ? `${field.id} can't be seeded (status: ${field.status})` : `Plow ${field.id} before planting (status: ${field.status})`);
   }
   field.crop = crop;
   field.plantedAt = now;
@@ -110,6 +153,24 @@ export function applyPlant(field: Field, crop: CropId, now: SimTime, rand: () =>
   field.autoFertDone = undefined;
   field.weedy = undefined;
   field.weeded = undefined;
+  // Perennial: start this year's cutting count fresh.
+  field.cutsThisYear = 0;
+  field.cutYear = dateOf(now).year;
+}
+
+/** Mow-complete effect (2026-07-13) — the perennial "harvest": the field is
+ * CUT, leaving forage to rake + bale, and this cutting is tallied. The stand
+ * itself is untouched (crop/plantedAt stay) so it regrows for the next window. */
+export function applyMowDone(field: Field, now: SimTime): void {
+  const year = dateOf(now).year;
+  if (field.cutYear !== year) {
+    field.cutYear = year;
+    field.cutsThisYear = 0;
+  }
+  field.cutsThisYear = (field.cutsThisYear ?? 0) + 1;
+  field.forageReady = true;
+  field.windrowed = undefined;
+  field.status = "harvested";
 }
 
 /** Harvest-complete effect: back to bare ground, crop state cleared. A forage
@@ -131,9 +192,15 @@ export function applyHarvestDone(field: Field): void {
  * it worked (see `tasks.ts`) into `field.baleLocations`, and stay there until
  * sold — so this only settles the field status/flags. */
 export function applyBaleDone(field: Field): void {
-  field.status = "mulched";
+  // Record what the bales are (drives sale price + marker tint) while the crop
+  // is still readable — for perennials it stays set, for corn it's already
+  // cleared so this resolves to corn stover.
+  field.baleProduct = baleProductForField(field);
   field.forageReady = undefined;
   field.windrowed = undefined;
+  // Perennial: the stand regrows for its next cutting — never plowed under.
+  // Annual (corn) residue: field settles to mulched, ready to re-plow.
+  field.status = isPerennial(field.crop) ? "growing" : "mulched";
 }
 
 /** Growth progress 0..1 (1 = harvest-ready). 0 if nothing is growing.
@@ -175,10 +242,31 @@ export function yieldRange(field: Field, now: SimTime): { low: number; high: num
 /** Field status as derived from growth/harvest state. Pure function of the field. */
 export function deriveStatus(field: Field, now: SimTime): FieldStatus {
   if (!field.crop || field.plantedAt === undefined) return field.status;
+  if (isPerennial(field.crop)) return derivePerennialStatus(field, now);
   const p = growthProgress(field, now);
   if (p >= 1) return "ready";
   if (p >= 0.15) return "growing";
   return "planted";
+}
+
+/**
+ * Perennial (grass/alfalfa) status on FIXED monthly cutting windows
+ * (maintainer decision, 2026-07-13): the field is READY to mow whenever an
+ * opened cutting window (`harvestMonths`) is still un-cut this year; it shows
+ * `harvested` while cut material awaits rake/bale, and `growing` (regrowth /
+ * dormant / establishing) the rest of the time. Never returns `ready` when a
+ * cut is already banked for the current window — you catch up in the next one.
+ */
+function derivePerennialStatus(field: Field, now: SimTime): FieldStatus {
+  // Cut material still on the field → awaiting rake/bale (the mow set this).
+  if (field.forageReady) return "harvested";
+  const cfg = gameConfig.crops[field.crop!];
+  const month = dateOf(now).month;
+  const windowsOpened = (cfg.harvestMonths ?? []).filter((m) => m <= month).length;
+  if (windowsOpened > cutsThisYear(field, now)) return "ready";
+  // Regrowing between cuttings / dormant off-season / just establishing.
+  const m = monthsSincePlanting(field, now);
+  return m !== null && m < 1 ? "planted" : "growing";
 }
 
 export interface TickResult {
@@ -192,14 +280,23 @@ export interface TickResult {
  */
 export function tickFarming(save: SaveState, now: SimTime): TickResult {
   const changed: Field[] = [];
+  const year = dateOf(now).year;
   for (const field of save.fields) {
+    // Perennial year-turn housekeeping: reset the cutting count and re-arm the
+    // annual fertilizer pass for the new season (the stand persists — there's
+    // no replant to reset these at, like the annuals get in applyPlant).
+    if (isPerennial(field.crop) && field.cutYear !== undefined && field.cutYear !== year) {
+      field.cutYear = year;
+      field.cutsThisYear = 0;
+      field.autoFertDone = undefined;
+    }
     const before = field.status;
     field.status = deriveStatus(field, now);
     let dirty = field.status !== before;
     // Weed flush: once the weeding window opens (growing, 2 months after
     // planting) on a not-yet-sprayed crop, weeds show up (and stay until a
-    // weeding pass clears them).
-    if (!field.weedy && !field.weeded && inWeedingWindow(field, now)) {
+    // weeding pass clears them). Perennial forage crops don't get weeds.
+    if (!isPerennial(field.crop) && !field.weedy && !field.weeded && inWeedingWindow(field, now)) {
       field.weedy = true;
       dirty = true;
     }

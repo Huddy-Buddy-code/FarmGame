@@ -14,8 +14,16 @@
  * their tunables get ADDED here — never inlined into the system code.
  */
 
-/** Crops the player can plant (brief §6, §10). All numbers are balance = tunable. */
-export type CropId = "corn" | "soybeans";
+/** Crops the player can plant (brief §6, §10). All numbers are balance = tunable.
+ * Grass & Alfalfa (2026-07-13) are PERENNIAL forage crops — planted once, cut
+ * 3× a year, never plowed/replanted (see `perennial`/`harvestMonths`). */
+export type CropId = "corn" | "soybeans" | "grass" | "alfalfa";
+
+/** What a field's dropped bales ARE, for pricing + coloring (2026-07-13). Corn
+ * leaves stover; grass raked→baled is hay; alfalfa raked→baled is alfalfa hay;
+ * "forage" is the (currently unreachable — baling always follows a rake) unraked
+ * path the maintainer called out. */
+export type BaleProduct = "cornStover" | "hay" | "alfalfaHay" | "forage";
 
 /** Equipment size classes. A tractor pulls implements of its class or smaller. */
 export type EquipmentSize = "small" | "medium" | "large";
@@ -54,8 +62,27 @@ export interface CropConfig {
   sellPricePerTon: number;
   /** Does this crop leave balable forage/residue behind after harvest? When
    * true, a harvested field must be raked + baled (the forage loop) before it
-   * can be re-plowed — if the farm owns the gear. Corn only, for now. */
+   * can be re-plowed — if the farm owns the gear. Corn + the perennials. */
   producesForage?: boolean;
+  /** Does this crop yield GRAIN sold by the ton (corn/soybeans)? Perennial
+   * forage crops (grass/alfalfa) don't — their whole product is bales — so
+   * they're excluded from the grain inventory. Defaults to true when omitted. */
+  producesGrain?: boolean;
+  /** PERENNIAL forage crop (grass/alfalfa, 2026-07-13): planted once, never
+   * plowed or replanted. Cut on fixed monthly windows (`harvestMonths`) rather
+   * than the annuals' single ripen-then-done timer; the stand persists year to
+   * year and regrows between cuttings. */
+  perennial?: boolean;
+  /** Perennial only: the 0-based months the field is READY to cut (mow), one
+   * cutting per window. e.g. [4,5,6] = May/Jun/Jul. */
+  harvestMonths?: number[];
+  /** Perennial only: the 0-based month an annual fertilizer pass opens in
+   * (April = 3). Independent of planting (the stand's already established). */
+  fertilizeMonth?: number;
+  /** Which bale product a rake→bale run on this crop produces (hay for grass,
+   * alfalfaHay for alfalfa). Corn's stover is handled separately (its crop is
+   * cleared at harvest before baling). */
+  baleProduct?: BaleProduct;
 }
 
 export interface GameConfig {
@@ -78,6 +105,8 @@ export interface GameConfig {
   /** Cost to weed/fertilize, per acre — same pay-on-queue pattern as plow. */
   weedCostPerAcre: number;
   fertilizeCostPerAcre: number;
+  /** Cost to mow (cut) a perennial forage field, per acre (2026-07-13). */
+  mowCostPerAcre: number;
 
   /** Fieldwork pacing (brief §9–§10). PHYSICAL model (design decision 2026-07-10):
    * a machine drives a back-and-forth coverage path at `fieldSpeedKmh`, so a
@@ -120,6 +149,10 @@ export interface GameConfig {
      * feet. Same hitch rule; runs after (or alongside) the rake. Sold in one
      * size (25 ft). */
     bailer: Record<EquipmentSize, { price: number; widthFt: number }>;
+    /** Mower implement (2026-07-13): CUTS a perennial forage field (grass/
+     * alfalfa) — the "harvest" for those crops, in place of the combine. Leaves
+     * cut material to rake + bale. Sold Small (10 ft) & Medium (20 ft). */
+    mower: Record<EquipmentSize, { price: number; widthFt: number }>;
     /** The combine is self-contained (integral grain header) but now SIZED
      * like a tractor (maintainer request, 2026-07-12): each tier has its own
      * hopper capacity — the combine fills as it cuts, stops when full, and
@@ -171,6 +204,18 @@ export interface GameConfig {
      * sim-min). At higher time-compression it blurs past like everything else. */
     baleTieMinutes: number;
   };
+
+  /** Bale products (2026-07-13) — what a field's dropped bales are worth and how
+   * densely they drop, keyed by `BaleProduct`. Corn's `cornStover` mirrors the
+   * legacy `forage.balePricePerBale`/`balesPerAcre` so existing corn balances
+   * are unchanged; grass→`hay` and alfalfa→`alfalfaHay` are their own tiers.
+   * `color` drives the bale marker tint (hay = light brown, alfalfa = green). */
+  baleProducts: Record<BaleProduct, {
+    name: string;
+    pricePerBale: number;
+    balesPerAcre: number;
+    color: "hay" | "alfalfa";
+  }>;
 
   /** How much the visible yield range has narrowed by harvest-ready (0..1).
    * 0.85 = the band is 15% of its planting width when the crop is ready. */
@@ -245,12 +290,49 @@ export const gameConfig: GameConfig = {
       growMonths: 4, // whole months → planted in May, ready the 1st of Sep
       sellPricePerTon: 390,
     },
+    // Perennial forage crops (2026-07-13): planted once in spring, cut 3× a
+    // year (mow → rake → bale = hay), fertilized annually, never plowed. Yield
+    // is realized as BALES, not grain, so baseYield/sellPricePerTon are unused
+    // (kept at 0 to satisfy the shared CropConfig shape).
+    grass: {
+      name: "Grass",
+      emoji: "🌾",
+      inputCostPerAcre: 120, // establishment seed
+      baseYieldTonsPerAcre: 0,
+      yieldUncertainty: 0,
+      plantMonths: [2], // March
+      growMonths: 2,
+      sellPricePerTon: 0,
+      producesForage: true,
+      producesGrain: false,
+      perennial: true,
+      harvestMonths: [4, 5, 6], // May / Jun / Jul cuttings
+      fertilizeMonth: 3, // April
+      baleProduct: "hay",
+    },
+    alfalfa: {
+      name: "Alfalfa",
+      emoji: "☘️",
+      inputCostPerAcre: 180,
+      baseYieldTonsPerAcre: 0,
+      yieldUncertainty: 0,
+      plantMonths: [2], // March
+      growMonths: 2,
+      sellPricePerTon: 0,
+      producesForage: true,
+      producesGrain: false,
+      perennial: true,
+      harvestMonths: [4, 5, 6], // May / Jun / Jul cuttings
+      fertilizeMonth: 3, // April
+      baleProduct: "alfalfaHay",
+    },
   },
 
   plowCostPerAcre: 20,
   plowMonths: [11, 0, 1], // Dec–Feb (winter only)
   weedCostPerAcre: 15,
   fertilizeCostPerAcre: 35,
+  mowCostPerAcre: 12,
   work: {
     // Slower than road travel: a working pass is deliberate. Tuned so a medium
     // (10 ft) plow on a ~30-acre field takes a few sim-hours — in the ballpark
@@ -292,6 +374,13 @@ export const gameConfig: GameConfig = {
       medium: { price: 130_000, widthFt: 25 },
       large: { price: 130_000, widthFt: 25 },
     },
+    // Mower: Small (10 ft) & Medium (20 ft) sold; the large slot mirrors medium
+    // so the record type-checks like the others but is never offered.
+    mower: {
+      small: { price: 45_000, widthFt: 10 },
+      medium: { price: 85_000, widthFt: 20 },
+      large: { price: 85_000, widthFt: 20 },
+    },
     harvester: {
       small: { price: 350_000, widthFt: 20, capacityTons: 30 },
       medium: { price: 450_000, widthFt: 30, capacityTons: 50 },
@@ -317,6 +406,16 @@ export const gameConfig: GameConfig = {
     baleTons: 1,
     balePricePerBale: 45,
     baleTieMinutes: 0.17, // ≈ 10 s at 1×
+  },
+  baleProducts: {
+    // Corn residue — mirrors the legacy forage numbers so corn is unchanged.
+    cornStover: { name: "Corn Stover", pricePerBale: 45, balesPerAcre: 2.5, color: "hay" },
+    // Grass hay: ~1.5 t/ac/cutting, round bale ≈ 1 t, ~$65/bale (2025 markets).
+    hay: { name: "Grass Hay", pricePerBale: 65, balesPerAcre: 1.5, color: "hay" },
+    // Alfalfa hay: a bit denser + roughly 2× the value of grass (~$170 vs ~$110/t).
+    alfalfaHay: { name: "Alfalfa Hay", pricePerBale: 130, balesPerAcre: 1.6, color: "alfalfa" },
+    // Unraked cut forage (currently unreachable — baling always follows a rake).
+    forage: { name: "Forage", pricePerBale: 40, balesPerAcre: 1.5, color: "hay" },
   },
   buildings: {
     silo: {

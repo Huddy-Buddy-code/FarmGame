@@ -127,6 +127,15 @@ export function drawFieldTexture(
       }
 
       case "ready":
+        if (p.crop === "grass" || p.crop === "alfalfa") {
+          // Perennial hay stand ready to cut: no crop rows (it's a dense sward),
+          // a soft wind-blown mottle, and — for alfalfa — a scatter of purple
+          // bloom flecks (alfalfa flowers just before cutting).
+          canopyMottle(ctx, w, h, seed + 7, dark, light, 1.1, areaScale);
+          swardStreaks(ctx, w, h, angle, seed + 13, dark, light, areaScale);
+          if (p.crop === "alfalfa") bloomFlecks(ctx, w, h, seed + 29, "#7d5aa6", "#9d78c4", areaScale);
+          break;
+        }
         canopyMottle(ctx, w, h, seed + 7, dark, light, 0.9, areaScale);
         rows(ctx, w, h, angle, 1.6, dark, 0.6, 0.16);
         rows(ctx, w, h, angle, 12, dark, 2.2, 0.1); // lodged/leaning bands
@@ -172,9 +181,14 @@ export function drawFieldTexture(
     // over the cut stubble, along the field's run. Visual-only overlay for a
     // harvested-and-raked field (before the baler collects it).
     if (p.windrowed) {
-      rows(ctx, w, h, angle, 15, "#7a6a3f", 3.2, 0.5);       // the piled windrow
-      rows(ctx, w, h, angle, 15, "#a89263", 1.4, 0.4, 1.6);  // sunlit crest
-      rows(ctx, w, h, angle, 15, "#4f4529", 1.0, 0.3, -1.4); // shaded near edge
+      // Hay windrows (grass/alfalfa) are greener/paler than corn-stover rows.
+      const hay = p.crop === "grass" || p.crop === "alfalfa";
+      const pile = hay ? "#8f9152" : "#7a6a3f";
+      const crest = hay ? "#bcbb7e" : "#a89263";
+      const shade = hay ? "#5c5f33" : "#4f4529";
+      rows(ctx, w, h, angle, 15, pile, 3.2, 0.5);       // the piled windrow
+      rows(ctx, w, h, angle, 15, crest, 1.4, 0.4, 1.6); // sunlit crest
+      rows(ctx, w, h, angle, 15, shade, 1.0, 0.3, -1.4); // shaded near edge
     }
 
     ctx.restore();
@@ -224,6 +238,9 @@ function palette(p: FieldPaintParams): { base: string; dark: string; light: stri
       };
     }
     case "ready":
+      // Perennial forage stands are GREEN at cutting, not golden like grain.
+      if (p.crop === "grass") return { base: "#7f9a4e", dark: "#65803a", light: "#9bb267" }; // lush tall grass
+      if (p.crop === "alfalfa") return { base: "#5f7d40", dark: "#4c6733", light: "#7a9455" }; // deep alfalfa green
       return p.crop === "soybeans"
         ? { base: "#a3924f", dark: "#8a7a3e", light: "#b5a563" }
         : { base: "#b09a58", dark: "#977f43", light: "#c2ad6d" };
@@ -396,6 +413,45 @@ function passStripes(ctx: CanvasRenderingContext2D, w: number, h: number, angleR
     ctx.fillRect(-diag / 2, d, diag, spacing);
   }
   ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+/** Soft wind-combed streaks for a dense hay sward (perennial forage ready to
+ * cut) — short, faint strokes roughly along the field run, so a mature stand
+ * reads as leaning grass rather than crop rows. */
+function swardStreaks(ctx: CanvasRenderingContext2D, w: number, h: number, angleRad: number, seed: number, dark: string, light: string, areaScale: number): void {
+  const rng = mulberry32(seed);
+  const n = Math.floor((w * h * areaScale) / 220);
+  ctx.save();
+  ctx.lineCap = "round";
+  for (let i = 0; i < n; i++) {
+    ctx.strokeStyle = rng() < 0.5 ? dark : light;
+    ctx.globalAlpha = 0.05 + rng() * 0.13;
+    ctx.lineWidth = 0.5 + rng() * 0.9;
+    const x = rng() * w, y = rng() * h;
+    const a = angleRad + (rng() - 0.5) * 0.5;
+    const len = 2 + rng() * 5;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len);
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+/** Scattered purple bloom flecks for a flowering alfalfa stand (it blooms just
+ * before cutting) — tiny dots in two violet tones over the green sward. */
+function bloomFlecks(ctx: CanvasRenderingContext2D, w: number, h: number, seed: number, dark: string, light: string, areaScale: number): void {
+  const rng = mulberry32(seed);
+  const n = Math.floor((w * h * areaScale) / 140);
+  for (let i = 0; i < n; i++) {
+    ctx.fillStyle = rng() < 0.5 ? dark : light;
+    ctx.globalAlpha = 0.25 + rng() * 0.35;
+    ctx.beginPath();
+    ctx.arc(rng() * w, rng() * h, 0.4 + rng() * 0.9, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.globalAlpha = 1;
 }
 

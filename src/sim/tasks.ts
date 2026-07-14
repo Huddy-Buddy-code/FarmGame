@@ -29,7 +29,8 @@ import { areaAcres, pointInPolygon } from "../geo/geometry";
 import type { Meters } from "../geo/coords";
 import {
   inPlantingWindow, canPlow, applyPlow, applyPlant, applyHarvestDone, applyBaleDone,
-  inPlowWindow, hasStandingCrop, inWeedingWindow, canFertilizeNow,
+  applyMowDone, inPlowWindow, hasStandingCrop, inWeedingWindow, canFertilizeNow,
+  isPerennial, balesPerAcreForField, canSeedPerennial,
 } from "./farming";
 import { buildCoveragePath, sampleAt, workDoneAt, distanceAtWork } from "./coverage";
 import type { CoveragePath } from "./coverage";
@@ -46,6 +47,7 @@ export const TASK_AGENT_KIND: Record<TaskType, Agent["kind"]> = {
   plow: "tractor",
   plant: "tractor",
   harvest: "harvester",
+  mow: "tractor", // perennial forage "harvest" — tractor + Mower, no combine
   weed: "tractor",
   fertilize: "tractor",
   rake: "tractor",
@@ -68,28 +70,28 @@ export type EquipmentKind = "tractor" | "harvester";
 /** Buyable implements: a plow (tills), a planter (seeds), a sprayer (weeds or
  * fertilizes), a Grain Trailer (hauls a full combine to a silo) — same widths/
  * requirements, a tractor hitches one at a time. */
-export type ImplementKind = "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer";
+export type ImplementKind = "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower";
 
 const EQUIPMENT_NAME: Record<EquipmentKind, string> = { tractor: "Tractor", harvester: "Combine" };
 const IMPLEMENT_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake", bailer: "Baler",
-  grainTrailer: "Grain Trailer",
+  grainTrailer: "Grain Trailer", mower: "Mower",
 };
 const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
 
 /** Ledger item label for each field-expense task type (hover breakdown in the
  * Finance tab's cashflow table). */
 const FIELD_EXPENSE_ITEM: Partial<Record<TaskType, string>> = {
-  plow: "Plowing", plant: "Planting", weed: "Weeding", fertilize: "Fertilizing",
+  plow: "Plowing", plant: "Planting", mow: "Mowing", weed: "Weeding", fertilize: "Fertilizing",
   rake: "Raking", bale: "Baling",
 };
 
 /** Which implement kind a task type needs (undefined = none, e.g. harvest).
- * Weed and fertilize both use a sprayer; rake/bale use their own tools;
- * unloadHarvester needs a Grain Trailer. Exported for the Work Queue panel's
- * per-task implement icon (main.ts). */
+ * Weed and fertilize both use a sprayer; rake/bale use their own tools; mow
+ * uses a Mower; unloadHarvester needs a Grain Trailer. Exported for the Work
+ * Queue panel's per-task implement icon (main.ts). */
 export const TASK_IMPLEMENT: Partial<Record<TaskType, ImplementKind>> = {
-  plow: "plow", plant: "planter", weed: "sprayer", fertilize: "sprayer",
+  plow: "plow", plant: "planter", mow: "mower", weed: "sprayer", fertilize: "sprayer",
   rake: "rake", bale: "bailer", unloadHarvester: "grainTrailer",
 };
 
@@ -128,6 +130,7 @@ const IMPLEMENT_CONFIG: Record<ImplementKind, Record<EquipmentSize, { price: num
   rake: gameConfig.equipment.rake,
   bailer: gameConfig.equipment.bailer,
   grainTrailer: gameConfig.equipment.grainTrailer,
+  mower: gameConfig.equipment.mower,
 };
 
 /** Price of an implement at a given size. */
@@ -399,8 +402,8 @@ export function effectiveStatus(save: SaveState, field: Field): FieldStatus {
     if (t.fieldId !== field.id) continue;
     if (t.type === "plow") status = "tilled";
     else if (t.type === "plant") status = "planted";
-    else if (t.type === "harvest") status = "harvested";
-    else if (t.type === "bale") status = "mulched";
+    else if (t.type === "harvest" || t.type === "mow") status = "harvested";
+    else if (t.type === "bale") status = isPerennial(field.crop) ? "growing" : "mulched";
     // weed/fertilize/rake don't change the field's lifecycle status.
   }
   return status;
@@ -411,6 +414,7 @@ export function taskCost(field: Field, type: TaskType, crop?: CropId): number {
   const acres = areaAcres(field.boundary);
   if (type === "plow") return Math.round(acres * gameConfig.plowCostPerAcre);
   if (type === "plant") return Math.round(acres * gameConfig.crops[crop!].inputCostPerAcre);
+  if (type === "mow") return Math.round(acres * gameConfig.mowCostPerAcre);
   if (type === "weed") return Math.round(acres * gameConfig.weedCostPerAcre);
   if (type === "fertilize") return Math.round(acres * gameConfig.fertilizeCostPerAcre);
   if (type === "rake") return Math.round(acres * gameConfig.forage.rakeCostPerAcre);
@@ -431,6 +435,8 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
   }
   const eff = effectiveStatus(save, field);
   if (type === "plow") {
+    // Perennials are never plowed — the stand persists year to year.
+    if (isPerennial(field.crop)) throw new Error(`${field.id} is a perennial stand — it isn't plowed`);
     if (!canPlow(eff)) throw new Error(`${field.id} can't be plowed (status: ${eff})`);
     // A harvested forage field owes a rake + bale first (unless a bale is
     // already queued, which pushes eff to "mulched" and clears this branch).
@@ -441,13 +447,21 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
   }
   if (type === "plant") {
     if (!crop) throw new Error("Pick a crop to plant");
-    if (eff !== "tilled") throw new Error(`Plow ${field.id} before planting (status: ${eff})`);
+    // Perennials establish on bare ground (no plow); annuals need tilled soil.
+    const perennial = gameConfig.crops[crop].perennial;
+    if (perennial ? !canSeedPerennial(eff) : eff !== "tilled") {
+      throw new Error(perennial ? `${field.id} can't be seeded (status: ${eff})` : `Plow ${field.id} before planting (status: ${eff})`);
+    }
     if (!inPlantingWindow(crop, now)) {
       throw new Error(`${gameConfig.crops[crop].name} can't be planted this month`);
     }
   }
   if (type === "harvest" && eff !== "ready") {
     throw new Error(`${field.id} isn't ready to harvest yet`);
+  }
+  if (type === "mow") {
+    if (!isPerennial(field.crop)) throw new Error(`${field.id} has no perennial forage to mow`);
+    if (field.status !== "ready") throw new Error(`${field.id} isn't ready to cut yet`);
   }
   if (type === "weed") {
     if (!hasStandingCrop(field.status)) throw new Error(`${field.id} has nothing to weed (status: ${field.status})`);
@@ -583,7 +597,12 @@ function isStartable(task: FarmTask, field: Field): boolean {
   // fieldId to still resolve (for display), not any particular field status.
   if (task.type === "unloadHarvester") return true;
   if (task.type === "plow") return canPlow(field.status);
-  if (task.type === "plant") return field.status === "tilled";
+  // Perennials seed on bare stubble too (no plow); annuals need tilled ground.
+  if (task.type === "plant") {
+    const perennial = task.crop && gameConfig.crops[task.crop].perennial;
+    return perennial ? canSeedPerennial(field.status) : field.status === "tilled";
+  }
+  if (task.type === "mow") return field.status === "ready"; // perennial cut
   // Both only ever queue once the crop is already growing (see enqueueTask's
   // window checks) — require it still be growing when picked up too, rather
   // than the looser hasStandingCrop (which also allows "planted").
@@ -1227,7 +1246,7 @@ function tickAgent(
     if (task.type === "bale") {
       const path = getActivePath(save, task, field, agent);
       const speed = (taskFieldSpeedKmh("bale") * 1000) / 60; // meters per sim-minute
-      const balesPerAcre = gameConfig.forage.balesPerAcre;
+      const balesPerAcre = balesPerAcreForField(field); // per product: corn 2.5, hay 1.5, alfalfa 1.6
       const totalBales = Math.max(1, Math.round(task.totalAcres * balesPerAcre));
       // Space bales by WORK DISTANCE along the actual driven path, not by field
       // AREA. A concave notch (farmstead/yard) makes the coverage path over-sweep
@@ -1426,6 +1445,11 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
     case "harvest":
       applyHarvestDone(field);
       break;
+    case "mow":
+      // Perennial "harvest": the field is cut and left with forage to rake +
+      // bale; the stand itself (crop/plantedAt) is untouched so it regrows.
+      applyMowDone(field, now);
+      break;
     case "rake":
       // Windrowing has no separate field-status effect — the field.windrowed
       // flag was already set when the rake was picked up (so the baler could
@@ -1455,7 +1479,7 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
  * NOT here — they're independent side-tasks (brief request, 2026-07-11) and
  * must never block the lifecycle from advancing, including while stuck queued
  * for lack of a sprayer. */
-const LIFECYCLE_TASKS: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "rake", "bale"]);
+const LIFECYCLE_TASKS: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "mow", "rake", "bale"]);
 
 /** The config's first crop — the fallback when an auto-managed field has no plans. */
 function defaultCrop(): CropId {
@@ -1504,7 +1528,51 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
   }
 
   const lifecycleBusy = save.tasks.some((t) => t.fieldId === field.id && LIFECYCLE_TASKS.has(t.type));
-  if (lifecycleBusy) return; // a plow/plant/harvest/rake/bale step is already lined up
+  if (lifecycleBusy) return; // a plow/plant/harvest/mow/rake/bale step is already lined up
+
+  // Perennial forage (grass/alfalfa): establish once, then cut → rake → bale
+  // each cutting window; never plowed or replanted. Fertilize was already
+  // handled above (canFertilizeNow's perennial branch = its April window).
+  if (isPerennial(plan.crop) || isPerennial(field.crop)) {
+    if (!field.crop) {
+      // Establish the stand — plant on bare ground in its (March) window.
+      try {
+        enqueueTask(save, field, "plant", now, plan.crop);
+      } catch {
+        /* out of the plant window / unaffordable — retry next tick */
+      }
+      return;
+    }
+    if (field.status === "ready") {
+      try {
+        enqueueTask(save, field, "mow", now); // the perennial "harvest"
+      } catch {
+        /* no mower / cash yet — retry next tick */
+      }
+      return;
+    }
+    if (field.status === "harvested") {
+      if (forageDue(save, field) && plan.bale) {
+        try {
+          enqueueTask(save, field, "rake", now);
+        } catch {
+          /* unaffordable — retry next tick */
+        }
+        try {
+          enqueueTask(save, field, "bale", now);
+        } catch {
+          /* rake not queued yet / unaffordable — retry next tick */
+        }
+      } else if (field.forageReady) {
+        // Not baling (opted out / no gear) — drop the cut forage; the stand
+        // regrows for the next window (a perennial is never plowed under).
+        field.forageReady = undefined;
+      }
+      return;
+    }
+    return; // growing / planted — nothing to do until the next cutting window
+  }
+
   switch (field.status) {
     case "stubble":
     case "mulched":

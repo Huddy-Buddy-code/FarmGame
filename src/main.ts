@@ -48,7 +48,7 @@ import {
 } from "./sim/calendar";
 import {
   tickFarming, growthProgress, yieldRange, inPlantingWindow, canPlow,
-  hasStandingCrop, inWeedingWindow, canFertilizeNow,
+  hasStandingCrop, inWeedingWindow, canFertilizeNow, isPerennial, canSeedPerennial,
 } from "./sim/farming";
 import {
   ensureAgents, initTaskIds, enqueueTask, cancelTask, taskCost, tasksFor,
@@ -64,7 +64,7 @@ import { defaultAccessPoints } from "./sim/access";
 import {
   MACHINE_ICON, IMPLEMENT_ICON_SVG, tractorIconSvg, combineIconSvg, baleIconSvg,
   plowIconSvg, planterIconSvg, sprayerIconSvg, rakeIconSvg, balerIconSvg, grainTrailerIconSvg,
-  grainHeaderIconSvg,
+  grainHeaderIconSvg, mowerIconSvg,
 } from "./ui/icons";
 import type { EquipmentKind, ImplementKind } from "./sim/tasks";
 import {
@@ -101,6 +101,10 @@ if (loaded) {
   save.agents ??= [];
   save.implements ??= [];
   save.buildings ??= [];
+  // Pre-perennial saves: the grain bin gained grass/alfalfa keys (0 tons — they
+  // never bank grain anyway, but the record must have every crop key).
+  save.grain.grass ??= 0;
+  save.grain.alfalfa ??= 0;
   initBuildingIdCounters(save);
   // Pre-finance saves: start the open borrowing year at whatever campaign
   // year the save was loaded at (tickLoans self-corrects instantly either
@@ -337,6 +341,7 @@ function taskVerb(task: FarmTask): string {
     const c = task.crop ? gameConfig.crops[task.crop] : null;
     return c ? `planting ${c.name.toLowerCase()}` : "planting";
   }
+  if (task.type === "mow") return "mowing";
   if (task.type === "weed") return "weeding";
   if (task.type === "fertilize") return "fertilizing";
   if (task.type === "rake") return "raking";
@@ -431,19 +436,25 @@ function updateAgentMarkers(): void {
 // ---------------------------------------------------------------------------
 const MAX_BALE_MARKERS = 600; // per-field perf ceiling; real fields sit well under this
 
-function makeBaleMarker(p: Meters): maplibregl.Marker {
+function makeBaleMarker(p: Meters, color: "hay" | "alfalfa"): maplibregl.Marker {
   const el = document.createElement("div");
   el.className = "bale-dot";
-  el.innerHTML = baleIconSvg(14);
+  el.innerHTML = baleIconSvg(14, color);
   return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p)).addTo(mapRef!);
+}
+
+/** The bale marker tint for a field, from its product (hay/corn = light brown,
+ * alfalfa = green). */
+function baleColorOf(field: Field): "hay" | "alfalfa" {
+  return gameConfig.baleProducts[field.baleProduct ?? "cornStover"].color;
 }
 
 /** Markers for a field's bales — all of them, or an EVEN subsample if a field
  * somehow tops the ceiling (uniform coverage, never a bare last corner). */
-function baleMarkersFor(locs: Meters[]): maplibregl.Marker[] {
-  if (locs.length <= MAX_BALE_MARKERS) return locs.map(makeBaleMarker);
+function baleMarkersFor(locs: Meters[], color: "hay" | "alfalfa"): maplibregl.Marker[] {
+  if (locs.length <= MAX_BALE_MARKERS) return locs.map((p) => makeBaleMarker(p, color));
   const out: maplibregl.Marker[] = [];
-  for (let i = 0; i < MAX_BALE_MARKERS; i++) out.push(makeBaleMarker(locs[Math.floor((i * locs.length) / MAX_BALE_MARKERS)]!));
+  for (let i = 0; i < MAX_BALE_MARKERS; i++) out.push(makeBaleMarker(locs[Math.floor((i * locs.length) / MAX_BALE_MARKERS)]!, color));
   return out;
 }
 
@@ -457,18 +468,19 @@ function updateBaleMarkers(): void {
     const locs = field.baleLocations ?? [];
     if (locs.length === 0) continue;
     wanted.add(field.id);
+    const color = baleColorOf(field);
     const existing = baleMarkers.get(field.id);
     if (existing && existing.count === locs.length) continue; // no change
     if (!existing) {
-      baleMarkers.set(field.id, { count: locs.length, markers: baleMarkersFor(locs) });
+      baleMarkers.set(field.id, { count: locs.length, markers: baleMarkersFor(locs, color) });
     } else if (locs.length > existing.count && locs.length <= MAX_BALE_MARKERS) {
       // Common case while baling: just add markers for the NEW drops.
-      for (let i = existing.count; i < locs.length; i++) existing.markers.push(makeBaleMarker(locs[i]!));
+      for (let i = existing.count; i < locs.length; i++) existing.markers.push(makeBaleMarker(locs[i]!, color));
       existing.count = locs.length;
     } else {
       // Shrank (some sold), or crossed the subsample ceiling — rebuild.
       for (const m of existing.markers) m.remove();
-      baleMarkers.set(field.id, { count: locs.length, markers: baleMarkersFor(locs) });
+      baleMarkers.set(field.id, { count: locs.length, markers: baleMarkersFor(locs, color) });
     }
   }
   // Drop markers for fields that were sold or had their bales sold.
@@ -511,16 +523,18 @@ const reveals = new Map<string, Reveal>();
 function revealTargetStatus(task: FarmTask, field: Field): FieldStatus {
   if (task.type === "plow") return "tilled";
   if (task.type === "plant") return "planted";
-  if (task.type === "bale") return "mulched";
+  // Baling a perennial leaves it regrowing (green), not mulched like corn —
+  // reveal that so there's no pop when the field repaints on completion.
+  if (task.type === "bale") return isPerennial(field.crop) ? "growing" : "mulched";
   if (task.type === "weed" || task.type === "fertilize") return field.status; // same status, different overlay
-  return "harvested";
+  return "harvested"; // harvest + mow both cut to bare/cut ground
 }
 
 /** Task types whose completion actually changes the field's texture — the only
  * ones worth the reveal-stamping treatment. Weeding bakes the SAME status with
  * the weed overlay off (sprayer cleans strip-by-strip); fertilizing bakes it
- * ~20% darker (wet liquid spray, dries off next month). */
-const REVEALS_TEXTURE: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "rake", "bale", "weed", "fertilize"]);
+ * ~20% darker (wet liquid spray, dries off next month); mowing cuts the sward. */
+const REVEALS_TEXTURE: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "mow", "rake", "bale", "weed", "fertilize"]);
 
 function updateReveals(): void {
   if (!overlay) return;
@@ -558,9 +572,14 @@ function updateReveals(): void {
         status: revealTargetStatus(task, field),
         crop: field.crop,
         // Weeding/fertilizing repaint the crop AS IT IS (weeds off / spray
-        // darkened); everything else reveals a fresh post-work surface where
-        // progress starts at 0.
-        progress: task.type === "weed" || task.type === "fertilize" ? growthProgress(field, clock.time()) : 0,
+        // darkened); a perennial being baled reveals its regrowth green;
+        // everything else reveals a fresh post-work surface (progress 0).
+        progress:
+          task.type === "weed" || task.type === "fertilize"
+            ? growthProgress(field, clock.time())
+            : task.type === "bale" && isPerennial(field.crop)
+              ? growthProgress(field, clock.time())
+              : 0,
         // Fertilizing doesn't clear weeds — keep them under the wet sheen.
         weedy: task.type === "fertilize" ? !!field.weedy : false,
         fertilized: task.type === "fertilize",
@@ -659,7 +678,7 @@ function sectionDivider(label: string): HTMLElement {
  * "10 ft Working Width" — mirrors the equipment-name reorder, "<Kind> - <Size>". */
 const IMPLEMENT_KIND_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake",
-  bailer: "Baler", grainTrailer: "Grain Trailer",
+  bailer: "Baler", grainTrailer: "Grain Trailer", mower: "Mower",
 };
 function implementInfoLines(kind: ImplementKind, size: EquipmentSize): { name: string; detail: string } {
   const name = `${IMPLEMENT_KIND_NAME[kind]} - ${SIZE_LABEL[size]}`;
@@ -977,6 +996,9 @@ function refreshInventory() {
   rows.innerHTML = "";
   for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
     const cfg = gameConfig.crops[cropId];
+    // Perennial forage crops (grass/alfalfa) yield bales, not grain — they're
+    // sold from the field panel, not the grain inventory.
+    if (cfg.producesGrain === false) continue;
     const tons = save.grain[cropId];
     const capacity = siloCapacityForCrop(save, cropId);
     const row = document.createElement("div");
@@ -1544,6 +1566,10 @@ function buildEquipShop(): void {
   line("Sprayer", sprayerIconSvg(26), Object.fromEntries((["medium", "large"] as EquipmentSize[]).map((s) => [s, {
     spec: `${widthSpec("sprayer", s)} boom`, price: implementPrice("sprayer", s), onBuy: buyImpl("sprayer", s),
   }])));
+  // Mower: cuts perennial forage (grass/alfalfa) — Small (10 ft) & Medium (20 ft).
+  line("Mower", mowerIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
+    spec: `${gameConfig.equipment.mower[s].widthFt} ft · cuts hay`, price: implementPrice("mower", s), onBuy: buyImpl("mower", s),
+  }])));
   // Rake & baler: single-size forage tools.
   line("Rake", rakeIconSvg(26), {
     small: { spec: `${gameConfig.equipment.rake.small.widthFt} ft · windrows forage`, price: implementPrice("rake", "small"), onBuy: buyImpl("rake", "small") },
@@ -1917,21 +1943,28 @@ function rebuildCropCalendarGrid() {
     html += `<div class="mo">${MONTH_SHORT[(START_MONTH + i) % MONTHS_PER_YEAR]}</div>`;
   }
   // One lane per crop with plant + harvest bands (percent of the display year).
+  const pct = (months: number) => (months / MONTHS_PER_YEAR) * 100;
   for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
     const cfg = gameConfig.crops[cropId];
-    const growMonths = cfg.growMonths;
     const plantStart = disp(cfg.plantMonths[0]!);
     const plantLen = cfg.plantMonths.length;
-    // Harvest opens a grow-time after the earliest planting and closes a
-    // grow-time after the latest; crops here don't wrap past February.
-    const harvStart = plantStart + growMonths;
-    const harvLen = plantLen; // window is as wide as the planting window
-    const pct = (months: number) => (months / MONTHS_PER_YEAR) * 100;
+    let bands = `<div class="band plant" style="left:${pct(plantStart)}%;width:${pct(plantLen)}%"></div>`;
+    if (cfg.perennial) {
+      // Perennials are cut on SEPARATE monthly windows — draw one detached
+      // 1-month harvest bar per cutting so it reads as 3 distinct cuttings,
+      // not one continuous 3-month harvest (maintainer request).
+      // Inset each cutting bar within its month so consecutive cuttings
+      // (May/Jun/Jul) show a clear GAP between them, not one long band.
+      for (const mo of cfg.harvestMonths ?? []) {
+        bands += `<div class="band harv cut" style="left:${pct(disp(mo) + 0.12)}%;width:${pct(0.76)}%"></div>`;
+      }
+    } else {
+      // Annual: harvest opens a grow-time after planting, as wide as the window.
+      const harvStart = plantStart + cfg.growMonths;
+      bands += `<div class="band harv" style="left:${pct(harvStart)}%;width:${pct(plantLen)}%"></div>`;
+    }
     html += `<div class="crop">${cfg.emoji} ${cfg.name}</div>
-      <div class="lane">
-        <div class="band plant" style="left:${pct(plantStart)}%;width:${pct(plantLen)}%"></div>
-        <div class="band harv" style="left:${pct(harvStart)}%;width:${pct(harvLen)}%"></div>
-      </div>`;
+      <div class="lane">${bands}</div>`;
   }
   grid.innerHTML = html;
 
@@ -2213,7 +2246,7 @@ function fieldMsg(text: string) {
 }
 
 /** Queue a task from a panel button, with shared feedback plumbing. */
-function queueFromPanel(field: Field, type: "plow" | "plant" | "harvest" | "weed" | "fertilize" | "rake" | "bale", crop?: CropId): void {
+function queueFromPanel(field: Field, type: "plow" | "plant" | "harvest" | "mow" | "weed" | "fertilize" | "rake" | "bale", crop?: CropId): void {
   try {
     const task = enqueueTask(save, field, type, clock.time(), crop);
     updateHud();
@@ -2247,12 +2280,18 @@ function refreshPlanEditor(field: Field, now: number, auto: boolean): void {
   if (!auto) return;
 
   if (!field.plans || field.plans.length === 0) field.plans = [defaultPlan()];
+  // A perennial stand (grass/alfalfa) is planted once and never rotated — its
+  // "plan" is a single row (no per-year rotation). Collapse to plans[0].
+  const perennialField = isPerennial(field.plans[0]!.crop);
+  if (perennialField && field.plans.length > 1) field.plans.length = 1;
   const plans = field.plans;
   const activeIdx = (dateOf(now).year - 1) % plans.length;
 
   container.insertAdjacentHTML(
     "beforeend",
-    `<div class="plan-hint">Rotation — one plan per year, loops after Yr ${plans.length}. Running Yr ${activeIdx + 1} now.</div>`,
+    perennialField
+      ? `<div class="plan-hint">Perennial stand — one plan, cut every year (no rotation).</div>`
+      : `<div class="plan-hint">Rotation — one plan per year, loops after Yr ${plans.length}. Running Yr ${activeIdx + 1} now.</div>`,
   );
 
   const ops: Array<{ prop: "weed" | "fertilize" | "bale"; icon: string; title: string }> = [
@@ -2282,11 +2321,20 @@ function refreshPlanEditor(field: Field, now: number, auto: boolean): void {
     sel.addEventListener("change", () => {
       plan.crop = sel.value as CropId;
       if (!gameConfig.crops[plan.crop].producesForage) plan.bale = false; // baling is forage-only
+      // Switching TO a perennial collapses any rotation to this single plan;
+      // perennials also default to baling (hay) and never weed.
+      if (isPerennial(plan.crop)) {
+        field.plans = [plan];
+        plan.weed = false;
+        plan.bale = true;
+      }
       editPlans();
     });
     row.appendChild(sel);
 
     for (const o of ops) {
+      // Perennials only expose Fertilize & Bale (no weeding) — hide the weed op.
+      if (o.prop === "weed" && isPerennial(plan.crop)) continue;
       const b = document.createElement("button");
       const forageOnly = o.prop === "bale" && !gameConfig.crops[plan.crop].producesForage;
       b.className = "plan-op" + (plan[o.prop] ? " on" : "");
@@ -2314,19 +2362,22 @@ function refreshPlanEditor(field: Field, now: number, auto: boolean): void {
     container.appendChild(row);
   });
 
-  const add = document.createElement("button");
-  add.className = "plan-add";
-  add.textContent = "＋ Add rotation year";
-  add.disabled = plans.length >= 5;
-  add.addEventListener("click", () => {
-    if (plans.length >= 5) return;
-    // Default the new year to a DIFFERENT crop for an easy rotation.
-    const crops = Object.keys(gameConfig.crops) as CropId[];
-    const nextCrop = crops.find((c) => c !== plans[plans.length - 1]!.crop) ?? crops[0]!;
-    plans.push({ crop: nextCrop, bale: !!gameConfig.crops[nextCrop].producesForage });
-    editPlans();
-  });
-  container.appendChild(add);
+  // Perennial stands don't rotate — no "add year" button (maintainer request).
+  if (!perennialField) {
+    const add = document.createElement("button");
+    add.className = "plan-add";
+    add.textContent = "＋ Add rotation year";
+    add.disabled = plans.length >= 5;
+    add.addEventListener("click", () => {
+      if (plans.length >= 5) return;
+      // Default the new year to a DIFFERENT, non-perennial crop for an easy rotation.
+      const crops = (Object.keys(gameConfig.crops) as CropId[]).filter((c) => !gameConfig.crops[c].perennial);
+      const nextCrop = crops.find((c) => c !== plans[plans.length - 1]!.crop) ?? crops[0]!;
+      plans.push({ crop: nextCrop, bale: !!gameConfig.crops[nextCrop].producesForage });
+      editPlans();
+    });
+    container.appendChild(add);
+  }
 }
 
 /** Rebuild the panel contents from the selected field's current state. */
@@ -2354,7 +2405,7 @@ function refreshFieldPanel(force = false) {
     dateOf(now).month, // planting windows open/close on month boundaries
     Math.round(save.money), // affordability of input costs
     field.forageReady ? 1 : 0, field.windrowed ? 1 : 0, field.baleLocations?.length ?? 0, // forage/bale state
-    field.weedy ? 1 : 0,
+    field.weedy ? 1 : 0, field.baleProduct ?? "", field.cutsThisYear ?? 0, field.cutYear ?? 0, // perennial/bale
     accessEditFieldId === field.id ? "gates" : "",
   ].join("|");
   // The rotation planner has its OWN change-detection (below) so its dropdowns
@@ -2394,9 +2445,10 @@ function refreshFieldPanel(force = false) {
   // --- Bales sitting in the field (persist until sold) — the field's market ---
   const bales = field.baleLocations?.length ?? 0;
   if (bales > 0) {
-    const value = Math.round(bales * gameConfig.forage.balePricePerBale);
+    const product = gameConfig.baleProducts[field.baleProduct ?? "cornStover"];
+    const value = Math.round(bales * product.pricePerBale);
     const tons = (bales * gameConfig.forage.baleTons).toFixed(0);
-    body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">📦 <b>${bales}</b> bales (${tons} t) · $${gameConfig.forage.balePricePerBale.toLocaleString()}/bale</div>`);
+    body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">📦 <b>${bales}</b> ${product.name} bales (${tons} t) · $${product.pricePerBale.toLocaleString()}/bale</div>`);
     const btn = document.createElement("button");
     btn.className = "primary";
     btn.innerHTML = `💰 Sell Bales <span class="small">$${value.toLocaleString()}</span>`;
@@ -2443,11 +2495,13 @@ function refreshFieldPanel(force = false) {
       }
       if (row.children.length > 0) body.appendChild(row);
     } else {
-      body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">Forage left on the field. Buy a 🧹 rake &amp; 📦 baler to bale it, or plow it under.</div>`);
+      const under = isPerennial(field.crop) ? "; without the gear it's left to regrow" : ", or plow it under";
+      body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">Forage left on the field. Buy a 🧹 rake &amp; 📦 baler to bale it${under}.</div>`);
     }
   }
 
-  const plowable = canPlow(eff) && !(eff === "harvested" && forageDue(save, field));
+  // Perennial stands are never plowed — the plow option is hidden for them.
+  const plowable = !isPerennial(field.crop) && canPlow(eff) && !(eff === "harvested" && forageDue(save, field));
   if (!auto && plowable) {
     // --- Plow first (§10 lifecycle: stubble → tilled → planted) ---
     const cost = taskCost(field, "plow");
@@ -2459,12 +2513,18 @@ function refreshFieldPanel(force = false) {
     actions.appendChild(btn);
   }
 
-  if (!auto && eff === "tilled") {
-    // --- Plant chooser (queues a task for the tractor) ---
+  // Plant chooser: annuals need tilled ground; perennials (grass/alfalfa) seed
+  // directly on bare ground (stubble/tilled/mulched) — no plow needed.
+  const canPlantAnnual = eff === "tilled";
+  const canSeedPeren = canSeedPerennial(eff) && !field.crop;
+  if (!auto && (canPlantAnnual || canSeedPeren)) {
+    const plantable = (Object.keys(gameConfig.crops) as CropId[]).filter((c) =>
+      gameConfig.crops[c].perennial ? canSeedPeren : canPlantAnnual,
+    );
     body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">Plant a crop:</div>`);
     const row = document.createElement("div");
     row.className = "cropbtns";
-    for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
+    for (const cropId of plantable) {
       const cfg = gameConfig.crops[cropId];
       const cost = taskCost(field, "plant", cropId);
       const btn = document.createElement("button");
@@ -2479,7 +2539,7 @@ function refreshFieldPanel(force = false) {
       row.appendChild(btn);
     }
     body.appendChild(row);
-    const windows = (Object.keys(gameConfig.crops) as CropId[])
+    const windows = plantable
       .map((c) => `${gameConfig.crops[c].emoji} ${gameConfig.crops[c].plantMonths.map((mo) => MONTH_SHORT[mo]).join("–")}`)
       .join("   ");
     body.insertAdjacentHTML("beforeend", `<div class="small">${windows}</div>`);
@@ -2495,17 +2555,26 @@ function refreshFieldPanel(force = false) {
     if (field.weedy) {
       html += `<div class="small" style="color:var(--red)">🌿 Weeds are spreading — a weeding pass clears them</div>`;
     }
-    if (!harvestingNow) {
-      html += `<div class="small">Growth</div>
-        <div class="progress"><div class="fill" style="width:${(progress * 100).toFixed(0)}%"></div></div>`;
-    }
-    if (range) {
-      const uMax = cfg.baseYieldTonsPerAcre * (1 + cfg.yieldUncertainty) * 1.05;
-      const l = (range.low / uMax) * 100;
-      const w = ((range.high - range.low) / uMax) * 100;
-      html += `<div class="small">Est. yield (narrows over the season)</div>
-        <div class="rangebar"><div class="band" style="left:${l}%;width:${Math.max(2, w)}%"></div></div>
-        <div class="small">${(range.low * acres).toFixed(0)}–${(range.high * acres).toFixed(0)} t total</div>`;
+    if (isPerennial(field.crop)) {
+      // Perennial: no grain yield / single-ripen growth — show the 3-cut
+      // window progress (X of 3 cuttings this year) instead.
+      const windows = cfg.harvestMonths ?? [];
+      const done = field.cutYear === dateOf(now).year ? field.cutsThisYear ?? 0 : 0;
+      const monthLabels = windows.map((m) => MONTH_SHORT[m]).join(" · ");
+      html += `<div class="small">Perennial stand — cut ${done}/${windows.length} times this year (${monthLabels})</div>`;
+    } else {
+      if (!harvestingNow) {
+        html += `<div class="small">Growth</div>
+          <div class="progress"><div class="fill" style="width:${(progress * 100).toFixed(0)}%"></div></div>`;
+      }
+      if (range) {
+        const uMax = cfg.baseYieldTonsPerAcre * (1 + cfg.yieldUncertainty) * 1.05;
+        const l = (range.low / uMax) * 100;
+        const w = ((range.high - range.low) / uMax) * 100;
+        html += `<div class="small">Est. yield (narrows over the season)</div>
+          <div class="rangebar"><div class="band" style="left:${l}%;width:${Math.max(2, w)}%"></div></div>
+          <div class="small">${(range.low * acres).toFixed(0)}–${(range.high * acres).toFixed(0)} t total</div>`;
+      }
     }
     body.insertAdjacentHTML("beforeend", html);
 
@@ -2514,7 +2583,8 @@ function refreshFieldPanel(force = false) {
     if (!auto && hasStandingCrop(field.status)) {
       const row = document.createElement("div");
       row.className = "cropbtns";
-      if (tasksFor(save, field.id, "weed").length === 0) {
+      // Perennial forage crops don't get weeded — only fertilized.
+      if (!isPerennial(field.crop) && tasksFor(save, field.id, "weed").length === 0) {
         const cost = taskCost(field, "weed");
         const open = inWeedingWindow(field, now);
         const btn = document.createElement("button");
@@ -2543,12 +2613,25 @@ function refreshFieldPanel(force = false) {
       if (row.children.length > 0) body.appendChild(row);
     }
 
-    if (!auto && field.status === "ready" && tasksFor(save, field.id, "harvest").length === 0) {
-      const btn = document.createElement("button");
-      btn.className = "primary";
-      btn.textContent = "🌾 Queue Harvest";
-      btn.addEventListener("click", () => queueFromPanel(field, "harvest"));
-      actions.appendChild(btn);
+    if (!auto && field.status === "ready") {
+      // Perennial forage is CUT with a mower (→ rake → bale); annuals are
+      // combined. Whichever applies, offer the one button.
+      if (isPerennial(field.crop)) {
+        if (tasksFor(save, field.id, "mow").length === 0) {
+          const cost = taskCost(field, "mow");
+          const btn = document.createElement("button");
+          btn.className = "primary";
+          btn.innerHTML = `🌾 Queue Cut (Mow) <span class="small">$${cost.toLocaleString()}</span>`;
+          btn.addEventListener("click", () => queueFromPanel(field, "mow"));
+          actions.appendChild(btn);
+        }
+      } else if (tasksFor(save, field.id, "harvest").length === 0) {
+        const btn = document.createElement("button");
+        btn.className = "primary";
+        btn.textContent = "🌾 Queue Harvest";
+        btn.addEventListener("click", () => queueFromPanel(field, "harvest"));
+        actions.appendChild(btn);
+      }
     }
   }
 

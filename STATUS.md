@@ -68,6 +68,41 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, perennial forage: Grass & Alfalfa)
+
+Two new PERENNIAL crops — planted once, cut 3× a year, never plowed/replanted.
+
+- **Config**: `grass` & `alfalfa` crops (`perennial`, `harvestMonths` [May/
+  Jun/Jul], `fertilizeMonth` [Apr], `producesGrain:false`). New `baleProducts`
+  map (cornStover/hay/alfalfaHay/forage → price + balesPerAcre + color); corn
+  mirrors the legacy forage numbers so it's unchanged. New `mower` implement
+  (Small 10ft / Medium 20ft) + `mowCostPerAcre`. Looked-up yields/prices:
+  grass hay 1.5 bales/ac/cut @ $65, alfalfa 1.6 @ $130.
+- **Lifecycle** (`farming.ts`): `derivePerennialStatus` on FIXED monthly
+  windows — READY while an opened cutting window is un-cut (`cutsThisYear`/
+  `cutYear`, reset each year in tickFarming), `harvested` while awaiting rake/
+  bale, else `growing` (regrowth/dormant/establishing). `applyMowDone` (cut +
+  tally, keeps the stand), `applyBaleDone` branches perennial→regrow-growing
+  vs corn→mulched and stamps `field.baleProduct`. Perennials seed on bare
+  ground (`canSeedPerennial`), fertilize only in April, never weed.
+- **Tasks**: new `mow` task = tractor + Mower (no combine/grain), then the
+  existing rake→bale loop makes Hay. Perennial auto-manage: establish once →
+  fertilize Apr → mow/rake/bale each window; plow refused; rotation planner
+  shows Grass/Alfalfa as a single-plan crop (Fertilize+Bale toggles, no weed,
+  no "add rotation year").
+- **Textures**: green tall-grass / blooming-alfalfa (purple flecks) ready
+  looks; hay-tinted windrows on the rake; bale marker tint by product (hay =
+  light brown, alfalfa = dark green — same icon shape). Bale sale price/marker
+  + Finance cashflow now per-product.
+- **Crop calendar**: perennials draw a March plant bar + THREE separate,
+  inset+outlined harvest bars (May/Jun/Jul) so it reads as 3 distinct cuttings.
+- **Tests**: `tests/perennial.test.ts` (7) — seeding without plow, no-plow
+  refusal, monthly ready windows, full cut→rake→bale=hay cycle, 3-cuts-then-
+  next-year-no-replant, alfalfa-vs-grass product pricing, auto-manage
+  establish-once. 181/181 total, typecheck clean.
+- **UX needs eyes** (no Browser Preview): ready textures for both crops, the
+  3-bar calendar layout, bale colors, and the mow→rake→bale flow end to end.
+
 ## Latest changes (2026-07-13, queue polish + weed/fertilize windows)
 
 - **Reset button removed** (top-left 🔄) — the Settings tab's per-farm Delete

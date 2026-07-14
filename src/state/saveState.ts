@@ -16,7 +16,7 @@
 import type { Meters } from "../geo/coords";
 import type { SimTime } from "../sim/clock";
 import { gameConfig } from "../config/gameConfig";
-import type { CropId, EquipmentSize } from "../config/gameConfig";
+import type { CropId, EquipmentSize, BaleProduct } from "../config/gameConfig";
 
 /** Field lifecycle (brief §10). */
 export type FieldStatus =
@@ -106,6 +106,17 @@ export interface Field {
    * (exactly where dropped, across save/reload) until the player sells them.
    * Count = `baleLocations.length`. */
   baleLocations?: Meters[];
+  /** What the field's dropped bales ARE (2026-07-13) — drives sale price + the
+   * marker tint. Set when a bale run completes (corn→cornStover, grass→hay,
+   * alfalfa→alfalfaHay). Undefined = corn-stover default (legacy saves). */
+  baleProduct?: BaleProduct;
+  /** Perennial forage crops only (grass/alfalfa): how many of this year's
+   * cuttings have been mowed, and which campaign year that count belongs to
+   * (reset to 0 when the year turns). Drives the fixed-monthly-window "ready"
+   * derivation — the field is mowable while an opened cutting window is still
+   * un-cut. */
+  cutsThisYear?: number;
+  cutYear?: number;
 }
 
 /** On-farm grain bin, tons per crop. Unlimited in this slice; storage limits and
@@ -167,7 +178,7 @@ export interface Agent {
  * tractor is a power unit; an implement gives it a job it can do. */
 export interface Implement {
   id: string;
-  kind: "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer";
+  kind: "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower";
   size: EquipmentSize;
   /** Id of the tractor this is hitched to, or undefined if parked in the yard. */
   attachedTo?: string;
@@ -185,7 +196,7 @@ export interface Implement {
  * gated by plow/plant/harvest, they just need a standing crop in the field.
  * `unloadHarvester` is system-generated (never player-queued) — a tractor+
  * Grain Trailer hauling a full combine's hopper to a silo. */
-export type TaskType = "plow" | "plant" | "harvest" | "weed" | "fertilize" | "rake" | "bale" | "unloadHarvester";
+export type TaskType = "plow" | "plant" | "harvest" | "mow" | "weed" | "fertilize" | "rake" | "bale" | "unloadHarvester";
 
 export interface FarmTask {
   id: string;
@@ -289,7 +300,7 @@ export function newGame(): SaveState {
     money: gameConfig.startingMoney,
     parcels: [],
     fields: [],
-    grain: { corn: 0, soybeans: 0 },
+    grain: { corn: 0, soybeans: 0, grass: 0, alfalfa: 0 },
     buildings: [],
     agents: [],
     implements: [],

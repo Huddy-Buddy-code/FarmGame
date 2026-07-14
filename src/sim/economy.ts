@@ -44,10 +44,12 @@ export function sellGrain(save: SaveState, crop: CropId, tons: number): SaleResu
 export function sellBales(save: SaveState, field: Field): { bales: number; revenue: number } {
   const bales = field.baleLocations?.length ?? 0;
   if (bales <= 0) return { bales: 0, revenue: 0 };
-  const revenue = Math.round(bales * gameConfig.forage.balePricePerBale);
+  const product = gameConfig.baleProducts[field.baleProduct ?? "cornStover"];
+  const revenue = Math.round(bales * product.pricePerBale);
   field.baleLocations = [];
   save.money += revenue;
-  recordCash(save, "cropRevenue", "Bales", revenue);
+  // Book by product so the Finance cashflow breakdown separates hay/alfalfa/stover.
+  recordCash(save, "cropRevenue", `${product.name} bales`, revenue);
   return { bales, revenue };
 }
 
