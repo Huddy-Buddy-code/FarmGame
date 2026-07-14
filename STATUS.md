@@ -68,6 +68,32 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, Work Queue "Completed" section + baler fill-bar sync fix)
+
+- **Baler fill-bar desync fix**: the Work Queue's dirty-check key (`refreshQueuePanel`)
+  only bucketed `doneAcres` progress at 1% — implement `cargoTons` (the baler/
+  harvester/trailer hopper) wasn't in the key at all, so at high sim speed the
+  hopper could fill → tie → eject → reset several times between redraws and the
+  fill bar read stale. Now keyed on a finer `cargoTons` bucket (0.02t) per active
+  task too, so it redraws every meaningful hopper change independent of acreage.
+- **New "Completed" section on the Work Queue panel**: shows this calendar
+  month's finished jobs (plow/plant/harvest/mow/rake/bale/weed/fertilize) below
+  Active/Queued, as small dashed-border rows — verb + field, then a stats line
+  (acres, $ spent, tons, bales). Backed by a new bounded `save.completedTasks`
+  log (`CompletedTask[]`, `state/saveState.ts`), since a `FarmTask` is discarded
+  the instant it finishes and nothing previously recorded what a job produced.
+  `recordCompletion()` (`sim/tasks.ts`) snapshots id/type/field/crop/acres/
+  costPaid/tons/bales at both real completion sites (bale's hopper-discard path,
+  and the shared plow/plant/harvest/mow/rake/weed/fertilize finish path — tons
+  captured for harvest/bale specifically); capped at 200 entries. The panel
+  filters to the current `dateOf(now)` year+month; migration `save.completedTasks
+  ??= []` for old saves.
+- 2 new tests (`tests/completedTasks.test.ts`): plow logs acres+cost with no
+  tons; bale logs tons/bales matching `bales × baleTons`. 185/185 passing,
+  typecheck clean.
+- **UX needs eyes** (no Browser Preview): the new Completed rows' layout/
+  wording, and that the baler bar now visibly tracks live at 60x.
+
 ## Latest changes (2026-07-14, baler hopper rework + perennial winter dormancy)
 
 - **Baler now works like the combine**: it gathers forage TONS into a hopper

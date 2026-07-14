@@ -228,6 +228,26 @@ export interface FarmTask {
   costPaid: number;
 }
 
+/** A snapshot of a finished field-work task, kept for the Work Queue's
+ * "Completed" section (maintainer request, 2026-07-14) — the live `FarmTask`
+ * is discarded the instant its work is done, so anything worth showing after
+ * the fact (cost, tons, bales) has to be captured into its own record right
+ * at completion. Bounded and pruned by `dateOf(now)` month in the UI, not
+ * stored per-task-type — a flat log is enough for "what happened this month". */
+export interface CompletedTask {
+  id: string;
+  type: TaskType;
+  fieldId: string;
+  crop?: CropId;
+  acres: number;
+  costPaid: number;
+  /** Grain harvested (harvest) or forage gathered (bale), in tons. */
+  tons?: number;
+  /** Bales produced (bale task only). */
+  bales?: number;
+  completedAt: SimTime;
+}
+
 /** A locked-in, amortizing loan (brief §8, "loan interest, the difficulty
  * dial"). Loans are grouped by campaign YEAR borrowed in (maintainer design,
  * 2026-07-11) — see `sim/finance.ts` for the full model. Fixed rate + a fixed
@@ -291,6 +311,9 @@ export interface SaveState {
   contracts: unknown[]; // shape defined when the contract slice lands (brief §6)
   /** Lite to-do list for player notes. */
   todos?: TodoItem[];
+  /** Finished field-work tasks, newest last — feeds the Work Queue's
+   * "Completed" section. Pruned to a bounded length in `sim/tasks.ts`. */
+  completedTasks?: CompletedTask[];
 }
 
 export function newGame(): SaveState {
@@ -307,5 +330,6 @@ export function newGame(): SaveState {
     tasks: [],
     finance: { openYear: 1, pendingPrincipal: 0, loans: [] }, // campaign always starts in Year 1
     contracts: [],
+    completedTasks: [],
   };
 }

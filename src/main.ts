@@ -74,7 +74,7 @@ import {
 import {
   CASHFLOW_CATEGORIES, CASHFLOW_LABEL, categoryTotal, netCashflow, ledgerYears,
 } from "./sim/ledger";
-import type { FarmTask, Agent, Implement, FieldStatus, TaskType } from "./state/saveState";
+import type { FarmTask, Agent, Implement, FieldStatus, TaskType, CompletedTask } from "./state/saveState";
 import { gameConfig } from "./config/gameConfig";
 import type { CropId, EquipmentSize } from "./config/gameConfig";
 
@@ -106,6 +106,7 @@ if (loaded) {
   // never bank grain anyway, but the record must have every crop key).
   save.grain.grass ??= 0;
   save.grain.alfalfa ??= 0;
+  save.completedTasks ??= [];
   initBuildingIdCounters(save);
   // Pre-finance saves: start the open borrowing year at whatever campaign
   // year the save was loaded at (tickLoans self-corrects instantly either
@@ -882,20 +883,39 @@ function buildQueueRow(task: FarmTask): HTMLElement {
 }
 
 /** Rebuild the right-hand queue panel: Jobs only, split into a locked Active
- * section (machines already committed) and a drag-reorderable Queued section
- * (queue order = pickup priority). */
+ * section (machines already committed), a drag-reorderable Queued section
+ * (queue order = pickup priority), and a read-only Completed section (this
+ * calendar month's finished jobs — maintainer request, 2026-07-14). */
 let lastQueueKey = " init";
 function refreshQueuePanel(): void {
+  const nowDate = dateOf(clock.time());
+  // Newest first; scoped to the current calendar month (the log itself is
+  // bounded/pruned in tasks.ts, this just narrows what's shown).
+  const completed = (save.completedTasks ?? [])
+    .filter((ct) => {
+      const d = dateOf(ct.completedAt);
+      return d.year === nowDate.year && d.month === nowDate.month;
+    })
+    .slice()
+    .reverse();
+
   // Skip DOM churn when nothing visible changed (1% progress buckets animate).
+  // Hopper-style fills (baler/harvester/grain trailer) cycle much faster than
+  // a 1% acreage bucket — especially at high sim speed — so their cargoTons
+  // must be its own, finer-grained bucket or the fill bar reads stale/desynced.
   const key = save.tasks
-    .map((t) => `${t.id}:${t.status}:${t.agentId ?? ""}:${Math.round((t.doneAcres / t.totalAcres) * 100)}:${t.unloadPhase ?? ""}:${t.waitingForSilo ?? ""}`)
-    .join("|");
+    .map((t) => {
+      const impl = t.agentId ? save.implements.find((i) => i.attachedTo === t.agentId) : undefined;
+      const cargoBucket = impl?.cargoTons !== undefined ? Math.round(impl.cargoTons * 50) : "";
+      return `${t.id}:${t.status}:${t.agentId ?? ""}:${Math.round((t.doneAcres / t.totalAcres) * 100)}:${t.unloadPhase ?? ""}:${t.waitingForSilo ?? ""}:${cargoBucket}`;
+    })
+    .join("|") + `#${completed.length}:${nowDate.year}:${nowDate.month}`;
   if (key === lastQueueKey) return;
   lastQueueKey = key;
 
   const rows = $("queue-rows");
   rows.innerHTML = "";
-  if (save.tasks.length === 0) {
+  if (save.tasks.length === 0 && completed.length === 0) {
     rows.innerHTML = `<div class="queue-empty">No jobs queued — plow, plant, or harvest a field.</div>`;
     return;
   }
@@ -933,6 +953,38 @@ function refreshQueuePanel(): void {
     });
     rows.appendChild(tail);
   }
+  if (completed.length > 0) {
+    rows.appendChild(sectionDivider(`Completed — ${MONTH_SHORT[nowDate.month]}`));
+    for (const ct of completed) rows.appendChild(buildCompletedRow(ct));
+  }
+}
+
+const TASK_PAST_VERB: Record<TaskType, string> = {
+  plow: "Plowed", plant: "Planted", harvest: "Harvested", mow: "Mowed",
+  weed: "Weeded", fertilize: "Fertilized", rake: "Raked", bale: "Baled",
+  unloadHarvester: "Hauled",
+};
+
+/** One compact, non-interactive row per finished job — sized like a queued
+ * row but with no icon/progress bar, just what it produced. */
+function buildCompletedRow(ct: CompletedTask): HTMLElement {
+  const verb = TASK_PAST_VERB[ct.type] ?? cap(ct.type);
+  const name = ct.type === "plant" && ct.crop ? `${verb} ${gameConfig.crops[ct.crop].name}` : verb;
+
+  const stats: string[] = [`${ct.acres.toFixed(0)} ac`];
+  if (ct.costPaid > 0) stats.push(`$${Math.round(ct.costPaid).toLocaleString()} spent`);
+  if (ct.bales !== undefined) stats.push(`${ct.bales} bale${ct.bales === 1 ? "" : "s"}`);
+  if (ct.tons !== undefined) stats.push(`${ct.tons.toFixed(1)} t`);
+
+  const row = document.createElement("div");
+  row.className = "queue-row completed";
+  row.innerHTML = `
+    <span class="icon">✅</span>
+    <span class="qr-info">
+      <div class="qr-name">${name} · ${prettyId(ct.fieldId)}</div>
+      <div class="qr-sub">${stats.join(" · ")}</div>
+    </span>`;
+  return row;
 }
 
 function cap(s: string): string {
