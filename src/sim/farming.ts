@@ -49,20 +49,28 @@ export function hasStandingCrop(status: FieldStatus): boolean {
   return status === "planted" || status === "growing";
 }
 
-/** Weeding opens after May (brief request: June onward). Status-independent —
- * combine with `hasStandingCrop` for the full check. */
-export function inWeedingWindow(t: SimTime): boolean {
-  return dateOf(t).month > 4; // May = index 4; "after May" = June (5) or later
-}
-
-/** Fertilizing opens the month after planting (or later). False if the field
- * was never planted. */
-export function canFertilizeNow(field: Field, now: SimTime): boolean {
-  if (field.plantedAt === undefined) return false;
+/** Whole months elapsed since `field` was planted, or null if it never was. */
+function monthsSincePlanting(field: Field, now: SimTime): number | null {
+  if (field.plantedAt === undefined) return null;
   const planted = dateOf(field.plantedAt);
   const cur = dateOf(now);
-  const monthsSincePlanted = (cur.year - planted.year) * MONTHS_PER_YEAR + (cur.month - planted.month);
-  return monthsSincePlanted >= 1;
+  return (cur.year - planted.year) * MONTHS_PER_YEAR + (cur.month - planted.month);
+}
+
+/** Weeding opens once the crop is actually GROWING (not just planted), two
+ * months after planting (maintainer request, 2026-07-13 — previously a fixed
+ * June-onward calendar window). */
+export function inWeedingWindow(field: Field, now: SimTime): boolean {
+  const m = monthsSincePlanting(field, now);
+  return field.status === "growing" && m !== null && m >= 2;
+}
+
+/** Fertilizing opens once the crop is actually GROWING (not just planted),
+ * the month after planting (maintainer request, 2026-07-13 — previously
+ * allowed as soon as it was planted, before emergence). */
+export function canFertilizeNow(field: Field, now: SimTime): boolean {
+  const m = monthsSincePlanting(field, now);
+  return field.status === "growing" && m !== null && m >= 1;
 }
 
 /**
@@ -188,9 +196,10 @@ export function tickFarming(save: SaveState, now: SimTime): TickResult {
     const before = field.status;
     field.status = deriveStatus(field, now);
     let dirty = field.status !== before;
-    // Weed flush: once the weeding window opens on a standing, not-yet-sprayed
-    // crop, weeds show up (and stay until a weeding pass clears them).
-    if (!field.weedy && !field.weeded && hasStandingCrop(field.status) && inWeedingWindow(now)) {
+    // Weed flush: once the weeding window opens (growing, 2 months after
+    // planting) on a not-yet-sprayed crop, weeds show up (and stay until a
+    // weeding pass clears them).
+    if (!field.weedy && !field.weeded && inWeedingWindow(field, now)) {
       field.weedy = true;
       dirty = true;
     }

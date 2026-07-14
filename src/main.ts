@@ -35,7 +35,7 @@ import {
 import { distanceAtWork } from "./sim/coverage";
 import type { CoveragePath } from "./sim/coverage";
 import {
-  persistGame, loadGame, clearSavedGame, ensureActiveFarm, listFarms, createFarm,
+  persistGame, loadGame, ensureActiveFarm, listFarms, createFarm,
   switchFarm, deleteFarm, getActiveFarmId, loadGameFor,
 } from "./state/persistence";
 import type { PersistedGame } from "./state/persistence";
@@ -56,7 +56,7 @@ import {
   buyAgent, sellAgent, buyImplement, sellImplement, attachImplement, detachImplement,
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
   reorderTask, estimateTaskHours, forageDue, defaultPlan,
-  harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop, setRoadNetwork,
+  harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
 } from "./sim/tasks";
 import { buildRoadNetwork } from "./sim/roadNet";
 import type { RoadNetwork } from "./sim/roadNet";
@@ -64,6 +64,7 @@ import { defaultAccessPoints } from "./sim/access";
 import {
   MACHINE_ICON, IMPLEMENT_ICON_SVG, tractorIconSvg, combineIconSvg, baleIconSvg,
   plowIconSvg, planterIconSvg, sprayerIconSvg, rakeIconSvg, balerIconSvg, grainTrailerIconSvg,
+  grainHeaderIconSvg,
 } from "./ui/icons";
 import type { EquipmentKind } from "./sim/tasks";
 import {
@@ -653,6 +654,53 @@ function sectionDivider(label: string): HTMLElement {
   return d;
 }
 
+/**
+ * The IMPLEMENT row for an active task's Work Queue box (maintainer request,
+ * 2026-07-13) — a second line under the existing name/sub/progress, still
+ * inside the same bordered box, showing the tool actually doing the work
+ * (as opposed to the tractor/combine icon already shown at the row's left).
+ * Combine/baler/grain-trailer additionally get a small fill bar next to
+ * their icon, since those three fill up with something as the job runs.
+ * Empty string for queued tasks (no agent/implement committed yet) or a
+ * task type with no implement of its own (harvest's "implement" is a fixed
+ * Grain Header — no separate buyable header exists, so it's assumed).
+ */
+function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
+  if (!agent || task.status !== "active") return "";
+
+  let iconSvg: string;
+  let fillPct: number | null = null;
+
+  if (task.type === "harvest") {
+    iconSvg = grainHeaderIconSvg(16);
+    const capT = harvesterCapacityTons(agent.size ?? "medium");
+    fillPct = capT > 0 ? Math.min(100, ((agent.grainOnboard ?? 0) / capT) * 100) : 0;
+  } else if (task.type === "unloadHarvester") {
+    const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "grainTrailer");
+    if (!trailer) return "";
+    iconSvg = grainTrailerIconSvg(16);
+    const capT = grainTrailerCapacityTons(trailer.size);
+    fillPct = capT > 0 ? Math.min(100, ((trailer.cargoTons ?? 0) / capT) * 100) : 0;
+  } else if (task.type === "bale") {
+    iconSvg = balerIconSvg(16);
+    // No persisted "current bale" fraction — bales are spaced evenly by work
+    // distance, so acres-worked-so-far mod one-bale's-worth tracks the real
+    // gather → tie → drop → reset cycle closely without exposing tasks.ts's
+    // internal per-tick runtime maps.
+    const balesSoFar = task.doneAcres * gameConfig.forage.balesPerAcre;
+    fillPct = (balesSoFar % 1) * 100;
+  } else {
+    const kind = TASK_IMPLEMENT[task.type];
+    if (!kind) return "";
+    iconSvg = (IMPLEMENT_ICON_SVG[kind] ?? plowIconSvg)(16);
+  }
+
+  const fillHtml = fillPct !== null
+    ? `<span class="impl-fill"><span class="impl-fill-bar" style="width:${fillPct.toFixed(0)}%"></span></span>`
+    : "";
+  return `<div class="qr-impl"><span class="impl-icon">${iconSvg}</span>${fillHtml}</div>`;
+}
+
 /** One row in the Jobs list. Active jobs are locked in place (an agent is
  * already committed — reordering them would be meaningless/risky) and show
  * the working machine's icon; queued jobs carry no icon, are drag-reorderable,
@@ -672,6 +720,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
       <span class="qr-info">
         <div class="qr-name">🚛 Unload Harvester · ${prettyId(task.fieldId)}</div>
         <div class="qr-sub">${sub}</div>
+        ${implementRowHtml(task, agent)}
       </span>`;
     return row; // system task — not draggable/cancelable, it self-regenerates
   }
@@ -690,6 +739,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
       <div class="qr-name">${cap(taskVerb(task))} · ${prettyId(task.fieldId)}</div>
       <div class="qr-sub">${sub}</div>
       ${isActive ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
+      ${implementRowHtml(task, agent)}
     </span>`;
 
   if (!isActive) {
@@ -1660,12 +1710,14 @@ function iconButton(label: string, title: string, disabled: boolean, onClick: ()
 }
 
 // ---------------------------------------------------------------------------
-// Persistence: auto-save + the Reset button.
+// Persistence: auto-save. (The old top-left Reset button is gone — the
+// Settings tab's per-farm Delete does the same "wipe and start over" job,
+// scoped to a specific farm instead of a blanket single-slot reset.)
 // ---------------------------------------------------------------------------
 let resetting = false;
 
 function doSave() {
-  if (resetting) return; // a reset is wiping the save — don't write it back
+  if (resetting) return; // switching/deleting a farm is wiping this save — don't write it back
   persistGame({ save, clockNow: clock.time(), daysPerMonth: getDaysPerMonth() });
 }
 
@@ -1675,13 +1727,6 @@ function wirePersistence() {
   window.addEventListener("beforeunload", doSave);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") doSave();
-  });
-
-  $("btn-reset").addEventListener("click", () => {
-    if (!confirm("Start a new farm? This wipes the current save.")) return;
-    resetting = true;
-    clearSavedGame();
-    location.reload();
   });
 }
 
@@ -2417,12 +2462,12 @@ function refreshFieldPanel(force = false) {
       row.className = "cropbtns";
       if (tasksFor(save, field.id, "weed").length === 0) {
         const cost = taskCost(field, "weed");
-        const open = inWeedingWindow(now);
+        const open = inWeedingWindow(field, now);
         const btn = document.createElement("button");
         btn.innerHTML = `💦 Weed<br><span class="small">$${cost.toLocaleString()}</span>`;
         if (!open) {
           btn.disabled = true;
-          btn.title = "Weeding opens in June";
+          btn.title = "Opens once the crop is growing, 2 months after planting";
           btn.style.opacity = "0.45";
         }
         btn.addEventListener("click", () => queueFromPanel(field, "weed"));
@@ -2435,7 +2480,7 @@ function refreshFieldPanel(force = false) {
         btn.innerHTML = `🌿 Fertilize<br><span class="small">$${cost.toLocaleString()}</span>`;
         if (!open) {
           btn.disabled = true;
-          btn.title = "Opens the month after planting";
+          btn.title = "Opens once the crop is growing, the month after planting";
           btn.style.opacity = "0.45";
         }
         btn.addEventListener("click", () => queueFromPanel(field, "fertilize"));

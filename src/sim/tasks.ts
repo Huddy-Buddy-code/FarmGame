@@ -86,8 +86,9 @@ const FIELD_EXPENSE_ITEM: Partial<Record<TaskType, string>> = {
 
 /** Which implement kind a task type needs (undefined = none, e.g. harvest).
  * Weed and fertilize both use a sprayer; rake/bale use their own tools;
- * unloadHarvester needs a Grain Trailer. */
-const TASK_IMPLEMENT: Partial<Record<TaskType, ImplementKind>> = {
+ * unloadHarvester needs a Grain Trailer. Exported for the Work Queue panel's
+ * per-task implement icon (main.ts). */
+export const TASK_IMPLEMENT: Partial<Record<TaskType, ImplementKind>> = {
   plow: "plow", plant: "planter", weed: "sprayer", fertilize: "sprayer",
   rake: "rake", bale: "bailer", unloadHarvester: "grainTrailer",
 };
@@ -447,11 +448,11 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
   }
   if (type === "weed") {
     if (!hasStandingCrop(field.status)) throw new Error(`${field.id} has nothing to weed (status: ${field.status})`);
-    if (!inWeedingWindow(now)) throw new Error(`Weeding opens in June`);
+    if (!inWeedingWindow(field, now)) throw new Error(`Weeding opens once the crop is growing, 2 months after planting`);
   }
   if (type === "fertilize") {
     if (!hasStandingCrop(field.status)) throw new Error(`${field.id} has nothing to fertilize (status: ${field.status})`);
-    if (!canFertilizeNow(field, now)) throw new Error(`Fertilizing opens the month after planting`);
+    if (!canFertilizeNow(field, now)) throw new Error(`Fertilizing opens once the crop is growing, the month after planting`);
   }
   if (type === "rake") {
     if (field.status !== "harvested" || !field.forageReady) {
@@ -580,7 +581,10 @@ function isStartable(task: FarmTask, field: Field): boolean {
   if (task.type === "unloadHarvester") return true;
   if (task.type === "plow") return canPlow(field.status);
   if (task.type === "plant") return field.status === "tilled";
-  if (task.type === "weed" || task.type === "fertilize") return hasStandingCrop(field.status);
+  // Both only ever queue once the crop is already growing (see enqueueTask's
+  // window checks) — require it still be growing when picked up too, rather
+  // than the looser hasStandingCrop (which also allows "planted").
+  if (task.type === "weed" || task.type === "fertilize") return field.status === "growing";
   if (task.type === "rake") return field.status === "harvested" && !!field.forageReady;
   // Baler follows the rake: startable once raking has begun (windrowed) and the
   // field hasn't been baled yet (still "harvested").
@@ -1479,7 +1483,7 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
   const plan = activePlan(field, now);
 
   // Optional side-tasks first — independent of the lifecycle, once per crop.
-  if (plan.weed && !field.autoWeedDone && hasStandingCrop(field.status) && inWeedingWindow(now)) {
+  if (plan.weed && !field.autoWeedDone && inWeedingWindow(field, now)) {
     try {
       enqueueTask(save, field, "weed", now);
       field.autoWeedDone = true;
@@ -1487,7 +1491,7 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       /* no sprayer / cash yet — retry next tick */
     }
   }
-  if (plan.fertilize && !field.autoFertDone && hasStandingCrop(field.status) && canFertilizeNow(field, now)) {
+  if (plan.fertilize && !field.autoFertDone && canFertilizeNow(field, now)) {
     try {
       enqueueTask(save, field, "fertilize", now);
       field.autoFertDone = true;

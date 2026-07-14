@@ -43,6 +43,37 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   if sold now.
 - **95/95 tests passing** (added 5 rotation-planner tests). Typecheck clean.
 
+## Latest changes (2026-07-13, queue polish + weed/fertilize windows)
+
+- **Reset button removed** (top-left 🔄) — the Settings tab's per-farm Delete
+  covers the same "wipe and start over" job, scoped to a farm instead of a
+  blanket single-slot reset. `clearSavedGame()` stays in persistence.ts
+  (still tested) for any future UI that wants it.
+- **Fertilizing** now opens the month after planting AND only once the crop
+  has actually emerged (`field.status === "growing"`, not just "planted") —
+  previously allowed the instant a field was planted. **Weeding** changed
+  from a fixed June-onward calendar window to 2 months after planting, same
+  "growing" gate. Both windows in `sim/farming.ts` (`canFertilizeNow`,
+  `inWeedingWindow`, now `(field, now)` instead of `(t)`), enforced at
+  enqueue, auto-manage, and task-pickup (`isStartable`).
+- **Work Queue implement row**: each ACTIVE task's box now shows a second
+  line — the implement doing the work (plow/planter/sprayer/rake/baler icon,
+  or a new Grain Header icon for harvest — no separate buyable header
+  exists, it's assumed). Combine, Baler, and Grain Wagon (the unload task's
+  trailer) additionally get a small fill bar next to their icon: hopper/
+  cargo tons ÷ capacity for the combine and trailer; for the baler, acres-
+  worked mod one-bale's-worth (bales are spaced evenly by work distance, so
+  this tracks the real gather→tie→drop cycle without exposing tasks.ts's
+  internal per-tick runtime maps). New `grainHeaderIconSvg` in `ui/icons.ts`;
+  `TASK_IMPLEMENT` exported from tasks.ts for the icon lookup.
+- Updated 4 farming.test.ts cases that hard-coded the old calendar-June
+  window / literal "planted" status to derive real growth via `tickFarming`
+  first, matching how the window actually gates now. 174/174 total,
+  typecheck clean.
+- **UX needs eyes** (no Browser Preview): the new implement row + fill bars
+  in the Work Queue panel, and the Reset button's removal (Settings tab is
+  now the only reset path).
+
 ## Latest changes (2026-07-13, multi-farm settings tab)
 
 - **New Settings tab** (⚙️ in the bottom toolbar): create/load/delete

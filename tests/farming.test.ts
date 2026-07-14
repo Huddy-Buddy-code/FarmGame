@@ -504,8 +504,9 @@ describe("auto-manage (idle mode, player-requested)", () => {
   });
 });
 
-describe("weeding & fertilizing (independent side-tasks, brief request 2026-07-11)", () => {
-  it("weeding opens in June and closes once ready; fertilizing opens the month after planting", () => {
+describe("weeding & fertilizing (independent side-tasks, brief request 2026-07-11; " +
+  "relative-to-planting + growing-only windows, maintainer request 2026-07-13)", () => {
+  it("both require the crop to be GROWING (not just planted); fertilizing opens 1mo after planting, weeding 2mo", () => {
     const save = gameWithAgents();
     const field = freshField("planted");
     field.crop = "corn";
@@ -513,17 +514,26 @@ describe("weeding & fertilizing (independent side-tasks, brief request 2026-07-1
     field.trueYieldTonsPerAcre = 5;
     save.fields.push(field);
 
-    // Before June: weeding refused.
-    expect(() => enqueueTask(save, field, "weed", APRIL_1)).toThrow(/June/);
-    const juneStart = APRIL_1 + 2 * minutesPerMonth();
-    const weedTask = enqueueTask(save, field, "weed", juneStart); // accepted
-    cancelTask(save, weedTask.id); // undo so it doesn't collide with the check below
+    // Freshly planted (still literally "planted", not "growing" yet): both refused.
+    expect(() => enqueueTask(save, field, "weed", APRIL_1)).toThrow(/growing/);
+    expect(() => enqueueTask(save, field, "fertilize", APRIL_1)).toThrow(/growing/);
 
-    // Fertilizing: not the same month as planting, but the next one is fine.
-    expect(() => enqueueTask(save, field, "fertilize", APRIL_1)).toThrow(/month after/);
+    // Derive real growth the same way the sim does — corn's growMonths=4, so
+    // 1 month in (progress 0.25) is well past the 0.15 "growing" threshold.
     const mayStart = APRIL_1 + minutesPerMonth();
+    tickFarming(save, mayStart);
+    expect(field.status).toBe("growing");
+
+    // Fertilizing: opens the month after planting, now that it's growing.
     const fertTask = enqueueTask(save, field, "fertilize", mayStart); // accepted
     cancelTask(save, fertTask.id);
+    // Weeding: still too early at 1 month (needs 2), even though it's growing.
+    expect(() => enqueueTask(save, field, "weed", mayStart)).toThrow(/2 months/);
+
+    const juneStart = APRIL_1 + 2 * minutesPerMonth();
+    tickFarming(save, juneStart);
+    const weedTask = enqueueTask(save, field, "weed", juneStart); // accepted
+    cancelTask(save, weedTask.id); // undo so it doesn't collide with the check below
 
     // Once the crop is mature/ready, neither is available any more.
     field.status = "ready";
@@ -540,12 +550,13 @@ describe("weeding & fertilizing (independent side-tasks, brief request 2026-07-1
     field.trueYieldTonsPerAcre = 5;
     save.fields.push(field);
     const juneStart = APRIL_1 + 2 * minutesPerMonth();
+    tickFarming(save, juneStart); // derive real growth — both windows require "growing"
 
     // Both queue at once — neither gates on the other.
     enqueueTask(save, field, "weed", juneStart);
     enqueueTask(save, field, "fertilize", juneStart);
     expect(save.tasks).toHaveLength(2);
-    expect(effectiveStatus(save, field)).toBe("planted"); // neither touches lifecycle status
+    expect(effectiveStatus(save, field)).toBe("growing"); // neither touches lifecycle status
 
     // The one tractor works through both serially (it only owns one sprayer);
     // growth ticks forward normally (it's not a lifecycle-status side effect
@@ -563,6 +574,7 @@ describe("weeding & fertilizing (independent side-tasks, brief request 2026-07-1
     field.trueYieldTonsPerAcre = 5;
     save.fields.push(field);
     const juneStart = APRIL_1 + 2 * minutesPerMonth();
+    tickFarming(save, juneStart); // derive real growth — the window requires "growing"
     enqueueTask(save, field, "weed", juneStart);
     runWorld(save, juneStart, 600, 60);
     expect(save.tasks[0]!.status).toBe("queued");
@@ -579,6 +591,7 @@ describe("weeding & fertilizing (independent side-tasks, brief request 2026-07-1
     save.fields.push(field);
 
     const juneStart = APRIL_1 + 2 * minutesPerMonth();
+    tickFarming(save, juneStart); // derive real growth — the window requires "growing"
     enqueueTask(save, field, "weed", juneStart); // queues, then sits forever (no sprayer)
 
     // Drive well past ready — the stuck weed task must not stop auto-manage

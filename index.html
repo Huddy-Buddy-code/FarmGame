@@ -521,6 +521,21 @@
       .queue-tail.drag-over { border: 1.5px dashed var(--green-dark); border-radius: 8px; }
       #queuepanel .progress { height: 7px; margin: 4px 0 1px; }
 
+      /* Per-task implement row (maintainer request, 2026-07-13): the tool
+         actually doing the work, under the task's name/sub/progress but
+         still inside the same bordered box. Combine/baler/grain-trailer add
+         a small capacity fill bar next to their icon. */
+      .qr-impl { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+      .qr-impl .impl-icon { display: inline-flex; align-items: center; line-height: 1; opacity: 0.9; }
+      .qr-impl .impl-fill {
+        flex: 1; height: 6px; border-radius: 999px; overflow: hidden;
+        background: var(--cream); border: 1px solid var(--wood);
+      }
+      .qr-impl .impl-fill-bar {
+        display: block; height: 100%; width: 0%; background: var(--gold);
+        transition: width 0.3s;
+      }
+
       /* Agent dots on the map (brief §9 "GPS dots", emoji edition). */
       .agent-dot {
         font-size: 20px; line-height: 1; cursor: default;
@@ -610,10 +625,6 @@
         <input id="todo-input" type="text" placeholder="Add a note…" style="flex: 1; padding: 6px; border: 1.5px solid var(--wood); border-radius: 6px; font-size: 12px; background: var(--cream);" />
         <button id="todo-add" style="padding: 6px 10px; font-size: 12px; width: auto;">+</button>
       </div>
-    </div>
-
-    <div id="resetbar" style="position:absolute; top:10px; left:10px; z-index:20;">
-      <button id="btn-reset" class="panel" title="Wipe the save and start a new farm" style="padding:6px 12px;">🔄 Reset</button>
     </div>
 
     <div id="topbar" class="panel">

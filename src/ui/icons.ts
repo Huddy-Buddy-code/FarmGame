@@ -191,6 +191,33 @@ export function grainTrailerIconSvg(size = 22): string {
   `);
 }
 
+/** Grain header (maintainer request, 2026-07-13): the wide cutting platform
+ * a combine mounts out front — divider points at each end, a reel of tines
+ * above the cutting bar, an auger trough feeding the middle. Shown in the
+ * Work Queue as the combine's "implement" (assumed always fitted — no
+ * separate buyable header exists). */
+export function grainHeaderIconSvg(size = 22): string {
+  const reelTines: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    const x = 5 + i * 4.2;
+    reelTines.push(`<line x1="${x}" y1="9.5" x2="${x}" y2="13" stroke="${STEEL_D}" stroke-width="0.8"/>`);
+  }
+  return svg(size, `
+    <path d="M2 20.5 L4.4 15.5 h22.2 L29 20.5 Z" fill="${BODY}" stroke="${BODY_D}" stroke-width="0.9"/>
+    <path d="M4.4 15.5 h22.2 v1.6 H4.4 Z" fill="${BODY_D}" opacity="0.55"/>
+    <path d="M2 20.5 h27 v2.2 H2 Z" fill="${STEEL}" stroke="${STEEL_D}" stroke-width="0.7"/>
+    <path d="M1 20.6 l2.6-1.2 v2.4 Z" fill="${STEEL_D}"/>
+    <path d="M30 20.6 l-2.6-1.2 v2.4 Z" fill="${STEEL_D}"/>
+    <line x1="3" y1="19" x2="28" y2="19" stroke="#8d99a6" stroke-width="0.6" stroke-dasharray="1.4 1.4"/>
+    <line x1="5" y1="11.4" x2="26" y2="11.4" stroke="${STEEL_D}" stroke-width="1.1"/>
+    ${reelTines.join("")}
+    <line x1="21" y1="9.5" x2="21" y2="13" stroke="${STEEL_D}" stroke-width="0.8"/>
+    <line x1="25.8" y1="9.5" x2="25.8" y2="13" stroke="${STEEL_D}" stroke-width="0.8"/>
+    <circle cx="5" cy="11.4" r="1.1" fill="${STEEL}" stroke="${STEEL_D}" stroke-width="0.5"/>
+    <circle cx="26" cy="11.4" r="1.1" fill="${STEEL}" stroke="${STEEL_D}" stroke-width="0.5"/>
+  `);
+}
+
 /** A round hay bale seen end-on: wound tan cylinder. */
 export function baleIconSvg(size = 14): string {
   return svg(size, `
