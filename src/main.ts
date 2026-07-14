@@ -654,20 +654,19 @@ function sectionDivider(label: string): HTMLElement {
   return d;
 }
 
-/** Display name + working-width/capacity line for an implement kind at a
- * size ("Plow - Medium, 10 ft Working Width"; maintainer request,
- * 2026-07-13 — mirrors the equipment-name reorder, "<Kind> - <Size>"). */
+/** Display name + working-width/capacity for an implement kind at a size, as
+ * TWO separate lines (maintainer request, 2026-07-13): "Plow - Medium" then
+ * "10 ft Working Width" — mirrors the equipment-name reorder, "<Kind> - <Size>". */
 const IMPLEMENT_KIND_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake",
   bailer: "Baler", grainTrailer: "Grain Trailer",
 };
-function implementInfoText(kind: ImplementKind, size: EquipmentSize): string {
-  const name = IMPLEMENT_KIND_NAME[kind];
+function implementInfoLines(kind: ImplementKind, size: EquipmentSize): { name: string; detail: string } {
+  const name = `${IMPLEMENT_KIND_NAME[kind]} - ${SIZE_LABEL[size]}`;
   if (kind === "grainTrailer") {
-    return `${name} - ${SIZE_LABEL[size]}, ${grainTrailerCapacityTons(size)} t Capacity`;
+    return { name, detail: `${grainTrailerCapacityTons(size)} t Capacity` };
   }
-  const widthFt = gameConfig.equipment[kind][size].widthFt;
-  return `${name} - ${SIZE_LABEL[size]}, ${widthFt} ft Working Width`;
+  return { name, detail: `${gameConfig.equipment[kind][size].widthFt} ft Working Width` };
 }
 
 const IMPLEMENT_QUEUE_ICON_PX = 30;
@@ -687,13 +686,13 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
   if (!agent || task.status !== "active") return "";
 
   let iconSvg: string;
-  let infoText: string;
+  let info: { name: string; detail: string };
   let fill: { pct: number; current: string; total: string } | null = null;
 
   if (task.type === "harvest") {
     const size = agent.size ?? "medium";
     iconSvg = grainHeaderIconSvg(IMPLEMENT_QUEUE_ICON_PX);
-    infoText = `Grain Header - ${SIZE_LABEL[size]}, ${gameConfig.equipment.harvester[size].widthFt} ft Working Width`;
+    info = { name: `Grain Header - ${SIZE_LABEL[size]}`, detail: `${gameConfig.equipment.harvester[size].widthFt} ft Working Width` };
     const capT = harvesterCapacityTons(size);
     const onboard = agent.grainOnboard ?? 0;
     fill = {
@@ -705,7 +704,7 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "grainTrailer");
     if (!trailer) return "";
     iconSvg = grainTrailerIconSvg(IMPLEMENT_QUEUE_ICON_PX);
-    infoText = implementInfoText("grainTrailer", trailer.size);
+    info = implementInfoLines("grainTrailer", trailer.size);
     const capT = grainTrailerCapacityTons(trailer.size);
     const cargo = trailer.cargoTons ?? 0;
     fill = {
@@ -717,7 +716,7 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     const impl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
     const size = impl?.size ?? "medium";
     iconSvg = balerIconSvg(IMPLEMENT_QUEUE_ICON_PX);
-    infoText = implementInfoText("bailer", size);
+    info = implementInfoLines("bailer", size);
     // No persisted "current bale" fraction — bales are spaced evenly by work
     // distance, so acres-worked-so-far ÷ one-bale's-worth tracks the real
     // gather → tie → drop → reset cycle closely without exposing tasks.ts's
@@ -734,7 +733,7 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     const impl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === kind);
     const size = impl?.size ?? "medium";
     iconSvg = (IMPLEMENT_ICON_SVG[kind] ?? plowIconSvg)(IMPLEMENT_QUEUE_ICON_PX);
-    infoText = implementInfoText(kind, size);
+    info = implementInfoLines(kind, size);
   }
 
   const fillHtml = fill
@@ -749,7 +748,8 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
   return `<div class="qr-impl">
       <span class="impl-icon">${iconSvg}</span>
       <div class="impl-body">
-        <div class="impl-info">${infoText}</div>
+        <div class="impl-name">${info.name}</div>
+        <div class="impl-detail">${info.detail}</div>
         ${fillHtml}
       </div>
     </div>`;
@@ -772,7 +772,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
     row.innerHTML = `
       ${iconHtml}
       <span class="qr-info">
-        <div class="qr-name">🚛 Unload Harvester · ${prettyId(task.fieldId)}</div>
+        <div class="qr-name">Unload Harvester · ${prettyId(task.fieldId)}</div>
         <div class="qr-sub">${sub}</div>
         ${implementRowHtml(task, agent)}
       </span>`;
