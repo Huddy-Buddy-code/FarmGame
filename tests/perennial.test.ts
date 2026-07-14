@@ -8,7 +8,7 @@ import {
 } from "../src/sim/tasks";
 import {
   tickFarming, applyPlant, deriveStatus, isPerennial, canSeedPerennial,
-  balesPerAcreForField,
+  balesPerAcreForField, isPerennialDormant,
 } from "../src/sim/farming";
 import { sellBales } from "../src/sim/economy";
 import { minutesPerMonth } from "../src/sim/calendar";
@@ -169,6 +169,42 @@ describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-0
     const alfalfaSale = sellBales(a, alfalfa);
     expect(alfalfaSale.revenue).toBe(3 * gameConfig.baleProducts.alfalfaHay.pricePerBale);
     expect(gameConfig.baleProducts.alfalfaHay.pricePerBale).toBeGreaterThan(gameConfig.baleProducts.hay.pricePerBale);
+  });
+
+  it("the baler gathers forage into a hopper and clears it when the job is done", () => {
+    const save = forageGame();
+    const field = establish(save, "grass");
+    tickFarming(save, MAY);
+    enqueueTask(save, field, "mow", MAY);
+    let now = runUntil(save, MAY, () => field.status === "harvested" && !!field.forageReady);
+    enqueueTask(save, field, "rake", now);
+    enqueueTask(save, field, "bale", now);
+    const baler = save.implements.find((i) => i.kind === "bailer")!;
+
+    let sawHopperFill = false;
+    while (field.status !== "growing" && now < MAY + 400_000) {
+      now += 2;
+      tickFarming(save, now);
+      tickTasks(save, now, 2, () => 0.5);
+      if ((baler.cargoTons ?? 0) > 0.05) sawHopperFill = true;
+    }
+    expect(sawHopperFill).toBe(true); // the hopper filled with forage as it ran
+    expect(baler.cargoTons ?? 0).toBe(0); // ...and was cleared at the end
+    // Bale count is unchanged (round of acres × density).
+    expect(field.baleLocations!.length).toBe(Math.round(ACRES * gameConfig.baleProducts.hay.balesPerAcre));
+  });
+
+  it("a perennial stand shows dormant (browns off) in winter, green the rest of the year", () => {
+    const save = forageGame();
+    const field = establish(save, "grass");
+    const DEC = 9 * minutesPerMonth(); // month 11
+    const JAN = 10 * minutesPerMonth(); // month 0 (next campaign year)
+    expect(isPerennialDormant(field, MAY)).toBe(false);
+    expect(isPerennialDormant(field, DEC)).toBe(true);
+    expect(isPerennialDormant(field, JAN)).toBe(true);
+    // An annual crop never gets the dormant browning.
+    const corn: Field = { id: "f2", parcelId: "p2", boundary, status: "growing", crop: "corn", plantedAt: 0 };
+    expect(isPerennialDormant(corn, DEC)).toBe(false);
   });
 
   it("auto-manage establishes the stand, then cuts+rakes+bales each window (no plow, no replant)", () => {

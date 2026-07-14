@@ -38,6 +38,9 @@ export interface FieldPaintParams {
    * The fertilizing task's sweep-reveal stamps the darkened texture strip-by-
    * strip; it dries back to normal on the month turn (visual-only). */
   fertilized?: boolean;
+  /** Perennial stand in winter dormancy — override the whole texture with a
+   * light-brown dead/dormant grass look (2026-07-14). */
+  dormant?: boolean;
   seed?: number;
 }
 
@@ -87,6 +90,16 @@ export function drawFieldTexture(
 
     const { base, dark, light } = palette(p);
     ground(ctx, w, h, seed, base, dark, light, areaScale);
+
+    // Dormant winter perennial: a matted light-brown dead-grass sward — no
+    // green, no crop rows, no overlays. Short-circuits the status texture.
+    if (p.dormant) {
+      swardStreaks(ctx, w, h, angle, seed + 5, dark, light, areaScale);
+      canopyMottle(ctx, w, h, seed + 9, dark, light, 0.5, areaScale);
+      ctx.restore();
+      featherEdge(ctx, smoothed, toPixel);
+      return;
+    }
 
     // NOTE on scale: the overlay renders at 0.5 m/px, so "spacing 1.6" ≈ 0.8 m —
     // true corn-row scale. Constants below are px at that resolution.
@@ -201,27 +214,32 @@ export function drawFieldTexture(
     }
 
     ctx.restore();
-
-    // Feather the hard clip edge into transparency. The texture was clipped to a
-    // crisp raster boundary; against the green imagery that reads as a dark line
-    // no overlaid halo can fully hide. Stacked `destination-out` strokes along the
-    // boundary — widest first, each erasing a little — carve a soft inward alpha
-    // ramp: ~transparent at the very edge, full texture a few metres in, so the
-    // field melts into the imagery like a real field margin.
-    ctx.save();
-    ctx.globalCompositeOperation = "destination-out";
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
-    const featherPx = 6; // inward fade width (6 px ≈ 3 m at 0.5 m/px) — a tight, crisp margin
-    const passes = 6;
-    for (let k = 0; k < passes; k++) {
-      ctx.globalAlpha = 0.3;
-      ctx.lineWidth = 2 * featherPx * (1 - k / passes) + 1.5; // wide → narrow
-      tracePolygon(ctx, smoothed, toPixel);
-      ctx.stroke();
-    }
-    ctx.restore();
+    featherEdge(ctx, smoothed, toPixel);
   }
+}
+
+/**
+ * Feather the hard clip edge into transparency. The texture was clipped to a
+ * crisp raster boundary; against the green imagery that reads as a dark line no
+ * overlaid halo can fully hide. Stacked `destination-out` strokes along the
+ * boundary — widest first, each erasing a little — carve a soft inward alpha
+ * ramp: ~transparent at the very edge, full texture a few metres in, so the
+ * field melts into the imagery like a real field margin.
+ */
+function featherEdge(ctx: CanvasRenderingContext2D, smoothed: Meters[], toPixel: (m: Meters) => [number, number]): void {
+  ctx.save();
+  ctx.globalCompositeOperation = "destination-out";
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  const featherPx = 6; // inward fade width (6 px ≈ 3 m at 0.5 m/px) — a tight, crisp margin
+  const passes = 6;
+  for (let k = 0; k < passes; k++) {
+    ctx.globalAlpha = 0.3;
+    ctx.lineWidth = 2 * featherPx * (1 - k / passes) + 1.5; // wide → narrow
+    tracePolygon(ctx, smoothed, toPixel);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 /**
@@ -231,6 +249,9 @@ export function drawFieldTexture(
  * shifts per crop — the outline follows both.
  */
 function palette(p: FieldPaintParams): { base: string; dark: string; light: string } {
+  // Dormant winter perennial: light-brown dead/matted grass, whatever the
+  // underlying lifecycle status happens to be.
+  if (p.dormant) return { base: "#b7a06f", dark: "#9c8757", light: "#c9b78a" };
   switch (p.status) {
     case "stubble":
       return { base: "#b1a179", dark: "#98875f", light: "#c2b28a" };

@@ -68,6 +68,29 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, baler hopper rework + perennial winter dormancy)
+
+- **Baler now works like the combine**: it gathers forage TONS into a hopper
+  on the baler implement (`Implement.cargoTons`, persists across save/reload);
+  when the hopper holds a full bale's worth (`baleTons`) it stops, ties, and
+  ejects a bale at its spot, emptying the hopper, then carries on; any partial
+  load left when the field finishes is discarded (hopper cleared). Replaces the
+  old work-distance bale spacing. Bale COUNT is unchanged — forage is even-
+  divided into `round(acres × balesPerAcre)` whole bales (float-robust, keeps
+  every forage/perennial test exact). The Work Queue baler fill bar now shows
+  the real hopper tons instead of the old proxy. Removed the now-dead
+  `baleDropped`/`baleJitter` runtime maps.
+- **Perennial winter dormancy**: grass/alfalfa stands render light-brown dead/
+  matted grass in winter (Dec–Feb) via a new `dormant` paint param
+  (`isPerennialDormant` in farming.ts) that overrides the whole texture +
+  palette; `repaintGrowthStages` repaints the brown/green flip at the Dec 1 /
+  Mar 1 boundaries (status stays "growing" across those). Extracted the
+  edge-feather into a reusable `featherEdge`.
+- 2 new tests (hopper fills-then-clears, dormancy in/out of winter); 183/183
+  passing, typecheck clean.
+- **UX needs eyes** (no Browser Preview): the hopper fill bar counting up and
+  resetting per bale, and the brown winter perennial fields.
+
 ## Latest changes (2026-07-14, perennial forage: Grass & Alfalfa)
 
 Two new PERENNIAL crops — planted once, cut 3× a year, never plowed/replanted.

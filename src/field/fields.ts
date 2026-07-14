@@ -21,7 +21,7 @@ import { gameConfig } from "../config/gameConfig";
 import type { SaveState, Field } from "../state/saveState";
 import type { OverlayEngine } from "../map/overlay";
 import { paintField, fieldEdgeColor } from "./fieldRender";
-import { growthProgress } from "../sim/farming";
+import { growthProgress, isPerennialDormant } from "../sim/farming";
 import { releaseFieldTasks } from "../sim/tasks";
 import { recordCash } from "../sim/ledger";
 import type { SimTime } from "../sim/clock";
@@ -126,6 +126,7 @@ export function renderField(map: MlMap, overlay: OverlayEngine, field: Field, no
     windrowed: field.status === "harvested" && !!field.windrowed,
     weedy: !!field.weedy,
     fertilized: field.fertilizedAt !== undefined,
+    dormant: isPerennialDormant(field, now),
     seed: hashSeed(field.id),
   };
   // Seed the texture from the field id so repaints stay stable across a session.

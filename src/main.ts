@@ -49,6 +49,7 @@ import {
 import {
   tickFarming, growthProgress, yieldRange, inPlantingWindow, canPlow,
   hasStandingCrop, inWeedingWindow, canFertilizeNow, isPerennial, canSeedPerennial,
+  isPerennialDormant,
 } from "./sim/farming";
 import {
   ensureAgents, initTaskIds, enqueueTask, cancelTask, taskCost, tasksFor,
@@ -309,10 +310,24 @@ function tickWorld(prev: number) {
  * just on status flips. Per-field canvases make this cheap.
  */
 const paintedStage = new Map<string, number>();
+// Last-painted winter-dormancy state per perennial field, so we repaint the
+// brown/green flip at the Dec 1 / Mar 1 season boundaries (the status stays
+// "growing" across those, so the stage-bucket check alone wouldn't catch it).
+const paintedDormant = new Map<string, boolean>();
 function repaintGrowthStages(now: number, alreadyPainted: { id: string }[]) {
   const done = new Set(alreadyPainted.map((f) => f.id));
   for (const f of save.fields) {
-    if (f.status !== "growing" || done.has(f.id)) continue;
+    if (done.has(f.id)) continue;
+    // Perennial dormancy flip (any status) → repaint the browned/green texture.
+    if (isPerennial(f.crop)) {
+      const dormant = isPerennialDormant(f, now);
+      if (paintedDormant.get(f.id) !== dormant) {
+        paintedDormant.set(f.id, dormant);
+        renderField(mapRef, overlay, f, now);
+        continue;
+      }
+    }
+    if (f.status !== "growing") continue;
     const bucket = Math.floor(growthProgress(f, now) * 12);
     if (paintedStage.get(f.id) !== bucket) {
       paintedStage.set(f.id, bucket);
@@ -736,16 +751,15 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     const size = impl?.size ?? "medium";
     iconSvg = balerIconSvg(IMPLEMENT_QUEUE_ICON_PX);
     info = implementInfoLines("bailer", size);
-    // No persisted "current bale" fraction — bales are spaced evenly by work
-    // distance, so acres-worked-so-far ÷ one-bale's-worth tracks the real
-    // gather → tie → drop → reset cycle closely without exposing tasks.ts's
-    // internal per-tick runtime maps. Whole bales dropped so far / total
-    // bales stand in for "current"/"total" (a baler has no tonnage figure).
-    const balesPerAcre = gameConfig.forage.balesPerAcre;
-    const totalBales = Math.max(1, Math.round(task.totalAcres * balesPerAcre));
-    const balesSoFar = task.doneAcres * balesPerAcre;
-    const dropped = Math.min(totalBales, Math.floor(balesSoFar));
-    fill = { pct: (balesSoFar % 1) * 100, current: `${dropped} bales`, total: `${totalBales} bales` };
+    // The baler's real hopper (like the combine): tons gathered toward the next
+    // bale, resetting to 0 each time one ejects. Total = one bale's worth.
+    const baleTons = gameConfig.forage.baleTons;
+    const cargo = impl?.cargoTons ?? 0;
+    fill = {
+      pct: baleTons > 0 ? Math.min(100, (cargo / baleTons) * 100) : 0,
+      current: `${cargo.toFixed(2)} t`,
+      total: `${baleTons} t`,
+    };
   } else {
     const kind = TASK_IMPLEMENT[task.type];
     if (!kind) return "";

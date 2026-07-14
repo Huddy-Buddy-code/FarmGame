@@ -49,6 +49,17 @@ export function balesPerAcreForField(field: Field): number {
   return gameConfig.baleProducts[baleProductForField(field)].balesPerAcre;
 }
 
+/** Winter months (Dec–Feb) — when a perennial stand goes dormant and its
+ * texture browns off (2026-07-14). Matches the season bar's winter. */
+const DORMANT_MONTHS = [11, 0, 1];
+
+/** Is this a perennial stand in its dormant winter season (light-brown, dead-
+ * grass look)? Purely a rendering cue — the stand is still alive and regrows
+ * in spring. */
+export function isPerennialDormant(field: Field, now: SimTime): boolean {
+  return isPerennial(field.crop) && DORMANT_MONTHS.includes(dateOf(now).month);
+}
+
 /** Can a perennial stand be seeded on a field in this status? Any bare ground —
  * fresh stubble, freshly plowed, or the mulched remains of a prior crop — takes
  * a perennial directly (no plow required, maintainer request). */

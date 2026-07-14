@@ -626,16 +626,13 @@ function taskFieldSpeedKmh(type: TaskType): number {
 // --- coverage-path runtime (not persisted; rebuilt from doneAcres on reload) ---
 const pathCache = new Map<string, CoveragePath>();
 const pathDistRuntime = new Map<string, number>();
-// Baler-only runtime: how many bales this task has dropped so far, and the
-// sim-minutes left in the current "tie a bale" pause (undefined = not tying).
-const baleDropped = new Map<string, number>();
+// Baler-only runtime: the sim-minutes left in the current "tie a bale" pause
+// (undefined = not tying). The hopper itself lives on the baler implement
+// (`cargoTons`), so it persists across save/reload like the combine's.
 const baleTieRemaining = new Map<string, number>();
 // The last on-field spot the baler occupied — bales are dropped HERE so they
 // never land in a concave notch the coverage path cuts across (farmstead, yard).
 const baleLastInside = new Map<string, Meters>();
-// ±10% jitter on the CURRENT pending bale's spacing, so bales don't land on an
-// obvious grid. Rolled once per bale, held until it drops, then re-rolled.
-const baleJitter = new Map<string, number>();
 // The staging gate a grain cart committed to for an unload trip. Locked on
 // first choice — re-picking "nearest gate to the combine" every tick made the
 // cart bounce between gates as the combine swept back and forth (maintainer
@@ -674,10 +671,8 @@ export function getCoveragePath(save: SaveState, task: FarmTask): CoveragePath |
 function clearTaskRuntime(taskId: string): void {
   pathCache.delete(taskId);
   pathDistRuntime.delete(taskId);
-  baleDropped.delete(taskId);
   baleTieRemaining.delete(taskId);
   baleLastInside.delete(taskId);
-  baleJitter.delete(taskId);
   stageGateRuntime.delete(taskId);
 }
 
@@ -1014,6 +1009,11 @@ function tickAgent(
         const f = save.fields.find((ff) => ff.id === next.fieldId);
         if (f) f.windrowed = true;
       }
+      // Starting a bale job: empty the baler's hopper for a fresh run.
+      if (next.type === "bale") {
+        const b = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
+        if (b) b.cargoTons = 0;
+      }
       events.push({ kind: "started", task: next, agent });
       continue;
     }
@@ -1239,33 +1239,33 @@ function tickAgent(
       continue;
     }
 
-    // Baling is special: the baler collects forage as it drives, and every time
-    // it's gathered a bale's worth it STOPS to tie & eject the bale (dropped at
-    // its current spot), then carries on. So it's a drive → pause → drop loop,
-    // not a smooth sweep.
+    // The baler works LIKE THE COMBINE (maintainer request, 2026-07-14): it
+    // gathers forage into a hopper (on the baler implement, `cargoTons`, so it
+    // persists across save/reload) as it drives; the moment the hopper holds a
+    // full bale's worth it stops, ties, and ejects a bale at its spot, emptying
+    // the hopper — then carries on. Any partial load left when the field is
+    // finished is discarded (the hopper is cleared). Forage tons come from the
+    // field's product yield (corn stover 2.5 t/ac, grass hay 1.5, alfalfa 1.6).
     if (task.type === "bale") {
       const path = getActivePath(save, task, field, agent);
       const speed = (taskFieldSpeedKmh("bale") * 1000) / 60; // meters per sim-minute
-      const balesPerAcre = balesPerAcreForField(field); // per product: corn 2.5, hay 1.5, alfalfa 1.6
-      const totalBales = Math.max(1, Math.round(task.totalAcres * balesPerAcre));
-      // Space bales by WORK DISTANCE along the actual driven path, not by field
-      // AREA. A concave notch (farmstead/yard) makes the coverage path over-sweep
-      // — its `totalWork` exceeds the true polygon area — so area-based spacing
-      // would drop every bale in the first stretch and leave the far lanes bare.
-      // Work-distance spacing keeps them evenly spread over the WHOLE field while
-      // the count stays round(acres × balesPerAcre).
-      const workPerBale = path.totalWork / totalBales; // metres of in-field work per bale
+      const baler = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
+      const baleTons = gameConfig.forage.baleTons;
+      // Even-divide the field's forage into whole bales so the count stays
+      // round(acres × balesPerAcre) — float-robust, and identical to before.
+      const totalBales = Math.max(1, Math.round(task.totalAcres * balesPerAcreForField(field)));
+      const tonsPerAcre = task.totalAcres > 0 ? (totalBales * baleTons) / task.totalAcres : 0;
+      if (!baler || tonsPerAcre <= 0) {
+        budget = 0; // defensive: no baler hitched — shouldn't happen (auto-hitch)
+        continue;
+      }
+      baler.cargoTons ??= 0;
 
       let dist = pathDistRuntime.get(task.id);
       if (dist === undefined) dist = distanceAtWork(path, (task.doneAcres * ACRE_M2) / path.swath);
-      let dropped = baleDropped.get(task.id);
-      if (dropped === undefined) {
-        // Re-derive on first tick / after a reload from how much work is done.
-        dropped = Math.min(totalBales, Math.floor(workDoneAt(path, dist) / workPerBale));
-        baleDropped.set(task.id, dropped);
-      }
 
-      // Mid-tie? Burn budget standing still; when the timer runs out, drop the bale.
+      // Mid-tie? Burn budget standing still; when the timer runs out, eject the
+      // bale and empty one bale's worth from the hopper.
       const tie = baleTieRemaining.get(task.id);
       if (tie !== undefined) {
         const used = Math.min(tie, budget);
@@ -1276,59 +1276,55 @@ function tickAgent(
           continue; // still tying (out of budget) — resume next tick
         }
         baleTieRemaining.delete(task.id);
-        baleJitter.delete(task.id); // re-roll spacing for the next bale
-        // Drop ON the field: use the current spot if it's inside, else the last
-        // on-field position (the baler may have stopped over a concave notch the
-        // path cut across — a bale must never land off the field).
+        // Drop ON the field: current spot if inside, else the last on-field
+        // position (the baler may have stopped over a concave notch the path
+        // cut across — a bale must never land off the field).
         const inside = pointInPolygon(agent.pos, field.boundary);
         const drop = inside ? agent.pos : (baleLastInside.get(task.id) ?? agent.pos);
         (field.baleLocations ??= []).push([drop[0], drop[1]]);
-        baleDropped.set(task.id, dropped + 1);
+        baler.cargoTons = Math.max(0, baler.cargoTons - baleTons);
         continue;
       }
 
-      // Not tying: drive to the next bale threshold (or the field's end), stopping
-      // exactly there so the bale drops where a bale's worth was gathered.
-      // Jitter this bale's spacing ±10% (of work-metres) so drops don't fall on an
-      // exact grid. Rolled once per pending bale (held across ticks until it
-      // drops). The nominal `(dropped+1)*workPerBale` still anchors the count, so
-      // the total number of bales is unchanged — only where each lands shifts.
-      let jitter = 0;
-      if (dropped < totalBales) {
-        jitter = baleJitter.get(task.id) ?? workPerBale * (rand() * 0.2 - 0.1);
-        baleJitter.set(task.id, jitter);
+      // Hopper full → stop and tie a bale (empties on the tie above).
+      if (baler.cargoTons >= baleTons - 1e-9) {
+        baleTieRemaining.set(task.id, gameConfig.forage.baleTieMinutes);
+        continue;
       }
-      const targetWork = dropped >= totalBales
-        ? path.totalWork
-        : Math.min(path.totalWork, (dropped + 1) * workPerBale + jitter);
-      const targetDist = dropped >= totalBales
-        ? path.total
-        : Math.min(path.total, distanceAtWork(path, targetWork));
-      const timeNeeded = Math.max(0, (targetDist - dist) / speed);
+
+      // Not full: drive on, gathering forage. Clamp the drive so it stops EXACTLY
+      // when the hopper fills — so the bale drops where a bale's worth was
+      // gathered — mirroring the combine's hopper-capacity clamp. Working in
+      // WORK-metres (in-field only) keeps drops evenly spread across a concave
+      // field the coverage path over-sweeps.
+      const roomAcres = (baleTons - baler.cargoTons) / tonsPerAcre;
+      const roomWork = workDoneAt(path, dist) + (roomAcres * ACRE_M2) / path.swath;
+      const target = Math.min(path.total, distanceAtWork(path, roomWork));
+      const timeNeeded = Math.max(0, (target - dist) / speed);
       const timeUsed = Math.min(timeNeeded, budget);
+      const prevAcres = task.doneAcres;
       dist = Math.min(path.total, dist + speed * timeUsed);
       budget -= timeUsed;
       pathDistRuntime.set(task.id, dist);
       task.doneAcres = Math.min(task.totalAcres, (workDoneAt(path, dist) * path.swath) / ACRE_M2);
+      baler.cargoTons += Math.max(0, task.doneAcres - prevAcres) * tonsPerAcre;
       const s = sampleAt(path, dist);
       agent.pos = s.pos;
       agent.heading = s.heading;
       if (pointInPolygon(agent.pos, field.boundary)) baleLastInside.set(task.id, agent.pos);
 
-      if (dist >= targetDist - 1e-6 && dropped < totalBales) {
-        // Gathered a bale's worth — stop and tie it.
-        baleTieRemaining.set(task.id, gameConfig.forage.baleTieMinutes);
-        continue;
-      }
-      if (dist >= path.total - 1e-6 && dropped >= totalBales) {
+      if (dist >= path.total - 1e-6 && baler.cargoTons < baleTons - 1e-9) {
+        // Field finished with less than a full bale left — discard the partial
+        // hopper and settle up.
         task.doneAcres = task.totalAcres;
+        baler.cargoTons = 0;
         completeTask(task, field, now, rand);
         changed.push(field);
         events.push({ kind: "finished", task, agent });
         clearTaskRuntime(task.id);
         save.tasks.splice(save.tasks.indexOf(task), 1);
         agent.taskId = undefined;
-      clearAgentRoute(agent.id);
+        clearAgentRoute(agent.id);
         agent.state = "idle";
       }
       continue;
