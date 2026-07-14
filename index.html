@@ -116,7 +116,7 @@
          on it, anchored just above it, and only as tall as their content (then
          capped + scroll) — so short panels hug the bar and tall ones grow upward.
          Bottom-anchored with no `top`, so height stays content-driven. */
-      #fieldstab, #equiptab, #cropcal, #inventory, #financetab {
+      #fieldstab, #equiptab, #cropcal, #inventory, #financetab, #settingstab {
         position: absolute; left: 50%; transform: translateX(-50%);
         bottom: 72px; z-index: 30; width: 50vw; box-sizing: border-box;
         max-height: calc(100vh - 190px); overflow-y: auto;
@@ -363,6 +363,35 @@
       .cf-cell:hover .cf-tip { display: block; }
       .cf-tip-title { font-weight: 700; margin-bottom: 4px; color: #8a7658; }
       .cf-tip-row { display: flex; justify-content: space-between; gap: 12px; padding: 1px 0; }
+
+      /* ---------- Settings tab (multi-farm create/load/delete) ---------- */
+      #settingstab h2 { margin: 0 0 2px; font-size: 18px; }
+      #settingstab .sub { font-size: 12px; color: #8a7658; margin-bottom: 10px; }
+      #settingstab .close {
+        position: absolute; top: 10px; right: 12px; border: none; background: none;
+        font-size: 16px; padding: 2px 6px; color: #8a7658;
+      }
+      .settings-new { display: flex; gap: 8px; margin-bottom: 12px; }
+      .settings-new input {
+        flex: 1; padding: 7px 10px; font: inherit; border-radius: 10px;
+        border: 1.5px solid var(--wood); background: var(--cream);
+      }
+      .settings-new button { flex-shrink: 0; }
+      .farm-row {
+        display: flex; align-items: center; gap: 10px;
+        background: var(--cream-2); border: 1.5px solid var(--wood);
+        border-radius: 12px; padding: 8px 12px; margin: 8px 0;
+      }
+      .farm-row.active { border-color: var(--green-dark); background: #e3f0d8; }
+      .farm-row .icon { font-size: 20px; }
+      .farm-row .farm-info { flex: 1; min-width: 0; }
+      .farm-row .farm-name { font-weight: 700; }
+      .farm-row .farm-sub { font-size: 12px; color: #8a7658; }
+      .farm-row .farm-del {
+        flex-shrink: 0; padding: 5px 9px; font-size: 13px;
+        background: var(--cream); color: var(--red); border-color: var(--red);
+      }
+      .farm-row .farm-del:hover { background: rgba(199, 81, 70, 0.12); }
 
       /* ---------- Fields tab (bottom-toolbar panel listing owned fields) ---------- */
       #fieldstab h2 { margin: 0 0 8px; font-size: 18px; }
@@ -632,6 +661,7 @@
       <button id="btn-cropcal">📆 Crop Calendar</button>
       <button id="btn-inventory">📦 Inventory</button>
       <button id="btn-finance">🏦 Finance</button>
+      <button id="btn-settings" title="Farms">⚙️</button>
     </div>
 
     <div id="fieldstab" class="panel">
@@ -665,6 +695,17 @@
       <h2>🏦 Finance</h2>
       <div class="sub">5% fixed, 15-year loans · one per year borrowed · extra payments retire it sooner</div>
       <div id="finance-rows"></div>
+    </div>
+
+    <div id="settingstab" class="panel">
+      <button class="close" id="settings-close">✕</button>
+      <h2>⚙️ Farms</h2>
+      <div class="sub">Switching or deleting reloads the page — the active farm autosaves first</div>
+      <div class="settings-new">
+        <input id="settings-new-name" type="text" placeholder="New farm name…" />
+        <button id="settings-new-create" class="primary">＋ Create</button>
+      </div>
+      <div id="settings-farms"></div>
     </div>
 
     <div id="cropcal" class="panel">

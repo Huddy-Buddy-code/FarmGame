@@ -34,7 +34,11 @@ import {
 } from "./sim/buildings";
 import { distanceAtWork } from "./sim/coverage";
 import type { CoveragePath } from "./sim/coverage";
-import { persistGame, loadGame, clearSavedGame } from "./state/persistence";
+import {
+  persistGame, loadGame, clearSavedGame, ensureActiveFarm, listFarms, createFarm,
+  switchFarm, deleteFarm, getActiveFarmId, loadGameFor,
+} from "./state/persistence";
+import type { PersistedGame } from "./state/persistence";
 import { sellGrain, sellBales, netWorth } from "./sim/economy";
 import { SimClock } from "./sim/clock";
 import {
@@ -74,6 +78,12 @@ import type { CropId, EquipmentSize } from "./config/gameConfig";
 
 // Which county to play. Later this comes from a save / county picker.
 const COUNTY_ID = "story-ia";
+
+// Multi-farm saves (maintainer request, 2026-07-13): exactly one farm is
+// "active" at a time — everything below talks to THAT farm's save, same as
+// the old single-slot behavior. The Settings tab creates/loads/deletes farms
+// by switching which one is active and reloading the page (see wireSettingsTab).
+ensureActiveFarm();
 
 // Load the persisted game if there is one; otherwise start fresh. The game
 // auto-saves (see wirePersistence), so refreshes drop you where you were.
@@ -189,6 +199,7 @@ async function main() {
     wireFieldsTab();
     wireEquipTab();
     wireFinanceTab();
+    wireSettingsTab();
     wirePersistence();
     // Re-render every field from the loaded save (textures + outlines).
     for (const f of save.fields) renderField(map, overlay, f, clock.time());
@@ -839,7 +850,7 @@ function toast(text: string, ms = 2600) {
 // The four bottom-toolbar panels are MUTUALLY EXCLUSIVE — opening one closes any
 // other. Clicking the active panel's own button closes it (toggle).
 // ---------------------------------------------------------------------------
-const TOOLBAR_PANELS = ["fieldstab", "equiptab", "cropcal", "inventory", "financetab"];
+const TOOLBAR_PANELS = ["fieldstab", "equiptab", "cropcal", "inventory", "financetab", "settingstab"];
 function toggleToolbarPanel(id: string, onOpen?: () => void): void {
   const opening = $(id).style.display !== "block";
   for (const p of TOOLBAR_PANELS) $(p).style.display = "none";
@@ -1074,6 +1085,106 @@ function refreshFinanceTab(force = false) {
     table.appendChild(row);
   }
   rows.appendChild(table);
+}
+
+// ---------------------------------------------------------------------------
+// Settings tab (maintainer request, 2026-07-13): create/load/delete separate
+// farms. Exactly one farm is "active" — switching farms reloads the page
+// (same pattern the Reset button already used) so every module-level bit of
+// state elsewhere (clock, calendar pace, id counters, ...) boots up correct
+// for whichever save is now active, rather than needing a live teardown path.
+// ---------------------------------------------------------------------------
+function wireSettingsTab() {
+  $("btn-settings").addEventListener("click", () => toggleToolbarPanel("settingstab", refreshSettingsTab));
+  $("settings-close").addEventListener("click", () => ($("settingstab").style.display = "none"));
+
+  const nameInput = $("settings-new-name") as HTMLInputElement;
+  const createBtn = $("settings-new-create") as HTMLButtonElement;
+  const doCreate = () => {
+    // Flush the OUTGOING farm's state before switching — persistGame() always
+    // writes to whichever farm is active AT CALL TIME, so this must run
+    // before createFarm() flips activeId to the new (blank) farm.
+    saveBeforeSwitch();
+    createFarm(nameInput.value);
+    location.reload();
+  };
+  createBtn.addEventListener("click", doCreate);
+  nameInput.addEventListener("keypress", (e) => {
+    if (e.key === "Enter") doCreate();
+  });
+}
+
+/** Flush the current farm's state before navigating away from it (switching
+ * farms or the page will otherwise reload mid-autosave-interval and lose
+ * whatever happened since the last 5s tick). */
+function saveBeforeSwitch(): void {
+  resetting = true; // reuse the same "don't let a stray timer write after us" guard as Reset
+  persistGame({ save, clockNow: clock.time(), daysPerMonth: getDaysPerMonth() });
+}
+
+/** One line of "what's in this save" without touching the shared calendar
+ * module's daysPerMonth (that's a live global for the ACTIVE farm's pace —
+ * reading a different farm's saved pace through it would corrupt the
+ * currently-playing farm's calendar math). Computed directly from the
+ * PersistedGame's own daysPerMonth instead. */
+function farmSummaryLine(pg: PersistedGame | null): string {
+  if (!pg) return "Not started yet";
+  const mpm = (pg.daysPerMonth ?? 30) * MINUTES_PER_DAY;
+  const totalMonths = START_MONTH + Math.floor(pg.clockNow / mpm);
+  const year = 1 + Math.floor(totalMonths / MONTHS_PER_YEAR);
+  const acres = pg.save.fields.reduce((sum, f) => sum + areaAcres(f.boundary), 0);
+  return `Year ${year} · $${Math.round(pg.save.money).toLocaleString()} · ${acres.toFixed(0)} ac`;
+}
+
+function refreshSettingsTab(): void {
+  const el = $("settingstab");
+  if (el.style.display !== "block") return;
+
+  const rows = $("settings-farms");
+  rows.innerHTML = "";
+  const activeId = getActiveFarmId();
+  for (const meta of listFarms()) {
+    const isActive = meta.id === activeId;
+    const pg = isActive ? { save, clockNow: clock.time(), daysPerMonth: getDaysPerMonth() } : loadGameFor(meta.id);
+    const row = document.createElement("div");
+    row.className = "farm-row" + (isActive ? " active" : "");
+    row.innerHTML = `
+      <span class="icon">🚜</span>
+      <span class="farm-info">
+        <div class="farm-name">${escapeHtml(meta.name)}${isActive ? " · Playing" : ""}</div>
+        <div class="farm-sub">${farmSummaryLine(pg)}</div>
+      </span>`;
+
+    if (!isActive) {
+      const loadBtn = document.createElement("button");
+      loadBtn.className = "primary";
+      loadBtn.textContent = "▶ Load";
+      loadBtn.addEventListener("click", () => {
+        saveBeforeSwitch();
+        switchFarm(meta.id);
+        location.reload();
+      });
+      row.appendChild(loadBtn);
+    }
+
+    const delBtn = document.createElement("button");
+    delBtn.className = "farm-del";
+    delBtn.textContent = "🗑";
+    delBtn.title = `Delete ${meta.name}`;
+    delBtn.addEventListener("click", () => {
+      if (!confirm(`Delete "${meta.name}"? This can't be undone.`)) return;
+      const wasActive = isActive;
+      deleteFarm(meta.id); // picks (or creates) the next active farm internally
+      if (wasActive) {
+        resetting = true; // this farm's gone — don't let the autosave timer resurrect it
+        location.reload();
+      } else {
+        refreshSettingsTab();
+      }
+    });
+    row.appendChild(delBtn);
+    rows.appendChild(row);
+  }
 }
 
 // ---------------------------------------------------------------------------

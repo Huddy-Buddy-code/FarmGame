@@ -43,6 +43,30 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   if sold now.
 - **95/95 tests passing** (added 5 rotation-planner tests). Typecheck clean.
 
+## Latest changes (2026-07-13, multi-farm settings tab)
+
+- **New Settings tab** (⚙️ in the bottom toolbar): create/load/delete
+  independent farms. `src/state/persistence.ts` reworked from a single
+  localStorage slot to an INDEX (`farm-sim-index-v1`: farm id/name/timestamps
+  + which one's active) plus one save-data key per farm
+  (`farm-sim-farm-v1:<id>`). A v1 single-slot save from before this existed
+  auto-migrates into "Farm 1" on first read.
+- Switching/creating/deleting the active farm flushes the OUTGOING farm's
+  state first, then reloads the page — same pattern the existing Reset
+  button used, so every other module's live state (clock, calendar pace,
+  id counters) boots up correct for whichever save is now active rather
+  than needing a teardown/reinit path. The Reset button itself is
+  unchanged (wipes the active farm's save, keeps its name).
+- Each farm's row shows a live one-line summary (year/cash/acres) computed
+  directly from its own saved `daysPerMonth`, without touching the shared
+  calendar module's live pace setting (would corrupt the currently-playing
+  farm's calendar math if read through the normal `dateOf`/`formatDate` path).
+- 12 new tests in `tests/persistence.test.ts` (needed an in-memory
+  `localStorage` polyfill — this Vitest project runs in plain Node, no
+  jsdom global). 174/174 total, typecheck clean.
+- **UX needs eyes** (no Browser Preview): the Settings panel layout/farm-row
+  styling, and the create → reload → land-on-blank-farm flow end to end.
+
 ## Latest changes (2026-07-13, fertilizer visual + field access points)
 
 - **Fertilizing is visible now**: the sprayer stamps a ~20% darkened copy of
