@@ -68,6 +68,18 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, hour/month chip was too small — bumped size)
+
+- Maintainer: "the bubble around the time of day, it's too small" — text was
+  nearly touching the pill's edges. Bumped both chips: font-size 10.5→12px,
+  padding 1px 5px→3px 9px, border-radius 6→8px.
+- Grew the space reserved for the now-taller chips to match: `#yearbar`'s
+  top padding 20→27px, the season `.labels` row's top margin 17→24px
+  (+14px total), and shifted `#timebar` down to match (`top:150px→164px`).
+- 188/188 passing, typecheck clean (CSS only).
+- **UX needs eyes** (no Browser Preview): confirm the chips now have
+  comfortable breathing room and nothing crowds below the taller year bar.
+
 ## Latest changes (2026-07-14, hour/month chip shadow was too heavy for their size)
 
 - Maintainer flagged the hour chip ("Check the time icon") after the
