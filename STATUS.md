@@ -68,6 +68,20 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, hour/month chip shadow was too heavy for their size)
+
+- Maintainer flagged the hour chip ("Check the time icon") after the
+  overflow-clip fix — it rendered with a smudgy, tail-like blob under it
+  instead of a crisp small label. Cause: both chips used `box-shadow:
+  var(--shadow)` (`0 3px 10px rgba(60,40,15,0.35)`), a heavy shadow sized
+  for full panels (topbar/yearbar/timebar), applied to a ~30×16px pill —
+  the 10px blur radius on something that small reads as a shapeless smudge,
+  not a shadow. Swapped both chips to a tight `0 1px 3px rgba(60,40,15,0.3)`
+  scaled to their actual size.
+- 188/188 passing, typecheck clean (CSS only).
+- **UX needs eyes** (no Browser Preview): confirm both chips now read as
+  clean small pill labels.
+
 ## Latest changes (2026-07-14, month-chip fix: was invisible, clipped by overflow:hidden)
 
 - Maintainer reported the new month-chip (previous entry below) never
