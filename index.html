@@ -46,12 +46,17 @@
       /* ---------- Year bar (position in the year, season-themed) ---------- */
       #yearbar {
         position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
-        z-index: 19; width: var(--hud-w); box-sizing: border-box; padding: 36px 10px 34px;
+        z-index: 19; width: var(--hud-w); box-sizing: border-box; padding: 6px 10px 34px;
         border-radius: 10px;
       }
+      /* Same height as .seasons (maintainer request, 2026-07-14) — the live
+         hour chip moved DOWN onto this bar (was floating above it), so the
+         bar needs the room, same as the season names moved into .seasons. */
       #yearbar .daybar {
-        height: 10px; border-radius: 999px;
+        height: 22px; border-radius: 999px;
         border: 1.5px solid var(--wood); position: relative; margin-bottom: 6px;
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 0 9px; box-sizing: border-box;
         /* The workday IS the whole game "day" now (6am–6pm, no night modeled —
            maintainer request, 2026-07-14): warm dawn at the left edge, bright
            midday pale-blue in the middle, warm dusk at the right edge. No
@@ -60,6 +65,13 @@
           #e7a982 0%, #ffd9a8 12%,
           #cdeafc 40%, #dff2ff 50%, #cdeafc 60%,
           #ffd9a8 88%, #e7a982 100%);
+      }
+      /* Fixed 6am/6pm endpoints, flex-pinned to the bar's corners — distinct
+         from the live hour-chip, which rides the middle showing the current
+         rounded hour. */
+      #yearbar .daybar .endpoint {
+        font-size: 11px; font-weight: 700; color: var(--wood-dark);
+        white-space: nowrap; pointer-events: none;
       }
       /* Wraps .seasons (which clips to overflow:hidden for its rounded
          segment corners) so the month-chip below can be positioned outside
@@ -89,11 +101,12 @@
         background: var(--ink); box-shadow: 0 0 0 1.5px var(--cream);
       }
       /* Live text chips riding the two tracks (maintainer request, 2026-07-14):
-         the rounded hour ("1pm") above the day bar, the current month ("Jul.")
-         below the season bar. Width is intentionally left to the content —
-         `placeChip` in main.ts measures the rendered width to clamp them. */
+         the rounded hour ("1pm") ON the day bar (centered on it, between the
+         fixed 6am/6pm endpoints), the current month ("Jul.") below the
+         season bar. Width is intentionally left to the content — `placeChip`
+         in main.ts measures the rendered width to clamp them. */
       #yearbar .hour-chip, #yearbar .month-chip {
-        position: absolute; transform: translateX(-50%);
+        position: absolute;
         white-space: nowrap; pointer-events: none;
         font-size: 12px; font-weight: 700; color: var(--wood-dark);
         /* Pin line-height: the body's inherited 1.45 made the pill taller than
@@ -103,12 +116,13 @@
         background: var(--cream); border: 1.5px solid var(--wood); border-radius: 8px;
         padding: 4px 10px; box-shadow: 0 1px 3px rgba(60, 40, 15, 0.3);
       }
-      #yearbar .hour-chip { bottom: 100%; margin-bottom: 4px; }
-      #yearbar .month-chip { top: 100%; margin-top: 4px; }
+      /* Sits ON the bar now (was floating above it) — vertically centered. */
+      #yearbar .hour-chip { top: 50%; transform: translate(-50%, -50%); }
+      #yearbar .month-chip { top: 100%; margin-top: 4px; transform: translateX(-50%); }
 
       /* ---------- Time controls ---------- */
       #timebar {
-        position: absolute; top: 174px; left: 50%; transform: translateX(-50%);
+        position: absolute; top: 156px; left: 50%; transform: translateX(-50%);
         z-index: 20; display: flex; align-items: center; justify-content: center;
         gap: 6px; row-gap: 4px; flex-wrap: wrap;
         padding: 6px 10px; width: var(--hud-w); box-sizing: border-box;
@@ -702,6 +716,8 @@
 
     <div id="yearbar" class="panel">
       <div class="daybar" title="The workday: 6am – 6pm">
+        <span class="endpoint">6am</span>
+        <span class="endpoint">6pm</span>
         <div class="hour-chip" id="day-marker"></div>
       </div>
       <div class="season-track">

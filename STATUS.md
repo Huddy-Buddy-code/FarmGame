@@ -68,6 +68,33 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, hour chip moved onto the day bar, 6am/6pm endpoints added)
+
+- Continuing the vertical-space reclaim: the live hour-chip (was floating
+  ABOVE `.daybar` in the panel's top padding) now sits ON the bar, vertically
+  centered (`top:50%; transform:translate(-50%,-50%)`), same treatment as
+  the month-chip already got relative to the season bar. `.daybar` grew
+  10px→22px tall to match `.seasons` (maintainer request: "same size as the
+  season [bar]").
+- Added fixed `6am`/`6pm` endpoint labels flex-pinned to the bar's corners
+  (`justify-content: space-between`) — distinct from the moving hour-chip,
+  which still rides the middle showing the live rounded hour. They're plain
+  flex children; the absolutely-positioned hour-chip is out of flow so it
+  doesn't interfere with the two-item space-between.
+- `#yearbar`'s top padding, no longer needed to clear a floating chip,
+  dropped from 36px back to a plain 6px — the bulk of this session's
+  "reclaim vertical space" ask. `#timebar` moved up to match
+  (`top: 174px → 156px`).
+- No JS changes: `placeChip` (main.ts) only ever set `.style.left`, and the
+  chip's vertical position/centering is pure CSS — unaffected by moving it
+  from "above the bar" to "on the bar".
+- 188/188 passing, typecheck clean (HTML/CSS only).
+- **UX needs eyes** (no Browser Preview): the hour-chip pill sitting on top
+  of the gradient bar (contrast/legibility at different times of day), and
+  whether it visually collides with the 6am/6pm endpoint labels when the
+  live hour is near either edge (accepted per the request, not treated as
+  a bug, but worth a look).
+
 ## Latest changes (2026-07-14, season labels moved into the bar — separate label row removed)
 
 - Maintainer confirmed the hour-chip class-collision fix worked, then asked
