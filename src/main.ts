@@ -1947,12 +1947,17 @@ function wirePersistence() {
 }
 
 // ---------------------------------------------------------------------------
-// Time controls: pause / 1× / 60× / 3600× + skip-to-month montage.
+// Time controls: Real-Time / 1 hr=1 day / 1 hr=1 month / 1 hr=1 year, plus a
+// skip-to-month montage. Pause (spd-pause) and the old 3600× tier (spd-3600)
+// are kept wired but hidden (maintainer request, 2026-07-14) — not deleted,
+// in case they're wanted back.
 // ---------------------------------------------------------------------------
 /** 1× = literal real time: 1 sim-minute per real minute. Multiples of this base
  * give the other speeds their exact "1 real second = N game time" meaning:
- *   60×   → 1 real second = 1 game minute
- *   3600× → 1 real second = 1 game hour
+ *   12×   → 1 real hour = 1 game day (branded "1 hr = 1 day")
+ *   60×   → 1 real second = 1 game minute (branded "1 hr = 1 month")
+ *   720×  → 1 real hour = 1 game year (branded "1 hr = 1 year")
+ *   3600× → 1 real second = 1 game hour (hidden)
  */
 const BASE_COMPRESSION = 1 / 60;
 
@@ -1960,7 +1965,9 @@ function wireTimeControls() {
   const speeds: Array<[string, number | null]> = [
     ["spd-pause", null],
     ["spd-1", 1],
+    ["spd-12", 12],
     ["spd-60", 60],
+    ["spd-720", 720],
     ["spd-3600", 3600],
   ];
   for (const [id, mult] of speeds) {
@@ -2041,10 +2048,12 @@ function runMontage(target: number) {
   requestAnimationFrame(step);
 }
 
+const SPEED_MULT: Record<string, number> = { "spd-1": 1, "spd-12": 12, "spd-60": 60, "spd-720": 720, "spd-3600": 3600 };
+
 /** Put compression + play state back to whatever the speed buttons say. */
 function restoreSpeed(paused: boolean) {
   const active = document.querySelector("#timebar button.active")?.id ?? "spd-1";
-  const mult = active === "spd-3600" ? 3600 : active === "spd-60" ? 60 : 1;
+  const mult = SPEED_MULT[active] ?? 1;
   clock.setCompression(BASE_COMPRESSION * mult);
   if (active === "spd-pause" || paused) clock.pause();
   else clock.play();

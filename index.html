@@ -82,12 +82,13 @@
       /* ---------- Time controls ---------- */
       #timebar {
         position: absolute; top: 117px; left: 50%; transform: translateX(-50%);
-        z-index: 20; display: flex; align-items: center; justify-content: center; gap: 6px;
+        z-index: 20; display: flex; align-items: center; justify-content: center;
+        gap: 6px; row-gap: 4px; flex-wrap: wrap;
         padding: 6px 10px; width: var(--hud-w); box-sizing: border-box;
       }
       /* Compact controls so the simplified row sits comfortably in the shared width. */
       #timebar button, #timebar select { padding: 4px 9px; font-size: 13px; border-radius: 9px; }
-      #timebar .spd { padding: 4px 8px; }
+      #timebar .spd { padding: 4px 7px; font-size: 12px; white-space: nowrap; }
       button {
         font: inherit; font-weight: 600; color: var(--ink); cursor: pointer;
         background: var(--cream-2); border: 2px solid var(--wood);
@@ -685,10 +686,12 @@
     </div>
 
     <div id="timebar" class="panel">
-      <button id="spd-pause" class="spd" title="Pause">⏸</button>
-      <button id="spd-1" class="spd active" title="Real time — 1 real second = 1 game second">1×</button>
-      <button id="spd-60" class="spd" title="1 real second = 1 game minute">60×</button>
-      <button id="spd-3600" class="spd" title="1 real second = 1 game hour">3600×</button>
+      <button id="spd-pause" class="spd" title="Pause" style="display:none">⏸</button>
+      <button id="spd-1" class="spd active" title="Real time — 1 real second = 1 game second">Real-Time</button>
+      <button id="spd-12" class="spd" title="1 real hour = 1 game day">1 hr = 1 day</button>
+      <button id="spd-60" class="spd" title="1 real hour = 1 game month">1 hr = 1 month</button>
+      <button id="spd-720" class="spd" title="1 real hour = 1 game year">1 hr = 1 year</button>
+      <button id="spd-3600" class="spd" title="1 real second = 1 game hour" style="display:none">3600×</button>
       <button id="skip-month" title="Fast-forward to the end of the current month">⏭ Skip month</button>
       <select id="days-per-month" title="Days in a game month — shorten it to cycle through seasons faster">
         <option value="5">5 d/mo</option>

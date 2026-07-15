@@ -68,6 +68,27 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, sim-speed ladder relabel: Real-Time / 1hr=1day / 1hr=1month / 1hr=1year)
+
+- Renamed/re-tiered the time-control bar (`index.html` `#timebar`, wired in
+  `main.ts` `wireTimeControls`): `1×` → "Real-Time"; new 12× button "1 hr =
+  1 day"; `60×` relabeled "1 hr = 1 month" (unchanged multiplier); new 720×
+  button "1 hr = 1 year". Pause (`spd-pause`) and the old `3600×` tier are
+  hidden (`style="display:none"`) but NOT removed — still in the DOM and
+  still wired, in case they're wanted back.
+- Found and fixed a latent bug while wiring the new tiers: `restoreSpeed()`
+  (used after the skip-month montage) had a hand-rolled 3-way ternary that
+  only knew `spd-60`/`spd-3600`/default-1 — picking the new 12×/720× buttons
+  and then skipping a month would have silently dropped back to 1× afterward.
+  Replaced with a `SPEED_MULT` lookup table covering all 5 ids.
+- `#timebar` CSS: added `flex-wrap`/`row-gap` and shrank `.spd` font-size
+  slightly so the longer text labels don't overflow the shared `--hud-w`
+  header width.
+- No sim-logic changes; 186/186 passing, typecheck clean.
+- **UX needs eyes** (no Browser Preview): the new button labels/spacing at
+  the shared header width, and that clicking each of the 4 visible tiers
+  actually changes speed as expected.
+
 ## Latest changes (2026-07-14, round displayed $ figures to nearest $100)
 
 - New `round100()` display-only helper (`main.ts`) — the underlying save-state
