@@ -52,13 +52,14 @@
       #yearbar .daybar {
         height: 10px; border-radius: 999px;
         border: 1.5px solid var(--wood); position: relative; margin-bottom: 6px;
-        /* Cozy sky, midnight at both ends → noon in the middle. Soft periwinkle
-           night, warm peach dawn/dusk, pale-blue midday — pastels that sit with
-           the season row below (border-radius clips the gradient; no overflow). */
+        /* The workday IS the whole game "day" now (6am–6pm, no night modeled —
+           maintainer request, 2026-07-14): warm dawn at the left edge, bright
+           midday pale-blue in the middle, warm dusk at the right edge. No
+           night colors — the bar is daylight start to finish. */
         background: linear-gradient(to right,
-          #6d78b0 0%, #8b93c6 12%, #e7a982 21%, #ffd9a8 29%,
-          #cdeafc 43%, #dff2ff 50%, #cdeafc 57%,
-          #ffd9a8 71%, #e7a982 79%, #8b93c6 88%, #6d78b0 100%);
+          #e7a982 0%, #ffd9a8 12%,
+          #cdeafc 40%, #dff2ff 50%, #cdeafc 60%,
+          #ffd9a8 88%, #e7a982 100%);
       }
       /* Sun/moon token that rides the day track (emoji set in JS). */
       #yearbar .daybar .marker {
@@ -674,7 +675,7 @@
     </div>
 
     <div id="yearbar" class="panel">
-      <div class="daybar">
+      <div class="daybar" title="The workday: 6am – 6pm">
         <div class="marker" id="day-marker"></div>
       </div>
       <div class="seasons">
@@ -687,19 +688,20 @@
 
     <div id="timebar" class="panel">
       <button id="spd-pause" class="spd" title="Pause" style="display:none">⏸</button>
-      <button id="spd-1" class="spd active" title="Real time — 1 real second = 1 game second">Real-Time</button>
-      <button id="spd-12" class="spd" title="1 real hour = 1 game day">1 hr = 1 day</button>
-      <button id="spd-60" class="spd" title="1 real hour = 1 game month">1 hr = 1 month</button>
-      <button id="spd-720" class="spd" title="1 real hour = 1 game year">1 hr = 1 year</button>
-      <button id="spd-3600" class="spd" title="1 real second = 1 game hour" style="display:none">3600×</button>
+      <button id="spd-1" class="spd active" title="Real time — 1 real second = 1 game second (1×)">Real-Time</button>
+      <button id="spd-12" class="spd" title="1 real hour = 1 game day (12×)">1 hr = 1 day</button>
+      <button id="spd-60" class="spd" title="1 real hour = 1 game month (60×)">1 hr = 1 month</button>
+      <button id="spd-720" class="spd" title="1 real hour = 1 game year (720×)">1 hr = 1 year</button>
+      <button id="spd-3600" class="spd" title="1 real second = 1 game hour (3600×)" style="display:none">3600×</button>
       <button id="skip-month" title="Fast-forward to the end of the current month">⏭ Skip month</button>
-      <select id="days-per-month" title="Days in a game month — shorten it to cycle through seasons faster">
+      <select id="days-per-month" title="Days in a game month — shorten it to cycle through seasons faster" style="display:none">
+        <option value="3" selected>3 d/mo</option>
         <option value="5">5 d/mo</option>
         <option value="10">10 d/mo</option>
         <option value="15">15 d/mo</option>
         <option value="20">20 d/mo</option>
         <option value="25">25 d/mo</option>
-        <option value="30" selected>30 d/mo</option>
+        <option value="30">30 d/mo</option>
       </select>
     </div>
 

@@ -1042,12 +1042,13 @@ function updateHud() {
   const calNow = document.getElementById("cal-now");
   if (calNow) calNow.style.left = `calc(${(110 * (1 - f)).toFixed(1)}px + ${(f * 100).toFixed(2)}%)`;
 
-  // Day-position marker: a sun/moon token riding the day track (midnight = 0).
+  // Day-position marker: a sun token riding the workday track (6am = 0, 6pm =
+  // 1). No night is modeled anymore (maintainer request, 2026-07-14) — the
+  // game day IS the 12-hour daylight operating window, so it's always the sun.
   const df = dayFraction(clock.time());
   const dayMarker = $("day-marker");
   dayMarker.style.left = `${(df * 100).toFixed(2)}%`;
-  // Daytime ~6am–6pm (0.25–0.75); sun then, moon overnight.
-  dayMarker.textContent = df >= 0.25 && df < 0.75 ? "☀️" : "🌙";
+  dayMarker.textContent = "☀️";
 }
 
 /** 0..1 through the campaign's display year, which runs Mar 1 → end of Feb. */
@@ -1056,7 +1057,8 @@ function yearFraction(t: number): number {
   return (t % minutesPerYear) / minutesPerYear;
 }
 
-/** 0..1 through the current game day, midnight (0:00) = 0. */
+/** 0..1 through the current workday, 6am = 0, 6pm = 1 (the whole game "day"
+ * is this 12-hour window — no night is modeled). */
 function dayFraction(t: number): number {
   return (t % MINUTES_PER_DAY) / MINUTES_PER_DAY;
 }

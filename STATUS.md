@@ -68,6 +68,39 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, 12-hour workday calendar + speed-tooltip ×s + 3-day months)
+
+- **Confirmed with maintainer** (not a cosmetic-only change): a game "day" is
+  now the 12-hour daylight workday, 6am–6pm — no night is modeled at all.
+  `MINUTES_PER_DAY` (`sim/calendar.ts`) is now `12*60` instead of `24*60`.
+  Every downstream calc (`dateOf`, `minutesPerMonth`, `daysBetween`, the
+  day-position marker) derives from this one constant, so it cascaded
+  cleanly — no other hardcoded 24h/1440 assumptions existed in source.
+- **Days-per-month default dropped 30 → 3** (`DEFAULT_DAYS_PER_MONTH`); the
+  days/month `<select>` is hidden (`style="display:none"`, not removed —
+  same treatment as the pause/3600× speed buttons) and given a matching new
+  "3 d/mo" option as its default-selected entry.
+- **Day-position bar redrawn as all-daylight**: since the whole game day IS
+  the workday, the gradient (`#yearbar .daybar`) dropped its midnight/night
+  segments — dawn-to-noon-to-dusk only — and the marker is always ☀️ (no 🌙
+  branch anymore).
+- **Speed button tooltips now show the ×**: "Real time — 1 real second = 1
+  game second (1×)", "...(12×)", "...(60×)", "...(720×)", "...(3600×)".
+- **Test fallout + fix**: `tests/farming.test.ts` had several fixtures
+  (`WINTER_1`, `APRIL_1`, a "seed on day 15" test) that implicitly relied on
+  the module's default `daysPerMonth` staying 30 — some computed once at
+  import time, others via a mid-file mutate-then-restore test whose restore
+  value (hardcoded 30) no longer matched the new true default (3), so the
+  frozen constants and later live calls drifted out of sync. Fixed by
+  pinning `setDaysPerMonth(30)` explicitly at the top of that file (it's
+  legitimately a "30-day-month world" fixture file, not a claim about the
+  production default) rather than changing its many hardcoded day-offsets.
+  Added `tests/calendarDefaults.test.ts` (a clean, unpinned file) to pin down
+  the actual production defaults going forward.
+- 188/188 passing (2 new), typecheck clean.
+- **UX needs eyes** (no Browser Preview): the day-bar's new all-daylight
+  gradient/marker, the hidden days/month dropdown, and the speed tooltips.
+
 ## Latest changes (2026-07-14, sim-speed ladder relabel: Real-Time / 1hr=1day / 1hr=1month / 1hr=1year)
 
 - Renamed/re-tiered the time-control bar (`index.html` `#timebar`, wired in

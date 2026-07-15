@@ -20,13 +20,16 @@
 
 import type { SimTime } from "./clock";
 
-export const MINUTES_PER_DAY = 24 * 60;
+/** A game "day" is the 12-hour daylight workday, 6am–6pm (maintainer request,
+ * 2026-07-14) — the sim models no night at all; every calendar day IS the
+ * operating window, back to back. */
+export const MINUTES_PER_DAY = 12 * 60;
 export const MONTHS_PER_YEAR = 12;
 
 /** 0-based month index the campaign starts in (March). */
 export const START_MONTH = 2;
 
-const DEFAULT_DAYS_PER_MONTH = 30;
+const DEFAULT_DAYS_PER_MONTH = 3;
 let daysPerMonth = DEFAULT_DAYS_PER_MONTH;
 
 /** Current month length in days. */

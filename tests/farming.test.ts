@@ -83,6 +83,13 @@ function runUntil(save: SaveState, from: number, done: () => boolean, capMinutes
   return now;
 }
 
+// This file's fixtures (APRIL_1, WINTER_1, and several tests' own day-offset
+// math) assume a comfortable 30-day month — pin it explicitly rather than
+// relying on the production default (a player-facing pace knob that changed
+// to 3 days/month 2026-07-14; see sim/calendar.ts). Tests that want a
+// different pace already call setDaysPerMonth themselves and restore it.
+setDaysPerMonth(30);
+
 /** Campaign starts Mar 1 Yr 1; sim-time of April 1 Yr 1 (one month in). */
 const APRIL_1 = minutesPerMonth();
 /** Sim-time of Dec 1 Yr 1 — plowing opens (winter only, maintainer request
