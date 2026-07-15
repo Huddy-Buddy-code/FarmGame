@@ -46,7 +46,7 @@
       /* ---------- Year bar (position in the year, season-themed) ---------- */
       #yearbar {
         position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
-        z-index: 19; width: var(--hud-w); box-sizing: border-box; padding: 36px 10px 5px;
+        z-index: 19; width: var(--hud-w); box-sizing: border-box; padding: 36px 10px 34px;
         border-radius: 10px;
       }
       #yearbar .daybar {
@@ -65,8 +65,17 @@
          segment corners) so the month-chip below can be positioned outside
          that box without being clipped along with it. */
       #yearbar .season-track { position: relative; }
-      #yearbar .seasons { display: flex; height: 10px; border-radius: 999px; overflow: hidden; border: 1.5px solid var(--wood); position: relative; }
-      #yearbar .seg { flex: 1; }
+      /* The season names moved INTO the bar itself (maintainer request,
+         2026-07-14) — no separate label row below, so the bar needs real
+         height to hold the text instead of just being a 10px stripe. */
+      #yearbar .seasons {
+        display: flex; height: 22px; border-radius: 999px; overflow: hidden;
+        border: 1.5px solid var(--wood); position: relative;
+      }
+      #yearbar .seg {
+        flex: 1; display: flex; align-items: center; justify-content: center;
+        font-size: 11px; font-weight: 700; color: var(--wood-dark); white-space: nowrap;
+      }
       #yearbar .seg.spring { background: #a8d178; }
       #yearbar .seg.summer { background: #f5c95d; }
       #yearbar .seg.fall   { background: #d98e4a; }
@@ -96,12 +105,10 @@
       }
       #yearbar .hour-chip { bottom: 100%; margin-bottom: 4px; }
       #yearbar .month-chip { top: 100%; margin-top: 4px; }
-      #yearbar .labels { display: flex; font-size: 11px; margin-top: 34px; }
-      #yearbar .labels span { flex: 1; text-align: center; }
 
       /* ---------- Time controls ---------- */
       #timebar {
-        position: absolute; top: 183px; left: 50%; transform: translateX(-50%);
+        position: absolute; top: 174px; left: 50%; transform: translateX(-50%);
         z-index: 20; display: flex; align-items: center; justify-content: center;
         gap: 6px; row-gap: 4px; flex-wrap: wrap;
         padding: 6px 10px; width: var(--hud-w); box-sizing: border-box;
@@ -699,13 +706,12 @@
       </div>
       <div class="season-track">
         <div class="seasons">
-          <div class="seg spring"></div><div class="seg summer"></div>
-          <div class="seg fall"></div><div class="seg winter"></div>
+          <div class="seg spring">🌱 Spring</div><div class="seg summer">☀️ Summer</div>
+          <div class="seg fall">🍂 Fall</div><div class="seg winter">❄️ Winter</div>
           <div class="marker" id="year-marker"></div>
         </div>
         <div class="month-chip" id="month-marker"></div>
       </div>
-      <div class="labels"><span>🌱 Spring</span><span>☀️ Summer</span><span>🍂 Fall</span><span>❄️ Winter</span></div>
     </div>
 
     <div id="timebar" class="panel">

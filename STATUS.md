@@ -68,6 +68,28 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, season labels moved into the bar — separate label row removed)
+
+- Maintainer confirmed the hour-chip class-collision fix worked, then asked
+  to reclaim vertical space: moved "🌱 Spring / ☀️ Summer / 🍂 Fall / ❄️
+  Winter" OFF their own row and INTO the season bar's segments directly —
+  `.seg` divs now hold the text (flex-centered), the bar grew 10px→22px tall
+  to fit it, and the standalone `.labels` row + its dead CSS were deleted.
+  Text color is `--wood-dark` on all four pastel segment backgrounds
+  (spring/summer/fall/winter) — same token already used for the hour/month
+  chip text, should read fine on light pastels but worth an eyeball.
+  Season-name color-per-segment wasn't customized (see UX-needs-eyes below).
+- Reclaimed the labels row's old `margin-top: 34px` (which existed only to
+  clear the month-chip) as `#yearbar`'s own `padding-bottom: 34px` instead —
+  same clearance, no separate row needed. Net: `#yearbar` shrank, so
+  `#timebar` moved up to match (`top: 183px → 174px`).
+- 188/188 passing, typecheck clean (HTML/CSS only, no JS/logic touched —
+  `main.ts` never referenced the removed `.labels` markup).
+- **UX needs eyes** (no Browser Preview): text contrast/readability on each
+  of the 4 segment colors (spring green, summer yellow, fall orange, winter
+  pale-blue) — `wood-dark` may read weaker on the lighter segments than it
+  did on the cream panel background the old label row sat on.
+
 ## Latest changes (2026-07-14, ROOT CAUSE of the "time chip is cut off" saga: a CSS class collision)
 
 - Real cause, after several wrong guesses (see the three entries below — all
