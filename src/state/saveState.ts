@@ -228,23 +228,35 @@ export interface FarmTask {
   costPaid: number;
 }
 
-/** A snapshot of a finished field-work task, kept for the Work Queue's
- * "Completed" section (maintainer request, 2026-07-14) — the live `FarmTask`
- * is discarded the instant its work is done, so anything worth showing after
- * the fact (cost, tons, bales) has to be captured into its own record right
- * at completion. Bounded and pruned by `dateOf(now)` month in the UI, not
- * stored per-task-type — a flat log is enough for "what happened this month". */
+/** A snapshot of a finished field-work task OR a grain/bale sale, kept for the
+ * Work Queue's "Completed" section (maintainer request, 2026-07-14; sales
+ * added 2026-07-14). The live `FarmTask` is discarded the instant its work is
+ * done, and a sale (economy.ts) was never a task at all — so anything worth
+ * showing after the fact (cost, revenue, tons, bales) has to be captured into
+ * its own record right when it happens. Bounded and pruned by `dateOf(now)`
+ * month in the UI, not stored per-type — a flat log is enough for "what
+ * happened this month". */
 export interface CompletedTask {
   id: string;
-  type: TaskType;
-  fieldId: string;
+  type: TaskType | "sellGrain" | "sellBales";
+  /** Field the work happened on. Omitted for sales that span every field
+   * holding a product (e.g. "sell all hay bales"). */
+  fieldId?: string;
   crop?: CropId;
-  acres: number;
-  costPaid: number;
-  /** Grain harvested (harvest) or forage gathered (bale), in tons. */
+  /** Display label for sale entries that aren't tied to a single crop (e.g.
+   * a bale product name — "Hay", "Alfalfa Hay"). */
+  label?: string;
+  acres?: number;
+  /** Money paid to DO the work (task completions only). */
+  costPaid?: number;
+  /** Money received (sale entries only). */
+  revenue?: number;
+  /** Grain harvested (harvest) or forage gathered/sold (bale, sales), in tons. */
   tons?: number;
-  /** Bales produced (bale task only). */
+  /** Bales produced or sold. */
   bales?: number;
+  /** Name of the machine that did the work (task completions only). */
+  agentName?: string;
   completedAt: SimTime;
 }
 

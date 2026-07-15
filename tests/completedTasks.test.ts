@@ -3,7 +3,7 @@ import { setProjection } from "../src/geo/coords";
 import type { Meters } from "../src/geo/coords";
 import { newGame } from "../src/state/saveState";
 import type { Field, SaveState } from "../src/state/saveState";
-import { ensureAgents, enqueueTask, tickTasks, buyImplement } from "../src/sim/tasks";
+import { ensureAgents, enqueueTask, tickTasks, buyImplement, appendCompletedTask } from "../src/sim/tasks";
 import { tickFarming } from "../src/sim/farming";
 import { minutesPerMonth } from "../src/sim/calendar";
 import { areaAcres } from "../src/geo/geometry";
@@ -42,6 +42,7 @@ describe("completed-task log (maintainer request, 2026-07-14 — Work Queue 'Com
     expect(log.length).toBe(1);
     expect(log[0]!.type).toBe("plow");
     expect(log[0]!.fieldId).toBe("field-1");
+    expect(log[0]!.agentName).toBeTruthy(); // which machine did the work
     expect(log[0]!.acres).toBeCloseTo(ACRES, 0);
     expect(log[0]!.costPaid).toBe(task.costPaid);
     expect(log[0]!.tons).toBeUndefined();
@@ -63,5 +64,20 @@ describe("completed-task log (maintainer request, 2026-07-14 — Work Queue 'Com
     expect(bale).toBeDefined();
     expect(bale!.bales).toBeGreaterThan(0);
     expect(bale!.tons).toBeCloseTo(bale!.bales! * gameConfig.forage.baleTons, 5);
+  });
+
+  it("appendCompletedTask logs a sale (no field/agent) and caps the log at 200 entries", () => {
+    const save = newGame();
+    appendCompletedTask(save, { id: "sale-1", type: "sellGrain", crop: "corn", label: "Corn", tons: 10, revenue: 1500, completedAt: 0 });
+    expect(save.completedTasks!.length).toBe(1);
+    expect(save.completedTasks![0]!.costPaid).toBeUndefined();
+    expect(save.completedTasks![0]!.revenue).toBe(1500);
+
+    for (let i = 0; i < 250; i++) {
+      appendCompletedTask(save, { id: `sale-${i}`, type: "sellBales", label: "Hay", bales: 1, revenue: 65, completedAt: i });
+    }
+    expect(save.completedTasks!.length).toBe(200);
+    // Oldest entries were dropped — the very first sale is long gone.
+    expect(save.completedTasks!.some((t) => t.id === "sale-1")).toBe(false);
   });
 });

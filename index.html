@@ -505,7 +505,7 @@
       }
       #queuepanel h2 { margin: 0 0 8px; font-size: 16px; }
       #queuepanel .qp-sub {
-        font-size: 11px; font-weight: 700; color: #8a7658;
+        font-size: 12px; font-weight: 700; color: #8a7658;
         text-transform: uppercase; letter-spacing: 0.04em; margin: 10px 0 4px;
       }
       .queue-row {
@@ -515,22 +515,25 @@
       }
       .queue-row .icon { font-size: 32px; line-height: 1; display: inline-flex; align-items: center; flex-shrink: 0; }
       .qr-info { flex: 1; min-width: 0; }
-      .qr-name { font-weight: 700; font-size: 13px; }
-      .qr-sub { font-size: 11px; color: #8a7658; }
+      .qr-name { font-weight: 700; font-size: 14px; }
+      .qr-sub { font-size: 12px; color: #8a7658; }
+      .qr-machine { font-size: 12px; color: var(--ink); font-style: italic; margin-top: 1px; }
+      .amt-pos { color: var(--green-dark); font-weight: 700; }
+      .amt-neg { color: var(--red); font-weight: 700; }
       .queue-row.active { border-color: var(--green-dark); }
       .queue-row.warn { border-color: var(--red); background: rgba(199, 81, 70, 0.08); }
       .queue-row.queued { cursor: grab; }
       .queue-row.queued.dragging { opacity: 0.4; }
       .queue-row.queued.drag-over { border-color: var(--green-dark); border-style: dashed; }
-      .queue-row.completed { opacity: 0.75; border-style: dashed; padding: 4px 9px; }
-      .queue-row.completed .icon { font-size: 16px; }
-      .queue-row.completed .qr-name { font-size: 12px; }
+      .queue-row.completed { opacity: 0.8; border-style: dashed; padding: 5px 9px; }
+      .queue-row.completed .icon { font-size: 18px; }
+      .queue-row.completed .qr-name { font-size: 13px; }
       .qr-cancel {
         border: none; background: none; padding: 0 2px; font-size: 13px;
         color: #8a7658; line-height: 1.4;
       }
       .qr-cancel:hover { color: var(--red); background: none; }
-      .queue-empty { font-size: 12px; color: #8a7658; padding: 6px 2px; }
+      .queue-empty { font-size: 13px; color: #8a7658; padding: 6px 2px; }
       .queue-tail { height: 10px; }
       .queue-tail.drag-over { border: 1.5px dashed var(--green-dark); border-radius: 8px; }
       #queuepanel .progress { height: 7px; margin: 4px 0 1px; }
@@ -549,11 +552,11 @@
         display: inline-flex; align-items: center; flex-shrink: 0; line-height: 1;
       }
       .qr-impl .impl-body { flex: 1; min-width: 0; }
-      .qr-impl .impl-name { font-size: 11px; font-weight: 700; color: var(--ink); margin-top: 2px; }
-      .qr-impl .impl-detail { font-size: 10.5px; color: #8a7658; }
+      .qr-impl .impl-name { font-size: 12px; font-weight: 700; color: var(--ink); margin-top: 2px; }
+      .qr-impl .impl-detail { font-size: 11.5px; color: #8a7658; }
       .impl-fillrow { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
       .impl-fill {
-        position: relative; flex: 1; height: 15px; border-radius: 999px; overflow: hidden;
+        position: relative; flex: 1; height: 16px; border-radius: 999px; overflow: hidden;
         background: var(--cream); border: 1.5px solid var(--wood);
       }
       .impl-fill-bar {
@@ -562,10 +565,10 @@
       }
       .impl-fill-label {
         position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-        font-size: 10px; font-weight: 700; color: var(--wood-dark);
+        font-size: 11px; font-weight: 700; color: var(--wood-dark);
         text-shadow: 0 1px 0 rgba(255,255,255,0.55);
       }
-      .impl-total { flex-shrink: 0; font-size: 10px; font-weight: 700; color: #8a7658; }
+      .impl-total { flex-shrink: 0; font-size: 11px; font-weight: 700; color: #8a7658; }
 
       /* Agent dots on the map (brief §9 "GPS dots", emoji edition). */
       .agent-dot {

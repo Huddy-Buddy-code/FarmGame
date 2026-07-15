@@ -68,6 +68,33 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, Completed section: sales + machine name + readability)
+
+- **Sales now log to the same Completed feed**: selling grain (Inventory),
+  selling all bales of a product (Inventory), and selling one field's bales
+  (field panel) each push a `sellGrain`/`sellBales` record via the new
+  `appendCompletedTask` export (`sim/tasks.ts`) — done directly in `main.ts`
+  (`logSale` helper) since a sale isn't a `FarmTask`, `economy.ts` stays a
+  pure sell function. Records carry `revenue` (no `costPaid`) and a display
+  `label` (crop or bale-product name) since a bulk bale sale isn't tied to one
+  field. `CompletedTask.type` widened to `TaskType | "sellGrain" | "sellBales"`,
+  `fieldId`/`acres`/`costPaid` now optional to fit sale-shaped records.
+- **Machine name shown on completed task rows**: `recordCompletion` now takes
+  the `Agent` and stores `agentName`; the completed row renders it under the
+  title (`.qr-machine`, italic).
+- **Green income / red expense**: completed rows color `-$cost` red
+  (`.amt-neg`) and `+$revenue` green (`.amt-pos`), reusing the existing
+  `--red`/`--green-dark` tokens.
+- **Readability pass**: bumped Work Queue text sizes (task title 13→14px, sub
+  11→12px, section headers 11→12px, implement name/detail/fill-label ~1px
+  each) and the implement icon (`IMPLEMENT_QUEUE_ICON_PX` 30→42).
+- 1 new test (`appendCompletedTask` logs a sale shape + caps at 200 entries)
+  plus an `agentName` assertion added to the existing plow test. 186/186
+  passing, typecheck clean.
+- **UX needs eyes** (no Browser Preview): the sale rows' wording/colors, the
+  machine-name line, and whether the larger text/icons still fit the panel
+  width without wrapping awkwardly.
+
 ## Latest changes (2026-07-14, Work Queue "Completed" section + baler fill-bar sync fix)
 
 - **Baler fill-bar desync fix**: the Work Queue's dirty-check key (`refreshQueuePanel`)

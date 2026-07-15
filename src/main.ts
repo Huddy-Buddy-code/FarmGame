@@ -58,6 +58,7 @@ import {
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
   reorderTask, estimateTaskHours, forageDue, defaultPlan,
   harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
+  appendCompletedTask,
 } from "./sim/tasks";
 import { buildRoadNetwork } from "./sim/roadNet";
 import type { RoadNetwork } from "./sim/roadNet";
@@ -704,7 +705,7 @@ function implementInfoLines(kind: ImplementKind, size: EquipmentSize): { name: s
   return { name, detail: `${gameConfig.equipment[kind][size].widthFt} ft Working Width` };
 }
 
-const IMPLEMENT_QUEUE_ICON_PX = 30;
+const IMPLEMENT_QUEUE_ICON_PX = 42;
 
 /**
  * The IMPLEMENT row for an active task's Work Queue box (maintainer request,
@@ -965,26 +966,49 @@ const TASK_PAST_VERB: Record<TaskType, string> = {
   unloadHarvester: "Hauled",
 };
 
-/** One compact, non-interactive row per finished job — sized like a queued
- * row but with no icon/progress bar, just what it produced. */
+/** One compact, non-interactive row per finished job OR sale — sized like a
+ * queued row but with no icon/progress bar, just what it produced. */
 function buildCompletedRow(ct: CompletedTask): HTMLElement {
-  const verb = TASK_PAST_VERB[ct.type] ?? cap(ct.type);
-  const name = ct.type === "plant" && ct.crop ? `${verb} ${gameConfig.crops[ct.crop].name}` : verb;
+  let icon: string;
+  let name: string;
+  if (ct.type === "sellGrain" || ct.type === "sellBales") {
+    icon = "💰";
+    const label = ct.label ?? (ct.crop ? gameConfig.crops[ct.crop].name : "Product");
+    name = `Sold ${label}` + (ct.fieldId ? ` · ${prettyId(ct.fieldId)}` : "");
+  } else {
+    icon = "✅";
+    const verb = TASK_PAST_VERB[ct.type] ?? cap(ct.type);
+    const field = prettyId(ct.fieldId ?? "");
+    name = ct.type === "plant" && ct.crop ? `${verb} ${gameConfig.crops[ct.crop].name} · ${field}` : `${verb} · ${field}`;
+  }
 
-  const stats: string[] = [`${ct.acres.toFixed(0)} ac`];
-  if (ct.costPaid > 0) stats.push(`$${Math.round(ct.costPaid).toLocaleString()} spent`);
+  const stats: string[] = [];
+  if (ct.acres !== undefined) stats.push(`${ct.acres.toFixed(0)} ac`);
   if (ct.bales !== undefined) stats.push(`${ct.bales} bale${ct.bales === 1 ? "" : "s"}`);
   if (ct.tons !== undefined) stats.push(`${ct.tons.toFixed(1)} t`);
+  if (ct.costPaid !== undefined && ct.costPaid > 0) stats.push(`<span class="amt-neg">-$${Math.round(ct.costPaid).toLocaleString()}</span>`);
+  if (ct.revenue !== undefined && ct.revenue > 0) stats.push(`<span class="amt-pos">+$${Math.round(ct.revenue).toLocaleString()}</span>`);
 
   const row = document.createElement("div");
   row.className = "queue-row completed";
   row.innerHTML = `
-    <span class="icon">✅</span>
+    <span class="icon">${icon}</span>
     <span class="qr-info">
-      <div class="qr-name">${name} · ${prettyId(ct.fieldId)}</div>
+      <div class="qr-name">${name}</div>
+      ${ct.agentName ? `<div class="qr-machine">${ct.agentName}</div>` : ""}
       <div class="qr-sub">${stats.join(" · ")}</div>
     </span>`;
   return row;
+}
+
+/** Log a grain/bale sale into the same Completed log as finished field-work
+ * tasks (maintainer request, 2026-07-14) — a sale isn't a `FarmTask`, so it's
+ * recorded directly here rather than via `sim/tasks.ts`'s completion path. */
+let saleLogSeq = 0;
+function logSale(type: "sellGrain" | "sellBales", entry: Omit<CompletedTask, "id" | "type" | "completedAt">): void {
+  appendCompletedTask(save, { id: `sale-${++saleLogSeq}`, type, completedAt: clock.time(), ...entry });
+  lastQueueKey = " init";
+  refreshQueuePanel();
 }
 
 function cap(s: string): string {
@@ -1084,6 +1108,7 @@ function refreshInventory() {
     btn.addEventListener("click", () => {
       const { tons: sold, revenue } = sellGrain(save, cropId, Infinity);
       if (sold <= 0) return;
+      logSale("sellGrain", { crop: cropId, label: cfg.name, tons: sold, revenue });
       updateHud();
       refreshInventory();
       toast(`💰 Sold ${sold.toFixed(1)} t of ${cfg.name.toLowerCase()} for $${revenue.toLocaleString()}`);
@@ -1115,6 +1140,7 @@ function refreshInventory() {
       btn.addEventListener("click", () => {
         const { bales: sold, revenue } = sellBalesOfProduct(save, stock.product);
         if (sold <= 0) return;
+        logSale("sellBales", { label: stock.name, bales: sold, tons: sold * gameConfig.forage.baleTons, revenue });
         updateHud();
         refreshInventory();
         updateBaleMarkers();
@@ -2554,6 +2580,7 @@ function refreshFieldPanel(force = false) {
     btn.addEventListener("click", () => {
       const { bales: sold, revenue } = sellBales(save, field);
       if (sold <= 0) return;
+      logSale("sellBales", { fieldId: field.id, label: product.name, bales: sold, tons: sold * gameConfig.forage.baleTons, revenue });
       updateHud();
       refreshFieldPanel(true);
       updateBaleMarkers();

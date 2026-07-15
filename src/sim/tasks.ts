@@ -23,7 +23,7 @@
 import { gameConfig, SIZE_RANK, FEET_TO_METERS } from "../config/gameConfig";
 import type { CropId, EquipmentSize } from "../config/gameConfig";
 import type { SimTime } from "./clock";
-import type { SaveState, Field, FieldStatus, FarmTask, Agent, Implement, TaskType, FieldPlan } from "../state/saveState";
+import type { SaveState, Field, FieldStatus, FarmTask, Agent, Implement, TaskType, FieldPlan, CompletedTask } from "../state/saveState";
 import { dateOf } from "./calendar";
 import { areaAcres, pointInPolygon } from "../geo/geometry";
 import type { Meters } from "../geo/coords";
@@ -1319,7 +1319,7 @@ function tickAgent(
         task.doneAcres = task.totalAcres;
         baler.cargoTons = 0;
         completeTask(task, field, now, rand);
-        recordCompletion(save, task, field, now, { tons: totalBales * baleTons, bales: totalBales });
+        recordCompletion(save, task, field, agent, now, { tons: totalBales * baleTons, bales: totalBales });
         changed.push(field);
         events.push({ kind: "finished", task, agent });
         clearTaskRuntime(task.id);
@@ -1411,7 +1411,7 @@ function tickAgent(
         ? task.totalAcres * field.trueYieldTonsPerAcre
         : undefined;
       completeTask(task, field, now, rand);
-      recordCompletion(save, task, field, now, harvestTons !== undefined ? { tons: harvestTons } : {});
+      recordCompletion(save, task, field, agent, now, harvestTons !== undefined ? { tons: harvestTons } : {});
       // A finished rake changes no field STATUS, and its windrows are already on
       // the surface (revealed strip-by-strip as it drove). Forcing a full repaint
       // here would wipe any mulch a concurrent baler has already revealed — so
@@ -1482,6 +1482,15 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
  * UI buckets/prunes by calendar month; this just stops it growing forever. */
 const MAX_COMPLETED_TASKS = 200;
 
+/** Append one record to `save.completedTasks`, capped at `MAX_COMPLETED_TASKS`
+ * — shared by task completions (below) and sale records (main.ts, since a
+ * sale isn't a `FarmTask` at all — it's a direct player action in economy.ts). */
+export function appendCompletedTask(save: SaveState, entry: CompletedTask): void {
+  const log = (save.completedTasks ??= []);
+  log.push(entry);
+  if (log.length > MAX_COMPLETED_TASKS) log.splice(0, log.length - MAX_COMPLETED_TASKS);
+}
+
 /** Snapshot a task that's about to be discarded into `save.completedTasks`,
  * since `FarmTask` itself (doneAcres, costPaid) is spliced out the instant
  * the work finishes and nothing else records what happened. */
@@ -1489,21 +1498,21 @@ function recordCompletion(
   save: SaveState,
   task: FarmTask,
   field: Field,
+  agent: Agent,
   now: SimTime,
   extra: { tons?: number; bales?: number } = {},
 ): void {
-  const log = (save.completedTasks ??= []);
-  log.push({
+  appendCompletedTask(save, {
     id: task.id,
     type: task.type,
     fieldId: field.id,
     crop: task.crop,
     acres: task.totalAcres,
     costPaid: task.costPaid,
+    agentName: agent.name,
     completedAt: now,
     ...extra,
   });
-  if (log.length > MAX_COMPLETED_TASKS) log.splice(0, log.length - MAX_COMPLETED_TASKS);
 }
 
 /** The mutually-exclusive field-lifecycle task types (§10): only one of these
