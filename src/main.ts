@@ -1955,11 +1955,19 @@ function wirePersistence() {
 // in case they're wanted back.
 // ---------------------------------------------------------------------------
 /** 1× = literal real time: 1 sim-minute per real minute. Multiples of this base
- * give the other speeds their exact "1 real second = N game time" meaning:
- *   12×   → 1 real hour = 1 game day (branded "1 hr = 1 day")
- *   60×   → 1 real second = 1 game minute (branded "1 hr = 1 month")
- *   720×  → 1 real hour = 1 game year (branded "1 hr = 1 year")
+ * give the other speeds their exact "1 real hour = N game time" meaning —
+ * verified 2026-07-14 against the current calendar (12h day, 3 days/month):
+ *   12×  → 1 real hour = 1 game day EXACTLY (day length is a fixed 12h, not a
+ *          knob, so this one holds regardless of the days-per-month setting)
+ *   36×  → 1 real hour = 1 game month, AT THE 3-DAYS/MONTH DEFAULT (branded
+ *          "1 hr = 1 month"; a save carrying an old, pre-2026-07-14
+ *          days-per-month value will drift off this)
+ *   432× → 1 real hour = 1 game year, same 3-days/month caveat as above
+ *          (branded "1 hr = 1 year")
  *   3600× → 1 real second = 1 game hour (hidden)
+ * (60× and 720× were the previous month/year picks, calibrated for the old
+ * 24h-day/30-day-month calendar — both overshot by 5/3× once the day
+ * shrank to 12h and the default month to 3 days; replaced with 36×/432×.)
  */
 const BASE_COMPRESSION = 1 / 60;
 
@@ -1968,8 +1976,8 @@ function wireTimeControls() {
     ["spd-pause", null],
     ["spd-1", 1],
     ["spd-12", 12],
-    ["spd-60", 60],
-    ["spd-720", 720],
+    ["spd-36", 36],
+    ["spd-432", 432],
     ["spd-3600", 3600],
   ];
   for (const [id, mult] of speeds) {
@@ -2050,7 +2058,7 @@ function runMontage(target: number) {
   requestAnimationFrame(step);
 }
 
-const SPEED_MULT: Record<string, number> = { "spd-1": 1, "spd-12": 12, "spd-60": 60, "spd-720": 720, "spd-3600": 3600 };
+const SPEED_MULT: Record<string, number> = { "spd-1": 1, "spd-12": 12, "spd-36": 36, "spd-432": 432, "spd-3600": 3600 };
 
 /** Put compression + play state back to whatever the speed buttons say. */
 function restoreSpeed(paused: boolean) {

@@ -68,6 +68,26 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, fixed month/year speed tiers — they overshot)
+
+- Maintainer asked to double-check the speed-tier descriptions after the
+  12-hour-day + 3-day-month changes. Math check: 12× is EXACTLY "1 hr = 1
+  day" unconditionally (day length is a fixed constant, not a knob) — no
+  issue. But 60×/720× (labeled "1 hr = 1 month" / "1 hr = 1 year") were
+  calibrated for the OLD 24h-day/30-day-month calendar; under the new 12h
+  day + 3-day-month default they actually deliver ~1.67 months / ~1.67
+  years per real hour — a 5/3× overshoot, not what the label promises.
+- Replaced 60×→36× and 720×→432× (ids `spd-36`/`spd-432`), which land
+  exactly on "1 hr = 1 month" / "1 hr = 1 year" at the 3-days/month default.
+  Updated `SPEED_MULT` (restoreSpeed) and the tooltip text (now notes "at 3
+  days/month" since a save carrying a pre-2026-07-14 days-per-month value —
+  the dropdown is hidden but old saves still load their own value — will
+  drift off this).
+- 188/188 passing, typecheck clean.
+- **UX needs eyes** (no Browser Preview): confirm the "1 hr = 1 month" /
+  "1 hr = 1 year" buttons now feel right (a real hour of Real-Time/12×/36×/
+  432× play advancing roughly a day/month/year respectively).
+
 ## Latest changes (2026-07-14, 12-hour workday calendar + speed-tooltip ×s + 3-day months)
 
 - **Confirmed with maintainer** (not a cosmetic-only change): a game "day" is
