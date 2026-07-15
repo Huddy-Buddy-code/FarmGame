@@ -68,6 +68,34 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, live hour/month chips replace the sun/moon icon)
+
+- Day-bar and season-bar markers now show LIVE, rounded-to-the-unit text
+  chips instead of an emoji: the day-bar marker reads the current clock hour
+  ("6am"…"6pm", `hourLabel()` in `main.ts`, rounds `dayFraction` to the
+  nearest hour across the 6am–6pm workday) floated just above the bar; a new
+  `#month-marker` chip on the season bar reads the current month ("Jun.",
+  "Oct.", via `MONTH_SHORT`) floated just below it, riding the same
+  `yearFraction` position as the existing tick-line year-marker. Both are
+  small pill-styled chips (cream bg, wood border) — no sun/moon emoji left
+  anywhere.
+- Made room per maintainer's "spread them out" note: `#yearbar`'s top
+  padding grew 3px→20px (room for the hour chip above the day-bar) and the
+  season `.labels` row's margin-top grew 1px→17px (room for the month chip
+  below the season bar) — net +33px panel height, so `#timebar` (the speed
+  buttons, stacked right below) moved from `top:117px` to `top:150px` to
+  stay flush against the taller year bar.
+- No sim-logic changes — pure display; 188/188 passing, typecheck clean.
+- Accidentally reached for the (banned-in-this-project) Browser Preview tool
+  out of habit while eyeballing a CSS layout change — caught it before
+  navigating/screenshotting and stopped the server immediately. Verified via
+  typecheck+tests and careful reading only, per this repo's process rule.
+- **UX needs eyes** (no Browser Preview): whether the two new floating
+  chips read clearly at the shared header width, and whether +33px of
+  vertical panel height crowds anything below it (the Work Queue panel on
+  the right sits independently at `top:170px` and wasn't touched — worth
+  confirming it still clears the taller year bar visually).
+
 ## Latest changes (2026-07-14, fixed month/year speed tiers — they overshot)
 
 - Maintainer asked to double-check the speed-tier descriptions after the

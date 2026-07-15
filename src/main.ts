@@ -1041,14 +1041,28 @@ function updateHud() {
   // The calendar grid has a 110px label column; the lanes take the rest.
   const calNow = document.getElementById("cal-now");
   if (calNow) calNow.style.left = `calc(${(110 * (1 - f)).toFixed(1)}px + ${(f * 100).toFixed(2)}%)`;
+  // Live current-month chip riding the same position (maintainer request,
+  // 2026-07-14) — "Jun.", "Oct.", etc.
+  const monthMarker = $("month-marker");
+  monthMarker.style.left = `${(f * 100).toFixed(2)}%`;
+  monthMarker.textContent = `${MONTH_SHORT[dateOf(clock.time()).month]}.`;
 
-  // Day-position marker: a sun token riding the workday track (6am = 0, 6pm =
-  // 1). No night is modeled anymore (maintainer request, 2026-07-14) — the
-  // game day IS the 12-hour daylight operating window, so it's always the sun.
+  // Day-position marker: a live clock-time chip riding the workday track
+  // (6am = 0, 6pm = 1). No night is modeled (maintainer request, 2026-07-14)
+  // — replaced the old always-on sun emoji with the actual rounded hour.
   const df = dayFraction(clock.time());
   const dayMarker = $("day-marker");
   dayMarker.style.left = `${(df * 100).toFixed(2)}%`;
-  dayMarker.textContent = "☀️";
+  dayMarker.textContent = hourLabel(df);
+}
+
+/** Rounded-to-the-hour 12-hour clock label for a workday fraction (0 = 6am,
+ * 1 = 6pm) — "6am", "10am", "12pm", "5pm", etc. */
+function hourLabel(df: number): string {
+  const hour = Math.round(6 + df * 12); // 6..18
+  const period = hour < 12 ? "am" : "pm";
+  const h12 = hour % 12 === 0 ? 12 : hour % 12;
+  return `${h12}${period}`;
 }
 
 /** 0..1 through the campaign's display year, which runs Mar 1 → end of Feb. */

@@ -46,7 +46,7 @@
       /* ---------- Year bar (position in the year, season-themed) ---------- */
       #yearbar {
         position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
-        z-index: 19; width: var(--hud-w); box-sizing: border-box; padding: 3px 10px 5px;
+        z-index: 19; width: var(--hud-w); box-sizing: border-box; padding: 20px 10px 5px;
         border-radius: 10px;
       }
       #yearbar .daybar {
@@ -61,11 +61,16 @@
           #cdeafc 40%, #dff2ff 50%, #cdeafc 60%,
           #ffd9a8 88%, #e7a982 100%);
       }
-      /* Sun/moon token that rides the day track (emoji set in JS). */
+      /* Live clock-time chip riding the day track, floated ABOVE the bar
+         (maintainer request, 2026-07-14: replaced the sun/moon emoji with the
+         actual rounded hour — "10am", "5pm" — since the bar is all-daylight
+         now anyway and a sun icon the whole way across said nothing). */
       #yearbar .daybar .marker {
-        position: absolute; top: 50%; transform: translate(-50%, -50%);
-        font-size: 13px; line-height: 1; pointer-events: none;
-        filter: drop-shadow(0 1px 1.5px rgba(40, 30, 10, 0.5));
+        position: absolute; bottom: 100%; top: auto; transform: translateX(-50%);
+        margin-bottom: 4px; white-space: nowrap; pointer-events: none;
+        font-size: 10.5px; font-weight: 700; color: var(--wood-dark);
+        background: var(--cream); border: 1.5px solid var(--wood); border-radius: 6px;
+        padding: 1px 5px; box-shadow: var(--shadow);
       }
       #yearbar .seasons { display: flex; height: 10px; border-radius: 999px; overflow: hidden; border: 1.5px solid var(--wood); position: relative; }
       #yearbar .seg { flex: 1; }
@@ -77,12 +82,21 @@
         position: absolute; top: -3px; bottom: -3px; width: 3px; border-radius: 2px;
         background: var(--ink); box-shadow: 0 0 0 1.5px var(--cream);
       }
-      #yearbar .labels { display: flex; font-size: 11px; margin-top: 1px; }
+      /* Live current-month chip riding the year track, floated BELOW the bar
+         (maintainer request, 2026-07-14) — same pill style as the hour chip. */
+      #yearbar .month-chip {
+        position: absolute; top: 100%; transform: translateX(-50%);
+        margin-top: 4px; white-space: nowrap; pointer-events: none;
+        font-size: 10.5px; font-weight: 700; color: var(--wood-dark);
+        background: var(--cream); border: 1.5px solid var(--wood); border-radius: 6px;
+        padding: 1px 5px; box-shadow: var(--shadow);
+      }
+      #yearbar .labels { display: flex; font-size: 11px; margin-top: 17px; }
       #yearbar .labels span { flex: 1; text-align: center; }
 
       /* ---------- Time controls ---------- */
       #timebar {
-        position: absolute; top: 117px; left: 50%; transform: translateX(-50%);
+        position: absolute; top: 150px; left: 50%; transform: translateX(-50%);
         z-index: 20; display: flex; align-items: center; justify-content: center;
         gap: 6px; row-gap: 4px; flex-wrap: wrap;
         padding: 6px 10px; width: var(--hud-w); box-sizing: border-box;
@@ -682,6 +696,7 @@
         <div class="seg spring"></div><div class="seg summer"></div>
         <div class="seg fall"></div><div class="seg winter"></div>
         <div class="marker" id="year-marker"></div>
+        <div class="month-chip" id="month-marker"></div>
       </div>
       <div class="labels"><span>🌱 Spring</span><span>☀️ Summer</span><span>🍂 Fall</span><span>❄️ Winter</span></div>
     </div>
