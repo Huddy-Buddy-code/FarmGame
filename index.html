@@ -61,21 +61,6 @@
           #cdeafc 40%, #dff2ff 50%, #cdeafc 60%,
           #ffd9a8 88%, #e7a982 100%);
       }
-      /* Live clock-time chip riding the day track, floated ABOVE the bar
-         (maintainer request, 2026-07-14: replaced the sun/moon emoji with the
-         actual rounded hour — "10am", "5pm" — since the bar is all-daylight
-         now anyway and a sun icon the whole way across said nothing). */
-      #yearbar .daybar .marker {
-        position: absolute; bottom: 100%; top: auto; transform: translateX(-50%);
-        margin-bottom: 4px; white-space: nowrap; pointer-events: none;
-        font-size: 12px; font-weight: 700; color: var(--wood-dark);
-        /* Pin line-height: the body's inherited 1.45 made the pill taller than
-           the room reserved for it above/below the bars, so its top crossed
-           #yearbar's own panel border and read as a cut-off label. */
-        line-height: 1.35;
-        background: var(--cream); border: 1.5px solid var(--wood); border-radius: 8px;
-        padding: 4px 10px; box-shadow: 0 1px 3px rgba(60, 40, 15, 0.3);
-      }
       /* Wraps .seasons (which clips to overflow:hidden for its rounded
          segment corners) so the month-chip below can be positioned outside
          that box without being clipped along with it. */
@@ -86,15 +71,21 @@
       #yearbar .seg.summer { background: #f5c95d; }
       #yearbar .seg.fall   { background: #d98e4a; }
       #yearbar .seg.winter { background: #bcd8e8; }
+      /* The thin tick line on the season track. NOTE the `width: 3px` — the
+         hour chip below must NOT reuse this `.marker` class, or that width
+         squeezes the pill to a 3px sliver that its own text spills out of
+         (the bug behind several rounds of "the time chip is cut off"). */
       #yearbar .marker {
         position: absolute; top: -3px; bottom: -3px; width: 3px; border-radius: 2px;
         background: var(--ink); box-shadow: 0 0 0 1.5px var(--cream);
       }
-      /* Live current-month chip riding the year track, floated BELOW the bar
-         (maintainer request, 2026-07-14) — same pill style as the hour chip. */
-      #yearbar .month-chip {
-        position: absolute; top: 100%; transform: translateX(-50%);
-        margin-top: 4px; white-space: nowrap; pointer-events: none;
+      /* Live text chips riding the two tracks (maintainer request, 2026-07-14):
+         the rounded hour ("1pm") above the day bar, the current month ("Jul.")
+         below the season bar. Width is intentionally left to the content —
+         `placeChip` in main.ts measures the rendered width to clamp them. */
+      #yearbar .hour-chip, #yearbar .month-chip {
+        position: absolute; transform: translateX(-50%);
+        white-space: nowrap; pointer-events: none;
         font-size: 12px; font-weight: 700; color: var(--wood-dark);
         /* Pin line-height: the body's inherited 1.45 made the pill taller than
            the room reserved for it above/below the bars, so its top crossed
@@ -103,6 +94,8 @@
         background: var(--cream); border: 1.5px solid var(--wood); border-radius: 8px;
         padding: 4px 10px; box-shadow: 0 1px 3px rgba(60, 40, 15, 0.3);
       }
+      #yearbar .hour-chip { bottom: 100%; margin-bottom: 4px; }
+      #yearbar .month-chip { top: 100%; margin-top: 4px; }
       #yearbar .labels { display: flex; font-size: 11px; margin-top: 34px; }
       #yearbar .labels span { flex: 1; text-align: center; }
 
@@ -702,7 +695,7 @@
 
     <div id="yearbar" class="panel">
       <div class="daybar" title="The workday: 6am – 6pm">
-        <div class="marker" id="day-marker"></div>
+        <div class="hour-chip" id="day-marker"></div>
       </div>
       <div class="season-track">
         <div class="seasons">

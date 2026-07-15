@@ -68,6 +68,38 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, ROOT CAUSE of the "time chip is cut off" saga: a CSS class collision)
+
+- Real cause, after several wrong guesses (see the three entries below — all
+  treated it as a sizing/spacing problem and none of them fixed it). The hour
+  chip was `<div class="marker" id="day-marker">`, reusing the SAME class as
+  the season track's 3px tick line. `#yearbar .marker` sets `width: 3px`, and
+  `#yearbar .daybar .marker` (higher specificity, so it won on the props it
+  declared) never declared a width — so `width: 3px` leaked straight in. With
+  `white-space: nowrap`, the pill was a 3px-wide box that its own text spilled
+  out of. The chip was never "too small": it was 3px wide by inheritance.
+- Explains every symptom, including the ones that made the earlier fixes look
+  arbitrary: raising font-size made the spill WORSE (more text, same 3px core);
+  raising padding only grew a frame around the 3px core so it half-helped; and
+  the month chip was ALWAYS fine in every screenshot because `.month-chip` is a
+  different class that never touched the leak. The `marker` class was a leftover
+  from when this was a sun/moon emoji — with no background/border, a 3px box
+  with overflowing content still looked centred, so the bug hid until the pill
+  got a visible outline.
+- It also silently broke the previous commit's clamp: `placeChip` measured
+  `offsetWidth` (26px — the 3px box + padding/border) while the text visually
+  extended well past it, so it clamped against a phantom width. That fix should
+  actually work now that the pill's box matches its text.
+- Fix is structural, not another nudge: renamed the chip's class to `hour-chip`
+  so it can't inherit the tick's rules by construction, merged the two
+  now-identical chip rules into one `#yearbar .hour-chip, #yearbar .month-chip`
+  block (position deltas split into one-liners), and left a comment on
+  `#yearbar .marker` warning that its `width: 3px` is why a chip must not reuse
+  that class. `main.ts` addresses both chips by id, so it needed no change.
+- 188/188 passing, typecheck clean.
+- **UX needs eyes** (no Browser Preview): the hour pill should finally wrap its
+  text properly — and with a real width, check the 6am/6pm clamp too.
+
 ## Latest changes (2026-07-14, clamp hour/month chips so they stop overhanging the panel)
 
 - The long-running "chip looks cut off" problem the maintainer had been
