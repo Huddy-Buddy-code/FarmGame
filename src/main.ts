@@ -988,8 +988,8 @@ function buildCompletedRow(ct: CompletedTask): HTMLElement {
   if (ct.acres !== undefined) stats.push(`${ct.acres.toFixed(0)} ac`);
   if (ct.bales !== undefined) stats.push(`${ct.bales} bale${ct.bales === 1 ? "" : "s"}`);
   if (ct.tons !== undefined) stats.push(`${ct.tons.toFixed(1)} t`);
-  if (ct.costPaid !== undefined && ct.costPaid > 0) stats.push(`<span class="amt-neg">-$${Math.round(ct.costPaid).toLocaleString()}</span>`);
-  if (ct.revenue !== undefined && ct.revenue > 0) stats.push(`<span class="amt-pos">+$${Math.round(ct.revenue).toLocaleString()}</span>`);
+  if (ct.costPaid !== undefined && ct.costPaid > 0) stats.push(`<span class="amt-neg">-$${round100(ct.costPaid).toLocaleString()}</span>`);
+  if (ct.revenue !== undefined && ct.revenue > 0) stats.push(`<span class="amt-pos">+$${round100(ct.revenue).toLocaleString()}</span>`);
 
   const row = document.createElement("div");
   row.className = "queue-row completed";
@@ -1017,13 +1017,21 @@ function cap(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/** Round to the nearest $100 for DISPLAY only (maintainer request, 2026-07-14
+ * — the Work Queue, Finance, and header panels all read noisy to the dollar;
+ * the underlying save-state numbers stay exact, only the on-screen text
+ * coarsens). */
+function round100(n: number): number {
+  return Math.round(n / 100) * 100;
+}
+
 // ---------------------------------------------------------------------------
 // HUD
 // ---------------------------------------------------------------------------
 function updateHud() {
   $("hud-date").textContent = formatDate(clock.time());
-  $("hud-cash").textContent = "$" + Math.round(save.money).toLocaleString();
-  $("hud-networth").textContent = "$" + Math.round(netWorth(save).total).toLocaleString();
+  $("hud-cash").textContent = "$" + round100(save.money).toLocaleString();
+  $("hud-networth").textContent = "$" + round100(netWorth(save).total).toLocaleString();
   const totalGrain = Object.values(save.grain).reduce((sum, t) => sum + t, 0);
   $("hud-grain").textContent = totalGrain.toFixed(1) + " t";
 
@@ -1190,9 +1198,10 @@ function loanAmtLabel(n: number): string {
   return n % 1000 === 0 ? `$${(n / 1000).toFixed(0)}k` : `$${n.toLocaleString()}`;
 }
 
-/** $-formatting for cashflow cells: rounded, parenthesized-red handled in CSS. */
+/** $-formatting for cashflow cells: rounded to the nearest $100, parenthesized-
+ * red handled in CSS. */
 function cfAmount(n: number): string {
-  const r = Math.round(n);
+  const r = round100(n);
   if (r === 0) return "—";
   return (r < 0 ? "−$" : "$") + Math.abs(r).toLocaleString();
 }
@@ -1224,7 +1233,7 @@ function refreshFinanceTab(force = false) {
   openLine.innerHTML = `
     <span class="ll-name">Yr ${save.finance.openYear} · open</span>
     <span class="ll-sub">${pending > 0
-      ? `$${pending.toLocaleString()} pending — locks in at ${gameConfig.loan.ratePercent}% / ${gameConfig.loan.termMonths / 12} yr on Jan 1`
+      ? `$${round100(pending).toLocaleString()} pending — locks in at ${gameConfig.loan.ratePercent}% / ${gameConfig.loan.termMonths / 12} yr on Jan 1`
       : "Nothing borrowed this year"}</span>`;
   const borrowBtn = document.createElement("button");
   borrowBtn.className = "ll-btn borrow";
@@ -1260,7 +1269,7 @@ function refreshFinanceTab(force = false) {
     line.className = "loan-line";
     line.innerHTML = `
       <span class="ll-name">Yr ${loan.originYear} loan</span>
-      <span class="ll-sub">$${Math.round(loan.principal).toLocaleString()} owed · $${Math.round(loan.monthlyPayment).toLocaleString()}/mo · ${loan.ratePercent}%</span>`;
+      <span class="ll-sub">$${round100(loan.principal).toLocaleString()} owed · $${round100(loan.monthlyPayment).toLocaleString()}/mo · ${loan.ratePercent}%</span>`;
     const payAmount = Math.min(inc, loan.principal);
     const payBtn = document.createElement("button");
     payBtn.className = "ll-btn";

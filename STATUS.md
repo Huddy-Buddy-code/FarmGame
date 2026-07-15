@@ -68,6 +68,22 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, round displayed $ figures to nearest $100)
+
+- New `round100()` display-only helper (`main.ts`) — the underlying save-state
+  numbers stay exact; only on-screen text coarsens. Applied to: HUD header
+  (cash, net worth), Work Queue Completed rows' `-$cost`/`+$revenue`, Finance
+  panel's cashflow table cells (`cfAmount`) and loan lines (pending balance,
+  principal owed, monthly payment). Left EXACT (deliberately not rounded):
+  transactional button labels that promise a specific charge/refund — "Cancel
+  and refund $X", "Pay off $X" — since those are the literal amount that will
+  move, not a summary figure.
+- No logic/tests affected (display formatting only); 186/186 passing,
+  typecheck clean.
+- **UX needs eyes** (no Browser Preview): confirm the rounded figures read
+  right at a glance, especially small completed-task costs (e.g. a $40 fert
+  bill now shows as "—" in the cashflow table, $0 after rounding).
+
 ## Latest changes (2026-07-14, Active/Queued machine name + tighter row spacing)
 
 - **Machine name on Active rows too** (previously Completed-only): `buildQueueRow`
