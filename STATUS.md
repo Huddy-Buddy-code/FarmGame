@@ -68,6 +68,25 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, hour chip cut off — pinned line-height, reserved real room)
+
+- Maintainer: the hour pill was still clipping its own text ("1pm" cut off).
+  Root cause wasn't the pill being too small — it was OVERFLOWING the panel.
+  The chip inherited the body's `font: 14px/1.45`, so at 12px font its line
+  box was 17.4px; add padding + borders + the 4px offset and it needed
+  ~30px above `.daybar`, but `#yearbar` only reserved 27px of top padding.
+  The excess crossed `#yearbar`'s own 2px panel border, reading as a
+  cut-off label.
+- Fixed properly rather than by nudging: pinned `line-height: 1.35` on both
+  chips so their height is predictable instead of inherited from a body rule
+  meant for prose, then reserved room from that measured height —
+  `#yearbar` padding-top 27→36px, `.labels` margin-top 24→34px, and
+  `#timebar` top 164→183px to follow the taller panel. Also bumped chip
+  padding 3px 9px→4px 10px for a bit more breathing room around the text.
+- 188/188 passing, typecheck clean (CSS only).
+- **UX needs eyes** (no Browser Preview): confirm "12pm"/"1pm" now sit fully
+  inside their pill with the panel border clear of it.
+
 ## Latest changes (2026-07-14, hour/month chip was too small — bumped size)
 
 - Maintainer: "the bubble around the time of day, it's too small" — text was
