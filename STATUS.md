@@ -68,6 +68,21 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, Active/Queued machine name + tighter row spacing)
+
+- **Machine name on Active rows too** (previously Completed-only): `buildQueueRow`
+  now prints `agent.name` under the title for active jobs (generic tasks and
+  unloadHarvester), matching the Completed rows' `.qr-machine` styling.
+- **Shorter rows**: trimmed `.queue-row` padding/margin, `.qr-impl`'s
+  margin/padding-top, `.impl-fillrow` margin, and the progress bar's height/
+  margin; tightened `line-height` on name/sub/machine text. Implement icon
+  eased back from 42px to 36px (still bigger than the pre-session 30px) —
+  net effect: noticeably shorter cards without losing the larger-text
+  readability pass from earlier today.
+- 186/186 passing, typecheck clean (no logic changed, styling/markup only).
+- **UX needs eyes** (no Browser Preview): row height/spacing at a glance,
+  especially with 3+ active jobs stacked.
+
 ## Latest changes (2026-07-14, Completed section: sales + machine name + readability)
 
 - **Sales now log to the same Completed feed**: selling grain (Inventory),

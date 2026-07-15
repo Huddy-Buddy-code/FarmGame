@@ -705,7 +705,7 @@ function implementInfoLines(kind: ImplementKind, size: EquipmentSize): { name: s
   return { name, detail: `${gameConfig.equipment[kind][size].widthFt} ft Working Width` };
 }
 
-const IMPLEMENT_QUEUE_ICON_PX = 42;
+const IMPLEMENT_QUEUE_ICON_PX = 36;
 
 /**
  * The IMPLEMENT row for an active task's Work Queue box (maintainer request,
@@ -808,6 +808,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
       ${iconHtml}
       <span class="qr-info">
         <div class="qr-name">Unload Harvester · ${prettyId(task.fieldId)}</div>
+        ${agent ? `<div class="qr-machine">${agent.name}</div>` : ""}
         <div class="qr-sub">${sub}</div>
         ${implementRowHtml(task, agent)}
       </span>`;
@@ -826,6 +827,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
     ${iconHtml}
     <span class="qr-info">
       <div class="qr-name">${cap(taskVerb(task))} · ${prettyId(task.fieldId)}</div>
+      ${agent ? `<div class="qr-machine">${agent.name}</div>` : ""}
       <div class="qr-sub">${sub}</div>
       ${isActive ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
       ${implementRowHtml(task, agent)}

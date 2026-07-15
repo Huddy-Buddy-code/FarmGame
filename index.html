@@ -509,15 +509,15 @@
         text-transform: uppercase; letter-spacing: 0.04em; margin: 10px 0 4px;
       }
       .queue-row {
-        display: flex; align-items: flex-start; gap: 8px;
+        display: flex; align-items: flex-start; gap: 7px;
         background: var(--cream-2); border: 1.5px solid var(--wood);
-        border-radius: 10px; padding: 6px 9px; margin: 5px 0;
+        border-radius: 9px; padding: 5px 8px; margin: 4px 0;
       }
-      .queue-row .icon { font-size: 32px; line-height: 1; display: inline-flex; align-items: center; flex-shrink: 0; }
+      .queue-row .icon { font-size: 30px; line-height: 1; display: inline-flex; align-items: center; flex-shrink: 0; }
       .qr-info { flex: 1; min-width: 0; }
-      .qr-name { font-weight: 700; font-size: 14px; }
-      .qr-sub { font-size: 12px; color: #8a7658; }
-      .qr-machine { font-size: 12px; color: var(--ink); font-style: italic; margin-top: 1px; }
+      .qr-name { font-weight: 700; font-size: 14px; line-height: 1.25; }
+      .qr-sub { font-size: 12px; color: #8a7658; line-height: 1.25; }
+      .qr-machine { font-size: 11.5px; color: var(--ink); font-style: italic; line-height: 1.2; }
       .amt-pos { color: var(--green-dark); font-weight: 700; }
       .amt-neg { color: var(--red); font-weight: 700; }
       .queue-row.active { border-color: var(--green-dark); }
@@ -525,7 +525,7 @@
       .queue-row.queued { cursor: grab; }
       .queue-row.queued.dragging { opacity: 0.4; }
       .queue-row.queued.drag-over { border-color: var(--green-dark); border-style: dashed; }
-      .queue-row.completed { opacity: 0.8; border-style: dashed; padding: 5px 9px; }
+      .queue-row.completed { opacity: 0.8; border-style: dashed; padding: 4px 8px; }
       .queue-row.completed .icon { font-size: 18px; }
       .queue-row.completed .qr-name { font-size: 13px; }
       .qr-cancel {
@@ -536,7 +536,7 @@
       .queue-empty { font-size: 13px; color: #8a7658; padding: 6px 2px; }
       .queue-tail { height: 10px; }
       .queue-tail.drag-over { border: 1.5px dashed var(--green-dark); border-radius: 8px; }
-      #queuepanel .progress { height: 7px; margin: 4px 0 1px; }
+      #queuepanel .progress { height: 6px; margin: 3px 0 1px; }
 
       /* Per-task implement row (maintainer request, 2026-07-13): the tool
          actually doing the work, under the task's name/sub/progress but
@@ -545,16 +545,16 @@
          Combine/Baler/Grain Wagon — a labeled fill bar (current · % on the
          bar itself, total off to the right). */
       .qr-impl {
-        display: flex; align-items: flex-start; gap: 8px; margin-top: 6px;
-        padding-top: 6px; border-top: 1.5px dashed var(--cream-2);
+        display: flex; align-items: flex-start; gap: 7px; margin-top: 4px;
+        padding-top: 4px; border-top: 1.5px dashed var(--cream-2);
       }
       .qr-impl .impl-icon {
         display: inline-flex; align-items: center; flex-shrink: 0; line-height: 1;
       }
       .qr-impl .impl-body { flex: 1; min-width: 0; }
-      .qr-impl .impl-name { font-size: 12px; font-weight: 700; color: var(--ink); margin-top: 2px; }
-      .qr-impl .impl-detail { font-size: 11.5px; color: #8a7658; }
-      .impl-fillrow { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+      .qr-impl .impl-name { font-size: 12px; font-weight: 700; color: var(--ink); line-height: 1.2; }
+      .qr-impl .impl-detail { font-size: 11.5px; color: #8a7658; line-height: 1.2; }
+      .impl-fillrow { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
       .impl-fill {
         position: relative; flex: 1; height: 16px; border-radius: 999px; overflow: hidden;
         background: var(--cream); border: 1.5px solid var(--wood);
