@@ -68,6 +68,34 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, clamp hour/month chips so they stop overhanging the panel)
+
+- The long-running "chip looks cut off" problem the maintainer had been
+  chasing. The chips are centred on their position (`translateX(-50%)`), so
+  an unclamped pill hangs half its own width past the end of its track — and
+  the `#yearbar` panel edge is only ~12px beyond that. NOT an edge case: the
+  day chip hits it every morning at 6am (frac 0) and evening at 6pm (frac 1),
+  and the month chip every March and February.
+- Added `placeChip(chip, text, frac)` in `main.ts`: sets the text first (the
+  clamp needs the chip's final rendered width), then centres it at
+  `frac × trackWidth` clamped to `[half, trackWidth − half]` so the pill
+  always lands fully inside its track. Has a guard for a chip wider than its
+  own track (can't be clamped in — centres instead), and bails when the chip
+  is `display:none` (`offsetParent` null). Replaced both markers' old
+  `style.left = "N%"` assignments.
+- Clamped in JS, not CSS, because it needs the RENDERED width — which depends
+  on the chip's text ("6am" vs "12pm", "May." vs "Sep."), so CSS can't know it.
+  Safe perf-wise: it reads layout, but `updateHud` runs ~2×/s (throttled), not
+  per-frame, and already does heavier work (`netWorth` walks every field/agent/
+  implement each call). Noted in the JSDoc not to call it per-frame.
+- 188/188 passing, typecheck clean. Deliberately did NOT add a unit test: the
+  clamp is a min/max, main.ts isn't importable from the DOM-less test env, and
+  a test wouldn't have caught either real bug in this area (both were pure
+  layout — `overflow:hidden` clipping, inherited `line-height`).
+- **UX needs eyes** (no Browser Preview): scrub to 6am and 6pm, and to March
+  and February, and confirm the pills stop flush inside the bars instead of
+  hanging over the panel edge.
+
 ## Latest changes (2026-07-14, hour chip cut off — pinned line-height, reserved real room)
 
 - Maintainer: the hour pill was still clipping its own text ("1pm" cut off).

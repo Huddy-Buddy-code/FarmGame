@@ -1043,17 +1043,39 @@ function updateHud() {
   if (calNow) calNow.style.left = `calc(${(110 * (1 - f)).toFixed(1)}px + ${(f * 100).toFixed(2)}%)`;
   // Live current-month chip riding the same position (maintainer request,
   // 2026-07-14) — "Jun.", "Oct.", etc.
-  const monthMarker = $("month-marker");
-  monthMarker.style.left = `${(f * 100).toFixed(2)}%`;
-  monthMarker.textContent = `${MONTH_SHORT[dateOf(clock.time()).month]}.`;
+  placeChip($("month-marker"), `${MONTH_SHORT[dateOf(clock.time()).month]}.`, f);
 
   // Day-position marker: a live clock-time chip riding the workday track
   // (6am = 0, 6pm = 1). No night is modeled (maintainer request, 2026-07-14)
   // — replaced the old always-on sun emoji with the actual rounded hour.
   const df = dayFraction(clock.time());
-  const dayMarker = $("day-marker");
-  dayMarker.style.left = `${(df * 100).toFixed(2)}%`;
-  dayMarker.textContent = hourLabel(df);
+  placeChip($("day-marker"), hourLabel(df), df);
+}
+
+/**
+ * Put a marker chip's text in and centre it on `frac` (0..1) across its track,
+ * CLAMPED so the pill never overhangs either end of that track.
+ *
+ * The chips are centred on their position (translateX(-50%) in CSS), so an
+ * unclamped chip hangs half its own width past the track's end — and the HUD
+ * panel's edge is only ~12px beyond it. That's not an edge case: the day chip
+ * hits it every morning at 6am (frac 0) and every evening at 6pm (frac 1), and
+ * the month chip hits it every March and February. Clamping in JS (not CSS)
+ * because it needs the chip's rendered width, which depends on its text.
+ *
+ * Measures layout, so only call it from `updateHud` (~2×/s), never per-frame.
+ */
+function placeChip(chip: HTMLElement, text: string, frac: number): void {
+  chip.textContent = text; // set first — the clamp needs the final width
+  const track = chip.offsetParent as HTMLElement | null;
+  if (!track) return; // hidden (display:none) — nothing to place
+  const width = track.clientWidth;
+  const half = chip.offsetWidth / 2;
+  // A chip wider than its own track can't be clamped into it — centre it.
+  const centre = half * 2 > width
+    ? width / 2
+    : Math.min(Math.max(frac * width, half), width - half);
+  chip.style.left = `${centre.toFixed(1)}px`;
 }
 
 /** Rounded-to-the-hour 12-hour clock label for a workday fraction (0 = 6am,
