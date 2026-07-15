@@ -72,6 +72,10 @@
         background: var(--cream); border: 1.5px solid var(--wood); border-radius: 6px;
         padding: 1px 5px; box-shadow: var(--shadow);
       }
+      /* Wraps .seasons (which clips to overflow:hidden for its rounded
+         segment corners) so the month-chip below can be positioned outside
+         that box without being clipped along with it. */
+      #yearbar .season-track { position: relative; }
       #yearbar .seasons { display: flex; height: 10px; border-radius: 999px; overflow: hidden; border: 1.5px solid var(--wood); position: relative; }
       #yearbar .seg { flex: 1; }
       #yearbar .seg.spring { background: #a8d178; }
@@ -692,10 +696,12 @@
       <div class="daybar" title="The workday: 6am – 6pm">
         <div class="marker" id="day-marker"></div>
       </div>
-      <div class="seasons">
-        <div class="seg spring"></div><div class="seg summer"></div>
-        <div class="seg fall"></div><div class="seg winter"></div>
-        <div class="marker" id="year-marker"></div>
+      <div class="season-track">
+        <div class="seasons">
+          <div class="seg spring"></div><div class="seg summer"></div>
+          <div class="seg fall"></div><div class="seg winter"></div>
+          <div class="marker" id="year-marker"></div>
+        </div>
         <div class="month-chip" id="month-marker"></div>
       </div>
       <div class="labels"><span>🌱 Spring</span><span>☀️ Summer</span><span>🍂 Fall</span><span>❄️ Winter</span></div>

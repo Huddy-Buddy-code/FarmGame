@@ -68,6 +68,29 @@ routing) is the critical gate — *"if moving grain profitably is fun, the game 
   lines (Large sizes, "Grain Trailer - Large, 100 t Capacity" is the
   longest case).
 
+## Latest changes (2026-07-14, month-chip fix: was invisible, clipped by overflow:hidden)
+
+- Maintainer reported the new month-chip (previous entry below) never
+  appeared — only the hour chip showed. Root cause: `.month-chip` was a
+  child of `#yearbar .seasons`, which has `overflow: hidden` (needed to clip
+  the 4 colored segment divs to the bar's rounded-pill corners). The chip's
+  `top: 100%` position placed it just outside `.seasons`'s own box, so the
+  same overflow rule that rounds the bar was silently clipping the chip
+  into nothing.
+- Fixed by wrapping `.seasons` in a new `.season-track` (position: relative,
+  no overflow clipping) and moving `#month-marker` OUT to be a sibling of
+  `.seasons` instead of a child — same visual position (`top: 100%` of the
+  wrapper lines up with the bottom of `.seasons` inside it), just no longer
+  inside the clipped box. `main.ts`'s `$("month-marker")` lookup is
+  unaffected (id-based, doesn't care about nesting depth).
+- Noted in passing, not touched: the season-track's tick-line `#yearbar
+  .marker` (`top:-3px; bottom:-3px`) is ALSO inside the clipped `.seasons`
+  box, so its 3px protrusion above/below the bar has likely always been
+  silently clipped too — pre-existing, out of scope for this fix.
+- 188/188 passing, typecheck clean (HTML/CSS only).
+- **UX needs eyes** (no Browser Preview — did not reach for it this time):
+  confirm the month chip now actually renders below the season bar.
+
 ## Latest changes (2026-07-14, live hour/month chips replace the sun/moon icon)
 
 - Day-bar and season-bar markers now show LIVE, rounded-to-the-unit text
