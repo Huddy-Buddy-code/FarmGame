@@ -2766,14 +2766,16 @@ function refreshFieldPanel(force = false) {
     }
   }
 
-  // Perennial stands are never plowed — the plow option is hidden for them.
-  // Otherwise Queue Plow is ALWAYS offered, any time of year (maintainer
-  // request, 2026-07-16): the normal case (bare/harvested/mulched ground)
-  // just queues it; anywhere else it's a manual "start over" that forfeits
-  // the standing crop/residue. Only auto-manage's OWN plowing still waits
-  // for winter — see the season check in autoManageField.
-  const plowableNow = canPlow(eff) && !(eff === "harvested" && forageDue(save, field));
-  if (!auto && !isPerennial(field.crop) && !activeTask) {
+  // Queue Plow is ALWAYS offered, any time of year, whether or not the field
+  // has a (even perennial) crop standing on it (maintainer request,
+  // 2026-07-16): the normal case (bare/harvested/mulched ground) just queues
+  // it; anywhere else — including an established grass/alfalfa stand — it's
+  // a manual "start over" that forfeits the standing crop/residue. This is
+  // the ONLY way to clear a perennial; the automatic lifecycle never plows
+  // one under. Auto-manage's own plowing still waits for winter — see the
+  // season check in autoManageField.
+  const plowableNow = canPlow(eff) && !isPerennial(field.crop) && !(eff === "harvested" && forageDue(save, field));
+  if (!auto && !activeTask) {
     const cost = taskCost(field, "plow");
     body.insertAdjacentHTML(
       "beforeend",

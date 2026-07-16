@@ -222,18 +222,24 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     expect(save.tasks[0]!.type).toBe("plow");
   });
 
-  it("forcePlow works any time of year, but never touches perennial stands", () => {
+  it("forcePlow works any time of year, on any crop including an established perennial", () => {
     const save = gameWithAgents();
     const field = freshField("planted");
     field.crop = "corn";
     save.fields.push(field);
     expect(() => forcePlow(save, field, APRIL_1)).not.toThrow();
 
+    // forcePlow is the ONLY way to clear a perennial stand — the normal plow
+    // path (enqueueTask) still refuses it; the automatic lifecycle never
+    // plows one under on its own.
     const perennialField = freshField("planted");
     perennialField.id = "field-2";
     perennialField.crop = "alfalfa";
     save.fields.push(perennialField);
-    expect(() => forcePlow(save, perennialField, WINTER_1)).toThrow(/perennial/i);
+    expect(() => enqueueTask(save, perennialField, "plow", WINTER_1)).toThrow(/perennial/i);
+    forcePlow(save, perennialField, WINTER_1);
+    expect(perennialField.status).toBe("stubble");
+    expect(perennialField.crop).toBeUndefined();
   });
 
   it("forcePlow refuses to interrupt a machine actively working the field", () => {

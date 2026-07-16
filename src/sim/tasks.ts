@@ -600,14 +600,16 @@ export function releaseFieldTasks(save: SaveState, fieldId: string): void {
 
 /**
  * Manual "Queue Plow" (maintainer request, 2026-07-16): available whenever the
- * field isn't mid-harvest, regardless of what's currently growing on it. If the
- * field already qualifies for a plow (bare/harvested/mulched), this behaves
- * exactly like the normal plow button. Otherwise it forfeits whatever's
- * standing — cancels any queued work and resets the field to fresh stubble —
- * before queuing the plow, same as buying a field fresh and starting over.
+ * field isn't mid-harvest, regardless of what's currently growing on it —
+ * INCLUDING an established perennial stand (this is the mechanism to clear
+ * grass/alfalfa and start the field over; the normal plow path in
+ * `enqueueTask` still refuses perennials, since that one guards the
+ * auto-managed lifecycle). If the field already qualifies for a plow
+ * (bare/harvested/mulched, no crop), this behaves exactly like the normal
+ * plow button. Otherwise it forfeits whatever's standing — cancels any
+ * queued work and resets the field to fresh stubble — before queuing the plow.
  */
 export function forcePlow(save: SaveState, field: Field, now: SimTime): FarmTask {
-  if (isPerennial(field.crop)) throw new Error(`${field.id} is a perennial stand — it isn't plowed`);
   releaseFieldTasks(save, field.id); // throws if a machine is actively working the field
   // Force past the forage-first gate too — this is an explicit "start over",
   // not the guarded auto-progression, so any un-baled residue is forfeited.
@@ -615,7 +617,7 @@ export function forcePlow(save: SaveState, field: Field, now: SimTime): FarmTask
   field.windrowed = undefined;
   field.baleLocations = undefined;
   field.baleProduct = undefined;
-  if (!canPlow(field.status)) {
+  if (!canPlow(field.status) || field.crop) {
     field.status = "stubble";
     field.crop = undefined;
     field.plantedAt = undefined;
