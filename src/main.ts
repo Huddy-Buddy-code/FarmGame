@@ -2141,13 +2141,11 @@ function rebuildCropCalendarGrid() {
     const plantLen = cfg.plantMonths.length;
     let bands = `<div class="band plant" style="left:${pct(plantStart)}%;width:${pct(plantLen)}%"></div>`;
     if (cfg.perennial) {
-      // Perennials are cut on SEPARATE monthly windows — draw one detached
-      // 1-month harvest bar per cutting so it reads as 3 distinct cuttings,
-      // not one continuous 3-month harvest (maintainer request).
-      // Inset each cutting bar within its month so consecutive cuttings
-      // (May/Jun/Jul) show a clear GAP between them, not one long band.
+      // Perennials are cut on separate monthly windows — draw a plain harvest
+      // bar per cutting month, same style as the annual crops below
+      // (maintainer request: drop the special detached/inset "cut" look).
       for (const mo of cfg.harvestMonths ?? []) {
-        bands += `<div class="band harv cut" style="left:${pct(disp(mo) + 0.12)}%;width:${pct(0.76)}%"></div>`;
+        bands += `<div class="band harv" style="left:${pct(disp(mo))}%;width:${pct(1)}%"></div>`;
       }
     } else {
       // Annual: harvest opens a grow-time after planting, as wide as the window.
