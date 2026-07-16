@@ -1612,16 +1612,28 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
   const lifecycleBusy = save.tasks.some((t) => t.fieldId === field.id && LIFECYCLE_TASKS.has(t.type));
   if (lifecycleBusy) return; // a plow/plant/harvest/mow/rake/bale step is already lined up
 
-  // Perennial forage (grass/alfalfa): establish once, then cut → rake → bale
-  // each cutting window; never plowed or replanted. Fertilize was already
-  // handled above (canFertilizeNow's perennial branch = its April window).
+  // Perennial forage (grass/alfalfa): plow, establish once, then cut → rake →
+  // bale each cutting window — never replanted after that. Fertilize was
+  // already handled above (canFertilizeNow's perennial branch = its April window).
   if (isPerennial(plan.crop) || isPerennial(field.crop)) {
     if (!field.crop) {
-      // Establish the stand — plant on bare ground in its (March) window.
-      try {
-        enqueueTask(save, field, "plant", now, plan.crop);
-      } catch {
-        /* out of the plant window / unaffordable — retry next tick */
+      // Ground needs plowing first, same as an annual crop (maintainer
+      // request, 2026-07-16) — still waits for the winter plow window.
+      if (canPlow(field.status)) {
+        if (inPlowWindow(now)) {
+          try {
+            enqueueTask(save, field, "plow", now);
+          } catch {
+            /* unaffordable — retry next tick */
+          }
+        }
+      } else {
+        // Tilled — establish the stand in its (March) planting window.
+        try {
+          enqueueTask(save, field, "plant", now, plan.crop);
+        } catch {
+          /* out of the plant window / unaffordable — retry next tick */
+        }
       }
       return;
     }

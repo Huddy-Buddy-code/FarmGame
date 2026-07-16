@@ -2805,8 +2805,9 @@ function refreshFieldPanel(force = false) {
     actions.appendChild(btn);
   }
 
-  // Plant chooser: annuals need tilled ground; perennials (grass/alfalfa) seed
-  // directly on bare ground (stubble/tilled/mulched) — no plow needed.
+  // Plant chooser: both annuals and perennials (grass/alfalfa) need tilled
+  // ground (maintainer request, 2026-07-16 — perennials used to seed
+  // straight onto stubble with no plow).
   const canPlantAnnual = eff === "tilled";
   const canSeedPeren = canSeedPerennial(eff) && !field.crop;
   if (!auto && (canPlantAnnual || canSeedPeren)) {

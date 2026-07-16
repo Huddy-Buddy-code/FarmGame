@@ -60,11 +60,11 @@ export function isPerennialDormant(field: Field, now: SimTime): boolean {
   return isPerennial(field.crop) && DORMANT_MONTHS.includes(dateOf(now).month);
 }
 
-/** Can a perennial stand be seeded on a field in this status? Any bare ground —
- * fresh stubble, freshly plowed, or the mulched remains of a prior crop — takes
- * a perennial directly (no plow required, maintainer request). */
+/** Can a perennial stand be seeded on a field in this status? Ground must be
+ * plowed first, same as an annual crop (maintainer request, 2026-07-16 — was
+ * previously allowed straight onto stubble/mulched with no plow). */
 export function canSeedPerennial(status: FieldStatus): boolean {
-  return status === "stubble" || status === "tilled" || status === "mulched";
+  return status === "tilled";
 }
 
 /** Is `crop` plantable in the month containing `t`? */
@@ -145,8 +145,8 @@ export function applyPlow(field: Field): void {
  */
 export function applyPlant(field: Field, crop: CropId, now: SimTime, rand: () => number = Math.random): void {
   const cfg = gameConfig.crops[crop];
-  // Perennials (grass/alfalfa) establish directly on bare ground — no plow
-  // needed (maintainer request); annuals still require tilled soil.
+  // Perennials (grass/alfalfa) need tilled ground too, same as annuals
+  // (maintainer request, 2026-07-16).
   const okStatus = cfg.perennial ? canSeedPerennial(field.status) : field.status === "tilled";
   if (!okStatus) {
     throw new Error(cfg.perennial ? `${field.id} can't be seeded (status: ${field.status})` : `Plow ${field.id} before planting (status: ${field.status})`);

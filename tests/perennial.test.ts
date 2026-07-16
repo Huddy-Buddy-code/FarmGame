@@ -53,30 +53,40 @@ function runUntil(save: SaveState, from: number, done: () => boolean, capMinutes
   return now;
 }
 
-/** Plant a perennial as an established stand (bypasses the plant task). */
+/** Plant a perennial as an established stand (bypasses the plow + plant tasks —
+ * ground is pre-tilled since establishing now requires it, same as an annual). */
 function establish(save: SaveState, crop: "grass" | "alfalfa"): Field {
   const field = freshField();
+  field.status = "tilled";
   save.fields.push(field);
   applyPlant(field, crop, MARCH, () => 0.5);
   return field;
 }
 
 describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-07-13)", () => {
-  it("are flagged perennial and seed on bare ground without a plow", () => {
+  it("are flagged perennial and need tilled ground, same as an annual", () => {
     expect(isPerennial("grass")).toBe(true);
     expect(isPerennial("alfalfa")).toBe(true);
     expect(isPerennial("corn")).toBe(false);
-    expect(canSeedPerennial("stubble")).toBe(true);
-    expect(canSeedPerennial("mulched")).toBe(true);
+    expect(canSeedPerennial("tilled")).toBe(true);
+    expect(canSeedPerennial("stubble")).toBe(false);
+    expect(canSeedPerennial("mulched")).toBe(false);
     expect(canSeedPerennial("growing")).toBe(false);
 
     const save = newGame();
     ensureAgents(save, [0, 0]);
-    const field = freshField(); // bare stubble, never plowed
+    const field = freshField();
+    field.status = "tilled";
     save.fields.push(field);
-    // Planting is accepted directly on stubble in the March window.
+    // Planting is accepted on tilled ground in the March window.
     const task = enqueueTask(save, field, "plant", MARCH, "grass");
     expect(task.crop).toBe("grass");
+
+    // Bare stubble is refused until it's plowed.
+    const bare = freshField();
+    bare.id = "field-2";
+    save.fields.push(bare);
+    expect(() => enqueueTask(save, bare, "plant", MARCH, "grass")).toThrow(/seeded/);
   });
 
   it("refuses to be plowed (a perennial stand persists — never plowed under)", () => {
@@ -207,9 +217,13 @@ describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-0
     expect(isPerennialDormant(corn, DEC)).toBe(false);
   });
 
-  it("auto-manage establishes the stand, then cuts+rakes+bales each window (no plow, no replant)", () => {
+  it("auto-manage establishes the stand (plow once, then plant), then cuts+rakes+bales each window, never replanting", () => {
     const save = forageGame();
+    // Ground needs plowing first, same as an annual (maintainer request,
+    // 2026-07-16) — start already tilled so this test can focus on the
+    // establish → cut → rake → bale cycle without waiting out a full winter.
     const field = freshField();
+    field.status = "tilled";
     field.autoManage = true;
     field.plans = [{ crop: "grass", fertilize: true, bale: true }];
     save.fields.push(field);
@@ -228,9 +242,31 @@ describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-0
       }
     }
     expect(field.crop).toBe("grass");
-    expect(plowCount).toBe(0); // perennials are never plowed
+    expect(plowCount).toBe(0); // ground was already tilled — no re-plow needed
     expect(plantCount).toBe(1); // established exactly once
     // It got cut at least once and produced hay bales.
     expect(field.baleProduct).toBe("hay");
+  });
+
+  it("auto-manage plows stubble ground first (winter only), then plants once tilled", () => {
+    const save = forageGame();
+    const field = freshField(); // bare stubble
+    field.autoManage = true;
+    field.plans = [{ crop: "alfalfa", fertilize: false, bale: false }];
+    save.fields.push(field);
+
+    const WINTER = 9 * minutesPerMonth(); // Dec 1 — plow window opens
+    // Before winter: nothing happens, same as an annual crop on fresh ground.
+    runUntil(save, MARCH, () => false, WINTER - MARCH, 30);
+    expect(field.status).toBe("stubble");
+    expect(field.crop).toBeUndefined();
+
+    // Winter opens: auto-manage queues + finishes the plow.
+    let now = runUntil(save, WINTER, () => field.status === "tilled");
+    expect(field.crop).toBeUndefined(); // not planted yet — outside alfalfa's March window
+
+    // The following March, it establishes the stand.
+    now = runUntil(save, now, () => field.crop === "alfalfa", 5 * minutesPerMonth());
+    expect(field.crop).toBe("alfalfa");
   });
 });
