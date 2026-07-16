@@ -326,6 +326,9 @@ export interface SaveState {
   /** Finished field-work tasks, newest last — feeds the Work Queue's
    * "Completed" section. Pruned to a bounded length in `sim/tasks.ts`. */
   completedTasks?: CompletedTask[];
+  /** Set once `ensureAgents` has seeded (or migrated) the starter fleet, so a
+   * later reload never re-grants free equipment after the player sells it. */
+  starterFleetGranted?: boolean;
 }
 
 export function newGame(): SaveState {

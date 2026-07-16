@@ -171,29 +171,34 @@ function uniqueName(taken: string[], base: string): string {
  * works out of the box. `home` is where machines park (county center v1). */
 export function ensureAgents(save: SaveState, home: Meters): void {
   save.implements ??= [];
-  // Migrate/seed power units.
-  for (const kind of ["tractor", "harvester"] as const) {
-    if (!save.agents.some((a) => a.kind === kind)) {
-      save.agents.push(makeAgent(save, kind, "medium", home));
+  // Only seed/migrate the starter fleet once ever — otherwise selling
+  // equipment down to zero on a later reload would just re-grant it free.
+  if (!save.starterFleetGranted) {
+    // Migrate/seed power units.
+    for (const kind of ["tractor", "harvester"] as const) {
+      if (!save.agents.some((a) => a.kind === kind)) {
+        save.agents.push(makeAgent(save, kind, "medium", home));
+      }
     }
+    // Seed a medium plow attached to a tractor, if the farm owns no plow yet.
+    if (!save.implements.some((i) => i.kind === "plow")) {
+      const impl = makeImplement(save, "plow", "medium");
+      const tractor = save.agents.find((a) => a.kind === "tractor");
+      if (tractor) impl.attachedTo = tractor.id;
+      save.implements.push(impl);
+    }
+    // Seed a medium planter, parked in the yard (a tractor only hitches one
+    // implement at a time — it swaps in when a plant task comes up).
+    if (!save.implements.some((i) => i.kind === "planter")) {
+      save.implements.push(makeImplement(save, "planter", "medium"));
+    }
+    save.starterFleetGranted = true;
   }
   for (const a of save.agents) {
     if (a.kind === "tractor" || a.kind === "harvester") {
       a.size ??= "medium"; // pre-size saves default to medium
       a.purchaseCost ??= agentPrice(a.kind, a.size);
     }
-  }
-  // Seed a medium plow attached to a tractor, if the farm owns no plow yet.
-  if (!save.implements.some((i) => i.kind === "plow")) {
-    const impl = makeImplement(save, "plow", "medium");
-    const tractor = save.agents.find((a) => a.kind === "tractor");
-    if (tractor) impl.attachedTo = tractor.id;
-    save.implements.push(impl);
-  }
-  // Seed a medium planter, parked in the yard (a tractor only hitches one
-  // implement at a time — it swaps in when a plant task comes up).
-  if (!save.implements.some((i) => i.kind === "planter")) {
-    save.implements.push(makeImplement(save, "planter", "medium"));
   }
   // De-dup display names (older saves numbered by live count, which could collide
   // once a machine had been sold — e.g. two "Medium Tractor 2"). Keep the first,
