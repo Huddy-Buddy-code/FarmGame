@@ -170,6 +170,17 @@
         position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
         z-index: 25; width: 250px; padding: 14px 16px; display: none;
       }
+
+      /* ---------- New-field draw panel (shown only while placing corners) ---------- */
+      #drawfieldpanel {
+        position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+        z-index: 25; width: 250px; padding: 14px 16px;
+      }
+      #drawfieldpanel h2 { margin: 0 0 8px; font-size: 17px; }
+      .draw-stat {
+        display: flex; justify-content: space-between; font-size: 13px;
+        font-weight: 600; padding: 4px 0; border-top: 1.5px dashed var(--cream-2);
+      }
       #fieldpanel h2 { margin: 0 0 2px; font-size: 17px; }
       #fieldpanel .sub { color: #8a7658; font-size: 12px; margin-bottom: 10px; }
       #fieldpanel .close {
@@ -761,6 +772,17 @@
         <span><span class="chip harv"></span>Harvest</span>
       </div>
       <div id="cal-grid"></div>
+    </div>
+
+    <div id="drawfieldpanel" class="panel" style="display: none;">
+      <h2>🚜 New Field</h2>
+      <div class="small" style="line-height: 1.5; margin-bottom: 10px;">
+        Click on the map to place each corner.<br />
+        Double-click to close the shape and finish.
+      </div>
+      <div class="draw-stat"><span>Corners placed</span><span id="df-corners">0</span></div>
+      <div class="draw-stat"><span>Field cost so far</span><span id="df-cost">—</span></div>
+      <button id="df-cancel" style="width: 100%; margin-top: 10px;">✕ Cancel</button>
     </div>
 
     <div id="fieldpanel" class="panel">

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { areaMeters, areaAcres, boundsOf, padBounds, smoothPolygon } from "../src/geo/geometry";
+import { areaMeters, areaAcres, boundsOf, padBounds, smoothPolygon, nearestPointOnPolygon } from "../src/geo/geometry";
 import type { Meters } from "../src/geo/coords";
 
 /**
@@ -64,6 +64,25 @@ describe("geometry (meters)", () => {
       const copy = square.map((p) => [...p] as Meters);
       smoothPolygon(square, 3);
       expect(square).toEqual(copy);
+    });
+  });
+
+  describe("nearestPointOnPolygon", () => {
+    // Access-point gates must stay glued to the fence line, never drift into
+    // the field's interior or off into open ground.
+    it("projects an interior point onto the nearest edge", () => {
+      const p = nearestPointOnPolygon([50, 10], square); // closer to the bottom edge than any other
+      expect(p).toEqual([50, 0]);
+    });
+
+    it("projects a point beyond a corner onto that corner, not past it", () => {
+      const p = nearestPointOnPolygon([-50, -50], square);
+      expect(p).toEqual([0, 0]);
+    });
+
+    it("leaves a point already on an edge unchanged", () => {
+      const p = nearestPointOnPolygon([100, 0], square);
+      expect(p).toEqual([100, 0]);
     });
   });
 });

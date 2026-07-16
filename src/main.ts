@@ -18,7 +18,7 @@ import type { Feature } from "geojson";
 import { loadCounty } from "./county/registry";
 import { setProjection, toMeters, toLngLat } from "./geo/coords";
 import type { LngLat, Meters } from "./geo/coords";
-import { areaAcres, pointInPolygon } from "./geo/geometry";
+import { areaAcres, pointInPolygon, nearestPointOnPolygon } from "./geo/geometry";
 import { naipSource } from "./map/naip";
 import { addRoadsLayer } from "./map/roadsLayer";
 import { OverlayEngine } from "./map/overlay";
@@ -1531,7 +1531,7 @@ function refreshFieldsTab() {
     row.innerHTML = `
       <span class="icon">${icon}</span>
       <span class="fr-info">
-        <div class="fr-name">${prettyId(field.id)}</div>
+        <div class="fr-name">${fieldLabel(field)}</div>
         <div class="fr-sub">${acres.toFixed(1)} ac · ${statusLabel}${field.autoManage ? " · 🤖" : ""}</div>
       </span>
       <span class="fr-yield">${yieldText}</span>`;
@@ -2168,42 +2168,86 @@ function rebuildCropCalendarGrid() {
 // ---------------------------------------------------------------------------
 function wireFieldDrawing(map: maplibregl.Map) {
   const verts: Meters[] = [];
-  const draftId = "field-draft";
+  const lineId = "field-draft";
+  const fillId = "field-draft-fill";
 
   function updateDraft() {
-    const line: LngLat[] = verts.map((m) => toLngLat(m));
-    const data: Feature = {
+    const ring = verts.length >= 3 ? [...verts, verts[0]!] : verts;
+    const line: LngLat[] = ring.map((m) => toLngLat(m));
+    const lineData: Feature = {
       type: "Feature",
       properties: {},
       geometry: { type: "LineString", coordinates: line },
     };
-    const src = map.getSource(draftId) as maplibregl.GeoJSONSource | undefined;
-    if (src) {
-      src.setData(data);
+    const lineSrc = map.getSource(lineId) as maplibregl.GeoJSONSource | undefined;
+    if (lineSrc) {
+      lineSrc.setData(lineData);
     } else {
-      map.addSource(draftId, { type: "geojson", data });
+      map.addSource(lineId, { type: "geojson", data: lineData });
       map.addLayer({
-        id: draftId,
+        id: lineId,
         type: "line",
-        source: draftId,
+        source: lineId,
         paint: { "line-color": "#ffe36e", "line-width": 2, "line-dasharray": [2, 1] },
       });
     }
+
+    // Fill preview once there's an actual polygon to shade (3+ corners).
+    const fillData: Feature = {
+      type: "Feature",
+      properties: {},
+      geometry: { type: "Polygon", coordinates: verts.length >= 3 ? [line] : [] },
+    };
+    const fillSrc = map.getSource(fillId) as maplibregl.GeoJSONSource | undefined;
+    if (fillSrc) {
+      fillSrc.setData(fillData);
+    } else {
+      map.addSource(fillId, { type: "geojson", data: fillData });
+      map.addLayer(
+        { id: fillId, type: "fill", source: fillId, paint: { "fill-color": "#ffe36e", "fill-opacity": 0.25 } },
+        lineId, // keep the outline drawn on top of the fill
+      );
+    }
+
+    updateDrawPanel();
   }
 
   function clearDraft() {
     verts.length = 0;
-    if (map.getLayer(draftId)) map.removeLayer(draftId);
-    if (map.getSource(draftId)) map.removeSource(draftId);
+    if (map.getLayer(fillId)) map.removeLayer(fillId);
+    if (map.getLayer(lineId)) map.removeLayer(lineId);
+    if (map.getSource(fillId)) map.removeSource(fillId);
+    if (map.getSource(lineId)) map.removeSource(lineId);
+  }
+
+  function updateDrawPanel() {
+    const acres = verts.length >= 3 ? areaAcres(verts) : 0;
+    const cost = Math.round(acres * gameConfig.landPricePerAcre);
+    $("df-corners").textContent = String(verts.length);
+    $("df-cost").textContent = verts.length >= 3 ? `$${cost.toLocaleString()}` : "—";
+  }
+
+  function endDrawing() {
+    mode = "none";
+    map.doubleClickZoom.enable();
+    map.getCanvas().style.cursor = "";
+    $("drawfieldpanel").style.display = "none";
+    clearDraft();
   }
 
   $("btn-field").addEventListener("click", () => {
     mode = "field";
     clearDraft();
+    closeFieldPanel();
     $("fieldstab").style.display = "none"; // get the panel out of the way to draw
     map.doubleClickZoom.disable();
+    map.getCanvas().style.cursor = "crosshair";
+    $("drawfieldpanel").style.display = "block";
+    updateDrawPanel();
     toast("🚜 Click to place corners — double-click to close the field");
   });
+
+  $("df-cancel").addEventListener("click", endDrawing);
 
   map.on("click", (e) => {
     if (mode !== "field") return;
@@ -2215,22 +2259,30 @@ function wireFieldDrawing(map: maplibregl.Map) {
     if (mode !== "field") return;
     // The double-click's two single clicks each pushed the same vertex; drop one.
     verts.pop();
-    mode = "none";
-    map.doubleClickZoom.enable();
     const boundary = verts.slice();
-    clearDraft();
     if (boundary.length < 3) {
       toast("Need at least 3 corners — try again");
+      updateDraft();
       return;
     }
+    const acres = areaAcres(boundary);
+    const cost = Math.round(acres * gameConfig.landPricePerAcre);
+    endDrawing();
+    if (!confirm(`Buy this ${acres.toFixed(1)} ac field for $${cost.toLocaleString()}?`)) return;
     try {
-      const { field, acres, cost } = buyFieldFromBoundary(map, overlay, save, boundary);
-      // Gates go in with the fence: auto-placed at the road side + opposite.
+      const { field, acres: boughtAcres, cost: paid } = buyFieldFromBoundary(map, overlay, save, boundary);
+      const defaultName = `Field ${save.fields.length}`; // buyFieldFromBoundary already pushed it
+      const chosen = prompt("Name this field:", defaultName);
+      field.name = (chosen ?? "").trim() || defaultName;
+      // Seed gates at the road side + opposite, then hand the player the
+      // same drag-to-place editor so they can designate the real entry points.
       field.accessPoints = defaultAccessPoints(field.boundary, roadNetRef);
       updateHud();
-      toast(`🌾 Bought ${acres.toFixed(1)} ac for $${cost.toLocaleString()}`);
+      toast(`🌾 Bought ${boughtAcres.toFixed(1)} ac for $${paid.toLocaleString()}`);
       openFieldPanel(field.id);
       refreshFieldsTab();
+      startAccessEdit(field);
+      toast("🚪 Drag the two gate markers to set this field's entry points");
     } catch (err) {
       toast("❌ " + (err as Error).message, 3500);
     }
@@ -2358,9 +2410,9 @@ function wireFieldSelection(map: maplibregl.Map) {
       autoManageField(save, field, clock.time());
       renderField(mapRef, overlay, field, clock.time());
       updateHud();
-      toast(`🤖 ${prettyId(field.id)} will run its rotation plan`);
+      toast(`🤖 ${fieldLabel(field)} will run its rotation plan`);
     } else {
-      toast(`🖐️ ${prettyId(field.id)} is back to manual control`);
+      toast(`🖐️ ${fieldLabel(field)} is back to manual control`);
     }
     refreshFieldPanel(true);
   });
@@ -2369,11 +2421,11 @@ function wireFieldSelection(map: maplibregl.Map) {
     const field = save.fields.find((f) => f.id === selectedFieldId);
     if (!field) return;
     const refund = field.purchaseCost ?? Math.round(areaAcres(field.boundary) * gameConfig.landPricePerAcre);
-    if (!confirm(`Sell ${prettyId(field.id)} for $${refund.toLocaleString()}?`)) return;
+    if (!confirm(`Sell ${fieldLabel(field)} for $${refund.toLocaleString()}?`)) return;
     try {
       const { refund: paid } = sellField(mapRef, overlay, save, field.id);
       updateHud();
-      toast(`💰 Sold ${prettyId(field.id)} for $${paid.toLocaleString()}`);
+      toast(`💰 Sold ${fieldLabel(field)} for $${paid.toLocaleString()}`);
       closeFieldPanel();
       refreshFieldsTab();
     } catch (err) {
@@ -2414,6 +2466,13 @@ function startAccessEdit(field: Field): void {
     const marker = new maplibregl.Marker({ element: el, draggable: true })
       .setLngLat(toLngLat(pt))
       .addTo(mapRef);
+    // Snap continuously to the boundary as it's dragged — a gate can only
+    // slide along the fence line, never float into the middle of the field.
+    marker.on("drag", () => {
+      const ll = marker.getLngLat();
+      const snapped = nearestPointOnPolygon(toMeters([ll.lng, ll.lat]), field.boundary);
+      marker.setLngLat(toLngLat(snapped));
+    });
     marker.on("dragend", () => {
       const ll = marker.getLngLat();
       field.accessPoints![i] = toMeters([ll.lng, ll.lat]);
@@ -2440,7 +2499,7 @@ function queueFromPanel(field: Field, type: "plow" | "plant" | "harvest" | "mow"
     const task = enqueueTask(save, field, type, clock.time(), crop);
     updateHud();
     fieldMsg("");
-    toast(`📋 ${cap(taskVerb(task))} ${prettyId(field.id)} added to the queue`);
+    toast(`📋 ${cap(taskVerb(task))} ${fieldLabel(field)} added to the queue`);
     refreshQueuePanel();
     refreshFieldPanel(true);
   } catch (err) {
@@ -2603,7 +2662,7 @@ function refreshFieldPanel(force = false) {
   if (!force && key === lastPanelKey) return;
   lastPanelKey = key;
 
-  $("fp-title").textContent = "🌾 " + prettyId(field.id);
+  $("fp-title").textContent = "🌾 " + fieldLabel(field);
   $("fp-sub").textContent = `${acres.toFixed(1)} acres`;
   const badge = $("fp-status");
   badge.textContent = activeTask ? taskVerb(activeTask) : field.status;
@@ -2842,7 +2901,7 @@ function refreshFieldPanel(force = false) {
     btn.addEventListener("click", () => {
       if (accessEditFieldId === field.id) {
         stopAccessEdit();
-        toast(`🚪 ${prettyId(field.id)}'s access points saved`);
+        toast(`🚪 ${fieldLabel(field)}'s access points saved`);
         refreshFieldPanel(true);
       } else {
         startAccessEdit(field);
@@ -2856,6 +2915,10 @@ function refreshFieldPanel(force = false) {
 
 function prettyId(id: string): string {
   return id.replace("-", " ").replace(/^\w/, (c) => c.toUpperCase());
+}
+
+function fieldLabel(field: Field): string {
+  return field.name || prettyId(field.id);
 }
 
 function escapeHtml(text: string): string {

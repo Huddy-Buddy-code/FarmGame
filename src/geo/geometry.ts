@@ -62,6 +62,31 @@ export function pointInPolygon([x, y]: Meters, ring: Meters[]): boolean {
   return inside;
 }
 
+/** Closest point to `p` lying ON the polygon's boundary (its edges, not its
+ * interior) — used to keep a dragged marker (e.g. a field's access gates)
+ * sliding along the perimeter instead of floating anywhere on the map. */
+export function nearestPointOnPolygon(p: Meters, ring: Meters[]): Meters {
+  const [px, py] = p;
+  let best: Meters = ring[0]!;
+  let bestD = Infinity;
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i]!;
+    const b = ring[(i + 1) % ring.length]!;
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const lenSq = dx * dx + dy * dy;
+    const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, ((px - a[0]) * dx + (py - a[1]) * dy) / lenSq));
+    const cx = a[0] + dx * t;
+    const cy = a[1] + dy * t;
+    const d = (px - cx) ** 2 + (py - cy) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = [cx, cy];
+    }
+  }
+  return best;
+}
+
 /**
  * Lightly bevel + round a closed ring's corners for DISPLAY ONLY (corner-cutting).
  * Each edge is replaced by two points near its ends, so only the region right

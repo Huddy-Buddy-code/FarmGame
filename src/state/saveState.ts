@@ -57,6 +57,9 @@ export interface Field {
   parcelId: string;
   boundary: Meters[];
   status: FieldStatus;
+  /** Player-chosen display name, set at purchase time. Falls back to a
+   * prettified id (e.g. "Field 3") wherever this is unset — older saves. */
+  name?: string;
   crop?: CropId;
   /** Sim-time the crop went in the ground. */
   plantedAt?: SimTime;
