@@ -6,10 +6,10 @@ import {
   tickFarming, growthProgress, yieldRange, deriveStatus, applyPlant, hasStandingCrop,
 } from "../src/sim/farming";
 import {
-  ensureAgents, enqueueTask, cancelTask, tickTasks, autoManageAll,
+  ensureAgents, enqueueTask, cancelTask, tickTasks, autoManageAll, autoManageField,
   effectiveStatus, isFieldHarvesting, taskCost, buyAgent, sellAgent,
   buyImplement, sellImplement, attachImplement, detachImplement,
-  agentPrice, implementPrice, canPull, forcePlow,
+  agentPrice, implementPrice, canPull, forcePlow, defaultPlan,
 } from "../src/sim/tasks";
 import { sellGrain } from "../src/sim/economy";
 import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
@@ -148,13 +148,28 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     expect(save.tasks).toHaveLength(0);
   });
 
-  it("plowing is winter only (brief request: don't auto-replow right after harvest)", () => {
+  it("manual plowing is allowed any time of year (maintainer request, 2026-07-16)", () => {
     const save = gameWithAgents();
     const field = freshField("stubble");
     save.fields.push(field);
-    expect(() => enqueueTask(save, field, "plow", 0)).toThrow(/winter/i); // March
-    expect(() => enqueueTask(save, field, "plow", APRIL_1)).toThrow(/winter/i);
+    expect(() => enqueueTask(save, field, "plow", 0)).not.toThrow(); // March
+    cancelTask(save, save.tasks[0]!.id);
+    expect(() => enqueueTask(save, field, "plow", APRIL_1)).not.toThrow();
+    cancelTask(save, save.tasks[0]!.id);
     expect(() => enqueueTask(save, field, "plow", WINTER_1)).not.toThrow();
+  });
+
+  it("but auto-manage's own plowing still waits for winter", () => {
+    const save = gameWithAgents();
+    const field = freshField("stubble");
+    field.autoManage = true;
+    field.plans = [defaultPlan()];
+    save.fields.push(field);
+    autoManageField(save, field, APRIL_1);
+    expect(save.tasks).toHaveLength(0); // out of season — auto-manage waits
+    autoManageField(save, field, WINTER_1);
+    expect(save.tasks).toHaveLength(1);
+    expect(save.tasks[0]!.type).toBe("plow");
   });
 
   it("refuses to queue what the (effective) field state doesn't allow", () => {
@@ -207,12 +222,12 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     expect(save.tasks[0]!.type).toBe("plow");
   });
 
-  it("forcePlow still respects the winter-only window and perennial stands", () => {
+  it("forcePlow works any time of year, but never touches perennial stands", () => {
     const save = gameWithAgents();
     const field = freshField("planted");
     field.crop = "corn";
     save.fields.push(field);
-    expect(() => forcePlow(save, field, APRIL_1)).toThrow(/winter/i);
+    expect(() => forcePlow(save, field, APRIL_1)).not.toThrow();
 
     const perennialField = freshField("planted");
     perennialField.id = "field-2";

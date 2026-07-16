@@ -448,7 +448,10 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
     if (eff === "harvested" && forageDue(save, field)) {
       throw new Error(`Rake & bale ${field.id} before plowing`);
     }
-    if (!inPlowWindow(now)) throw new Error(`Plowing opens in winter — ground needs to rest until then`);
+    // NOTE: no winter-window check here (maintainer request, 2026-07-16) —
+    // manual plowing (this function, and forcePlow below) is allowed any
+    // time the ground has no crop planted. Auto-manage still only queues its
+    // OWN plow this way in winter — see the season check in autoManageField.
   }
   if (type === "plant") {
     if (!crop) throw new Error("Pick a crop to plant");
@@ -605,7 +608,6 @@ export function releaseFieldTasks(save: SaveState, fieldId: string): void {
  */
 export function forcePlow(save: SaveState, field: Field, now: SimTime): FarmTask {
   if (isPerennial(field.crop)) throw new Error(`${field.id} is a perennial stand — it isn't plowed`);
-  if (!inPlowWindow(now)) throw new Error(`Plowing opens in winter — ground needs to rest until then`);
   releaseFieldTasks(save, field.id); // throws if a machine is actively working the field
   // Force past the forage-first gate too — this is an explicit "start over",
   // not the guarded auto-progression, so any un-baled residue is forfeited.
@@ -1656,10 +1658,14 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
   switch (field.status) {
     case "stubble":
     case "mulched":
-      try {
-        enqueueTask(save, field, "plow", now);
-      } catch {
-        /* can't afford it yet, or out of the plow window — retry next tick */
+      // Auto-manage (unlike the manual Queue Plow button) still waits for
+      // winter — enqueueTask itself no longer season-gates plowing.
+      if (inPlowWindow(now)) {
+        try {
+          enqueueTask(save, field, "plow", now);
+        } catch {
+          /* can't afford it yet — retry next tick */
+        }
       }
       break;
     case "harvested":
@@ -1677,14 +1683,15 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
         } catch {
           /* rake not queued yet / unaffordable — retry next tick */
         }
-      } else {
+      } else if (inPlowWindow(now)) {
         // Plow under — discard any un-baled forage so the plow isn't gated on it
-        // (the plan opted out of baling, or there's no gear for it).
+        // (the plan opted out of baling, or there's no gear for it). Still
+        // waits for winter, same as the stubble/mulched case above.
         if (field.forageReady) field.forageReady = undefined;
         try {
           enqueueTask(save, field, "plow", now);
         } catch {
-          /* can't afford it yet, or out of the plow window — retry next tick */
+          /* can't afford it yet — retry next tick */
         }
       }
       break;

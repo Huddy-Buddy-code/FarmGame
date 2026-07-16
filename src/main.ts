@@ -47,7 +47,7 @@ import {
   getDaysPerMonth, setDaysPerMonth, minutesPerMonth,
 } from "./sim/calendar";
 import {
-  tickFarming, growthProgress, yieldRange, inPlantingWindow, canPlow, inPlowWindow,
+  tickFarming, growthProgress, yieldRange, inPlantingWindow, canPlow,
   hasStandingCrop, inWeedingWindow, canFertilizeNow, isPerennial, canSeedPerennial,
   isPerennialDormant,
 } from "./sim/farming";
@@ -2767,13 +2767,14 @@ function refreshFieldPanel(force = false) {
   }
 
   // Perennial stands are never plowed — the plow option is hidden for them.
-  // Otherwise Queue Plow is ALWAYS offered (maintainer request, 2026-07-16):
-  // the normal case (bare/harvested/mulched ground) just queues it; anywhere
-  // else it's a manual "start over" that forfeits the standing crop/residue.
+  // Otherwise Queue Plow is ALWAYS offered, any time of year (maintainer
+  // request, 2026-07-16): the normal case (bare/harvested/mulched ground)
+  // just queues it; anywhere else it's a manual "start over" that forfeits
+  // the standing crop/residue. Only auto-manage's OWN plowing still waits
+  // for winter — see the season check in autoManageField.
   const plowableNow = canPlow(eff) && !(eff === "harvested" && forageDue(save, field));
   if (!auto && !isPerennial(field.crop) && !activeTask) {
     const cost = taskCost(field, "plow");
-    const inSeason = inPlowWindow(now);
     body.insertAdjacentHTML(
       "beforeend",
       `<div class="small" style="margin-top:8px">${
@@ -2783,11 +2784,7 @@ function refreshFieldPanel(force = false) {
     const btn = document.createElement("button");
     btn.className = "primary";
     btn.innerHTML = `🚜 Queue Plow <span class="small">$${cost.toLocaleString()}</span>`;
-    if (!inSeason) {
-      btn.disabled = true;
-      btn.title = "Plowing opens in winter — ground needs to rest until then";
-      btn.style.opacity = "0.45";
-    } else if (plowableNow) {
+    if (plowableNow) {
       btn.addEventListener("click", () => queueFromPanel(field, "plow"));
     } else {
       btn.addEventListener("click", () => {
