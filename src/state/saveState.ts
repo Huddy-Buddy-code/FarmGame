@@ -297,12 +297,6 @@ export interface FinanceState {
   loans: Loan[];
 }
 
-export interface TodoItem {
-  id: string;
-  text: string;
-  done: boolean;
-}
-
 export interface SaveState {
   version: number;
   clock: { now: SimTime };
@@ -321,8 +315,6 @@ export interface SaveState {
    * `sim/ledger.ts`). Only the most recent 5 years are kept. */
   ledger?: Record<number, import("../sim/ledger").LedgerYear>;
   contracts: unknown[]; // shape defined when the contract slice lands (brief §6)
-  /** Lite to-do list for player notes. */
-  todos?: TodoItem[];
   /** Finished field-work tasks, newest last — feeds the Work Queue's
    * "Completed" section. Pruned to a bounded length in `sim/tasks.ts`. */
   completedTasks?: CompletedTask[];
