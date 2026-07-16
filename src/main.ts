@@ -2028,7 +2028,7 @@ function wireTimeControls() {
       }
     });
   }
-  clock.setCompression(BASE_COMPRESSION);
+  clock.setCompression(BASE_COMPRESSION * 36); // default pace: 1 hr = 1 month
 
   // Skip to the END of the current month (= the start of the next one), via the
   // same fully-simulated montage. Simpler than picking a month: one press moves
