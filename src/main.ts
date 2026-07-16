@@ -47,7 +47,7 @@ import {
   getDaysPerMonth, setDaysPerMonth, minutesPerMonth,
 } from "./sim/calendar";
 import {
-  tickFarming, growthProgress, yieldRange, inPlantingWindow, canPlow,
+  tickFarming, growthProgress, yieldRange, inPlantingWindow, canPlow, inPlowWindow,
   hasStandingCrop, inWeedingWindow, canFertilizeNow, isPerennial, canSeedPerennial,
   isPerennialDormant,
 } from "./sim/farming";
@@ -56,7 +56,7 @@ import {
   isFieldHarvesting, effectiveStatus, tickTasks, autoManageAll, autoManageField,
   buyAgent, sellAgent, buyImplement, sellImplement, attachImplement, detachImplement,
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
-  reorderTask, estimateTaskHours, forageDue, defaultPlan,
+  reorderTask, estimateTaskHours, forageDue, defaultPlan, forcePlow,
   harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
   appendCompletedTask,
 } from "./sim/tasks";
@@ -2225,6 +2225,7 @@ function wireFieldDrawing(map: maplibregl.Map) {
     const cost = Math.round(acres * gameConfig.landPricePerAcre);
     $("df-corners").textContent = String(verts.length);
     $("df-cost").textContent = verts.length >= 3 ? `$${cost.toLocaleString()}` : "—";
+    ($("df-finish") as HTMLButtonElement).disabled = verts.length < 3;
   }
 
   function endDrawing() {
@@ -2235,31 +2236,9 @@ function wireFieldDrawing(map: maplibregl.Map) {
     clearDraft();
   }
 
-  $("btn-field").addEventListener("click", () => {
-    mode = "field";
-    clearDraft();
-    closeFieldPanel();
-    $("fieldstab").style.display = "none"; // get the panel out of the way to draw
-    map.doubleClickZoom.disable();
-    map.getCanvas().style.cursor = "crosshair";
-    $("drawfieldpanel").style.display = "block";
-    updateDrawPanel();
-    toast("🚜 Click to place corners — double-click to close the field");
-  });
-
-  $("df-cancel").addEventListener("click", endDrawing);
-
-  map.on("click", (e) => {
-    if (mode !== "field") return;
-    verts.push(toMeters([e.lngLat.lng, e.lngLat.lat]));
-    updateDraft();
-  });
-
-  map.on("dblclick", () => {
-    if (mode !== "field") return;
-    // The double-click's two single clicks each pushed the same vertex; drop one.
-    verts.pop();
-    const boundary = verts.slice();
+  /** Shared by the double-click-to-close gesture and the "Purchase Field"
+   * button — confirm the price, then buy + name + hand off to gate placement. */
+  function finishField(boundary: Meters[]) {
     if (boundary.length < 3) {
       toast("Need at least 3 corners — try again");
       updateDraft();
@@ -2286,6 +2265,34 @@ function wireFieldDrawing(map: maplibregl.Map) {
     } catch (err) {
       toast("❌ " + (err as Error).message, 3500);
     }
+  }
+
+  $("btn-field").addEventListener("click", () => {
+    mode = "field";
+    clearDraft();
+    closeFieldPanel();
+    $("fieldstab").style.display = "none"; // get the panel out of the way to draw
+    map.doubleClickZoom.disable();
+    map.getCanvas().style.cursor = "crosshair";
+    $("drawfieldpanel").style.display = "block";
+    updateDrawPanel();
+    toast("🚜 Click to place corners — double-click to close the field");
+  });
+
+  $("df-cancel").addEventListener("click", endDrawing);
+  $("df-finish").addEventListener("click", () => finishField(verts.slice()));
+
+  map.on("click", (e) => {
+    if (mode !== "field") return;
+    verts.push(toMeters([e.lngLat.lng, e.lngLat.lat]));
+    updateDraft();
+  });
+
+  map.on("dblclick", () => {
+    if (mode !== "field") return;
+    // The double-click's two single clicks each pushed the same vertex; drop one.
+    verts.pop();
+    finishField(verts.slice());
   });
 }
 
@@ -2397,6 +2404,16 @@ function wireFieldSelection(map: maplibregl.Map) {
     else closeFieldPanel();
   });
   $("fp-close").addEventListener("click", closeFieldPanel);
+
+  $("fp-rename").addEventListener("click", () => {
+    const field = save.fields.find((f) => f.id === selectedFieldId);
+    if (!field) return;
+    const chosen = prompt("Rename this field:", fieldLabel(field));
+    if (chosen === null) return; // cancelled — keep the existing name
+    field.name = chosen.trim() || field.name;
+    refreshFieldPanel(true);
+    refreshFieldsTab();
+  });
 
   ($("fp-auto") as HTMLInputElement).addEventListener("change", (e) => {
     const field = save.fields.find((f) => f.id === selectedFieldId);
@@ -2750,15 +2767,44 @@ function refreshFieldPanel(force = false) {
   }
 
   // Perennial stands are never plowed — the plow option is hidden for them.
-  const plowable = !isPerennial(field.crop) && canPlow(eff) && !(eff === "harvested" && forageDue(save, field));
-  if (!auto && plowable) {
-    // --- Plow first (§10 lifecycle: stubble → tilled → planted) ---
+  // Otherwise Queue Plow is ALWAYS offered (maintainer request, 2026-07-16):
+  // the normal case (bare/harvested/mulched ground) just queues it; anywhere
+  // else it's a manual "start over" that forfeits the standing crop/residue.
+  const plowableNow = canPlow(eff) && !(eff === "harvested" && forageDue(save, field));
+  if (!auto && !isPerennial(field.crop) && !activeTask) {
     const cost = taskCost(field, "plow");
-    body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">Plow to prepare for planting.</div>`);
+    const inSeason = inPlowWindow(now);
+    body.insertAdjacentHTML(
+      "beforeend",
+      `<div class="small" style="margin-top:8px">${
+        plowableNow ? "Plow to prepare for planting." : "Plow now to clear this field and start over."
+      }</div>`,
+    );
     const btn = document.createElement("button");
     btn.className = "primary";
     btn.innerHTML = `🚜 Queue Plow <span class="small">$${cost.toLocaleString()}</span>`;
-    btn.addEventListener("click", () => queueFromPanel(field, "plow"));
+    if (!inSeason) {
+      btn.disabled = true;
+      btn.title = "Plowing opens in winter — ground needs to rest until then";
+      btn.style.opacity = "0.45";
+    } else if (plowableNow) {
+      btn.addEventListener("click", () => queueFromPanel(field, "plow"));
+    } else {
+      btn.addEventListener("click", () => {
+        if (!confirm(`Plowing ${fieldLabel(field)} now clears its current crop and any residue. Continue?`)) return;
+        try {
+          forcePlow(save, field, clock.time());
+          updateHud();
+          fieldMsg("");
+          toast(`🚜 ${fieldLabel(field)} plowed under and restarted`);
+          refreshQueuePanel();
+          refreshFieldPanel(true);
+          updateBaleMarkers();
+        } catch (err) {
+          fieldMsg((err as Error).message);
+        }
+      });
+    }
     actions.appendChild(btn);
   }
 
@@ -2909,7 +2955,7 @@ function refreshFieldPanel(force = false) {
       }
     });
     row.appendChild(btn);
-    body.appendChild(row);
+    actions.appendChild(row);
   }
 }
 

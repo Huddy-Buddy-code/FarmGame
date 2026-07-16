@@ -181,8 +181,13 @@
         display: flex; justify-content: space-between; font-size: 13px;
         font-weight: 600; padding: 4px 0; border-top: 1.5px dashed var(--cream-2);
       }
-      #fieldpanel h2 { margin: 0 0 2px; font-size: 17px; }
+      #fieldpanel h2 { margin: 0 0 2px; font-size: 17px; display: flex; align-items: center; gap: 6px; }
       #fieldpanel .sub { color: #8a7658; font-size: 12px; margin-bottom: 10px; }
+      .fp-rename-btn {
+        width: auto; padding: 0 4px; font-size: 13px; border: none; background: none;
+        cursor: pointer; opacity: 0.6; transition: opacity 0.15s;
+      }
+      .fp-rename-btn:hover { opacity: 1; }
       #fieldpanel .close {
         position: absolute; top: 8px; right: 10px; border: none; background: none;
         font-size: 16px; padding: 2px 6px; color: #8a7658;
@@ -782,12 +787,13 @@
       </div>
       <div class="draw-stat"><span>Corners placed</span><span id="df-corners">0</span></div>
       <div class="draw-stat"><span>Field cost so far</span><span id="df-cost">—</span></div>
-      <button id="df-cancel" style="width: 100%; margin-top: 10px;">✕ Cancel</button>
+      <button id="df-finish" class="primary" style="width: 100%; margin-top: 10px;" disabled>✅ Purchase Field</button>
+      <button id="df-cancel" style="width: 100%; margin-top: 6px;">✕ Cancel</button>
     </div>
 
     <div id="fieldpanel" class="panel">
       <button class="close" id="fp-close">✕</button>
-      <h2 id="fp-title">Field</h2>
+      <h2><span id="fp-title">Field</span><button id="fp-rename" class="fp-rename-btn" title="Rename field">✏️</button></h2>
       <div class="sub" id="fp-sub">— acres</div>
       <div><span class="badge" id="fp-status">stubble</span></div>
       <div id="fp-body"></div>

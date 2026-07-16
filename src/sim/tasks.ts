@@ -595,6 +595,40 @@ export function releaseFieldTasks(save: SaveState, fieldId: string): void {
   for (const t of tasksFor(save, fieldId)) cancelTask(save, t.id);
 }
 
+/**
+ * Manual "Queue Plow" (maintainer request, 2026-07-16): available whenever the
+ * field isn't mid-harvest, regardless of what's currently growing on it. If the
+ * field already qualifies for a plow (bare/harvested/mulched), this behaves
+ * exactly like the normal plow button. Otherwise it forfeits whatever's
+ * standing — cancels any queued work and resets the field to fresh stubble —
+ * before queuing the plow, same as buying a field fresh and starting over.
+ */
+export function forcePlow(save: SaveState, field: Field, now: SimTime): FarmTask {
+  if (isPerennial(field.crop)) throw new Error(`${field.id} is a perennial stand — it isn't plowed`);
+  if (!inPlowWindow(now)) throw new Error(`Plowing opens in winter — ground needs to rest until then`);
+  releaseFieldTasks(save, field.id); // throws if a machine is actively working the field
+  // Force past the forage-first gate too — this is an explicit "start over",
+  // not the guarded auto-progression, so any un-baled residue is forfeited.
+  field.forageReady = undefined;
+  field.windrowed = undefined;
+  field.baleLocations = undefined;
+  field.baleProduct = undefined;
+  if (!canPlow(field.status)) {
+    field.status = "stubble";
+    field.crop = undefined;
+    field.plantedAt = undefined;
+    field.trueYieldTonsPerAcre = undefined;
+    field.harvestedAcres = undefined;
+    field.weedy = undefined;
+    field.weeded = undefined;
+    field.autoWeedDone = undefined;
+    field.autoFertDone = undefined;
+    field.cutsThisYear = undefined;
+    field.cutYear = undefined;
+  }
+  return enqueueTask(save, field, "plow", now);
+}
+
 /** Is this queued task startable given the field's CURRENT state? (A plant task
  * queued behind a plow task waits until the ground is actually tilled.) */
 function isStartable(task: FarmTask, field: Field): boolean {

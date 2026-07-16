@@ -9,7 +9,7 @@ import {
   ensureAgents, enqueueTask, cancelTask, tickTasks, autoManageAll,
   effectiveStatus, isFieldHarvesting, taskCost, buyAgent, sellAgent,
   buyImplement, sellImplement, attachImplement, detachImplement,
-  agentPrice, implementPrice, canPull,
+  agentPrice, implementPrice, canPull, forcePlow,
 } from "../src/sim/tasks";
 import { sellGrain } from "../src/sim/economy";
 import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
@@ -178,6 +178,57 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     expect(() => enqueueTask(save, field, "plant", 0, "soybeans")).toThrow(/month/); // March: soy is May–Jun
     save.money = 0;
     expect(() => enqueueTask(save, field, "plant", APRIL_1, "corn")).toThrow(/cash/);
+  });
+
+  it("forcePlow behaves like a normal plow on already-plowable ground", () => {
+    const save = gameWithAgents();
+    const field = freshField("stubble");
+    save.fields.push(field);
+    const cash = save.money;
+    const task = forcePlow(save, field, WINTER_1);
+    expect(task.type).toBe("plow");
+    expect(cash - save.money).toBe(taskCost(field, "plow"));
+  });
+
+  it("forcePlow on a standing crop forfeits it and resets the field to stubble", () => {
+    const save = gameWithAgents();
+    const field = freshField("planted");
+    field.crop = "corn";
+    field.plantedAt = APRIL_1;
+    field.trueYieldTonsPerAcre = 5;
+    save.fields.push(field);
+    // Manual "start over" — never allowed by the normal canPlow-gated path.
+    expect(() => enqueueTask(save, field, "plow", WINTER_1)).toThrow();
+    forcePlow(save, field, WINTER_1);
+    expect(field.status).toBe("stubble");
+    expect(field.crop).toBeUndefined();
+    expect(field.plantedAt).toBeUndefined();
+    expect(save.tasks).toHaveLength(1);
+    expect(save.tasks[0]!.type).toBe("plow");
+  });
+
+  it("forcePlow still respects the winter-only window and perennial stands", () => {
+    const save = gameWithAgents();
+    const field = freshField("planted");
+    field.crop = "corn";
+    save.fields.push(field);
+    expect(() => forcePlow(save, field, APRIL_1)).toThrow(/winter/i);
+
+    const perennialField = freshField("planted");
+    perennialField.id = "field-2";
+    perennialField.crop = "alfalfa";
+    save.fields.push(perennialField);
+    expect(() => forcePlow(save, perennialField, WINTER_1)).toThrow(/perennial/i);
+  });
+
+  it("forcePlow refuses to interrupt a machine actively working the field", () => {
+    const save = gameWithAgents();
+    const field = freshField("stubble");
+    save.fields.push(field);
+    enqueueTask(save, field, "plow", WINTER_1);
+    runWorld(save, WINTER_1, 5, 30); // the tractor picks up the queued plow
+    expect(save.tasks[0]!.status).toBe("active");
+    expect(() => forcePlow(save, field, WINTER_1)).toThrow(/working/i);
   });
 
   it("the tractor drives out and plows over sim-time (physical: drives the field)", () => {
