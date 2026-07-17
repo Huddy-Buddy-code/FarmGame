@@ -1130,75 +1130,204 @@ function wireInventory() {
   $("inv-close").addEventListener("click", () => ($("inventory").style.display = "none"));
 }
 
+/** Building index within its own kind, 1-based, in purchase order — "Silo 1",
+ * "Silo 2", … (buildings have no persistent name, so this is display-only). */
+function buildingIndex(building: Building): number {
+  return save.buildings.filter((b) => b.kind === building.kind).indexOf(building) + 1;
+}
+
+/** Inventory is organized around STORAGE STRUCTURES, not crops (maintainer
+ * request, 2026-07-16): each silo is its own row with its own capacity and a
+ * crop dropdown; grain is still one pooled bin per crop under the hood
+ * (brief's "unlimited in this slice" note), so a silo's "stored" reading is
+ * its share of that pool, proportional to its capacity among every silo
+ * sharing the same crop — the shares always sum back to the true total. */
 function refreshInventory() {
   const rows = $("inv-rows");
   rows.innerHTML = "";
-  for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
-    const cfg = gameConfig.crops[cropId];
-    // Perennial forage crops (grass/alfalfa) yield bales, not grain — they're
-    // sold from the field panel, not the grain inventory.
-    if (cfg.producesGrain === false) continue;
-    const tons = save.grain[cropId];
-    const capacity = siloCapacityForCrop(save, cropId);
+
+  // --- Grain Silos ---
+  const silos = save.buildings.filter((b) => b.kind === "silo");
+  rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">🛢️ Grain Silos</div>`);
+  if (silos.length === 0) {
+    rows.insertAdjacentHTML("beforeend", `<div class="silo-bar-empty">No silos built yet — buy one from the Equipment tab.</div>`);
+  }
+  for (const silo of silos) {
+    const capacity = siloCapacityOf(silo.size ?? "small");
+    const crop = silo.assignedCrop;
+    const cropCapacityTotal = crop ? siloCapacityForCrop(save, crop) : 0;
+    // This silo's proportional share of the crop's pooled tons.
+    const tons = crop && cropCapacityTotal > 0 ? (save.grain[crop] * capacity) / cropCapacityTotal : 0;
+
     const row = document.createElement("div");
-    row.className = "inv-row";
+    row.className = "inv-row inv-building";
     row.innerHTML = `
-      <span class="icon">${cfg.emoji}</span>
+      <span class="icon">${BUILDING_ICON.silo}</span>
       <span class="info">
-        <div class="name">${cfg.name}</div>
-        <div class="qty">${tons.toFixed(1)} t stored</div>
-      </span>
-      <span class="price">$${cfg.sellPricePerTon.toLocaleString()}/t</span>`;
-    const btn = document.createElement("button");
-    btn.className = "primary";
+        <div class="name">Silo ${buildingIndex(silo)} · ${SIZE_LABEL[silo.size ?? "small"]}</div>
+        <div class="qty">${capacity.toLocaleString()} t capacity</div>
+      </span>`;
+
+    const select = document.createElement("select");
+    select.className = "inv-crop-select";
+    select.innerHTML =
+      `<option value="">— assign a crop —</option>` +
+      (Object.keys(gameConfig.crops) as CropId[])
+        .filter((c) => gameConfig.crops[c].producesGrain !== false)
+        .map((c) => `<option value="${c}">${gameConfig.crops[c].emoji} ${gameConfig.crops[c].name}</option>`)
+        .join("");
+    select.value = crop ?? "";
+    select.addEventListener("change", () => {
+      assignSiloCrop(save, silo.id, (select.value || undefined) as CropId | undefined);
+      refreshInventory();
+    });
+    row.appendChild(select);
+    row.appendChild(locateButton(`Silo ${buildingIndex(silo)}`, silo.pos));
+    const refund = buildingPrice("silo", silo.size);
+    row.appendChild(
+      iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, () => {
+        if (!confirm(`Sell Silo ${buildingIndex(silo)} for $${refund.toLocaleString()}?`)) return;
+        sellBuilding(save, silo.id);
+        toast(`💰 Sold Silo ${buildingIndex(silo)} for $${refund.toLocaleString()}`);
+        refreshInventory();
+        refreshBuildingMarkers();
+        updateHud();
+      }),
+    );
+    rows.appendChild(row);
+
+    if (!crop) {
+      rows.insertAdjacentHTML("beforeend", `<div class="silo-bar-empty">Not assigned — pick a crop above to start filling it.</div>`);
+      continue;
+    }
+    const cfg = gameConfig.crops[crop];
+    const bar = siloCapacityBar(cfg, tons, capacity);
+    rows.appendChild(bar);
+    const sellRow = document.createElement("div");
+    sellRow.className = "inv-row inv-sell-row";
+    sellRow.innerHTML = `<span class="price">${cfg.emoji} ${cfg.name} · $${cfg.sellPricePerTon.toLocaleString()}/t</span>`;
+    const sellBtn = document.createElement("button");
+    sellBtn.className = "primary";
     const value = Math.round(tons * cfg.sellPricePerTon);
-    btn.textContent = tons > 0 ? `Sell all · $${value.toLocaleString()}` : "Empty";
-    btn.disabled = tons <= 0;
-    btn.addEventListener("click", () => {
-      const { tons: sold, revenue } = sellGrain(save, cropId, Infinity);
+    sellBtn.textContent = tons > 0 ? `Sell all · $${value.toLocaleString()}` : "Empty";
+    sellBtn.disabled = tons <= 0;
+    sellBtn.addEventListener("click", () => {
+      const { tons: sold, revenue } = sellGrain(save, crop, tons);
       if (sold <= 0) return;
-      logSale("sellGrain", { crop: cropId, label: cfg.name, tons: sold, revenue });
+      logSale("sellGrain", { crop, label: cfg.name, tons: sold, revenue });
       updateHud();
       refreshInventory();
       toast(`💰 Sold ${sold.toFixed(1)} t of ${cfg.name.toLowerCase()} for $${revenue.toLocaleString()}`);
     });
-    row.appendChild(btn);
-    rows.appendChild(row);
-    rows.appendChild(siloCapacityBar(cfg, tons, capacity));
+    sellRow.appendChild(sellBtn);
+    rows.appendChild(sellRow);
   }
 
-  // --- Bales (2026-07-14): every field's bales summed per product, sellable
-  // in one click here as well as from a field's own panel. ---
-  const stocks = baleInventory(save);
-  if (stocks.length > 0) {
-    rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">📦 Bales</div>`);
-    for (const stock of stocks) {
-      const tons = (stock.bales * gameConfig.forage.baleTons).toFixed(0);
+  // --- Unassigned grain safety net: a crop can end up with pooled tons but no
+  // silo currently claiming it (e.g. the assigned silo got sold) — still show
+  // it somewhere sellable rather than silently stranding it. ---
+  const claimed = new Set(silos.map((s) => s.assignedCrop).filter((c): c is CropId => !!c));
+  const orphaned = (Object.keys(gameConfig.crops) as CropId[]).filter(
+    (c) => gameConfig.crops[c].producesGrain !== false && !claimed.has(c) && save.grain[c] > 0,
+  );
+  if (orphaned.length > 0) {
+    rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">⚠️ Unassigned Grain</div>`);
+    for (const cropId of orphaned) {
+      const cfg = gameConfig.crops[cropId];
+      const tons = save.grain[cropId];
       const row = document.createElement("div");
       row.className = "inv-row";
       row.innerHTML = `
-        <span class="icon">${baleIconSvg(22, stock.color)}</span>
+        <span class="icon">${cfg.emoji}</span>
         <span class="info">
-          <div class="name">${stock.name}</div>
-          <div class="qty">${stock.bales} bales · ${tons} t</div>
+          <div class="name">${cfg.name}</div>
+          <div class="qty">${tons.toFixed(1)} t · no silo claims it</div>
         </span>
-        <span class="price">$${stock.pricePerBale.toLocaleString()}/bale</span>`;
+        <span class="price">$${cfg.sellPricePerTon.toLocaleString()}/t</span>`;
       const btn = document.createElement("button");
       btn.className = "primary";
-      btn.textContent = `Sell all · $${stock.value.toLocaleString()}`;
+      const value = Math.round(tons * cfg.sellPricePerTon);
+      btn.textContent = `Sell all · $${value.toLocaleString()}`;
       btn.addEventListener("click", () => {
-        const { bales: sold, revenue } = sellBalesOfProduct(save, stock.product);
+        const { tons: sold, revenue } = sellGrain(save, cropId, Infinity);
         if (sold <= 0) return;
-        logSale("sellBales", { label: stock.name, bales: sold, tons: sold * gameConfig.forage.baleTons, revenue });
+        logSale("sellGrain", { crop: cropId, label: cfg.name, tons: sold, revenue });
         updateHud();
         refreshInventory();
-        updateBaleMarkers();
-        if (selectedFieldId) refreshFieldPanel(true);
-        toast(`💰 Sold ${sold} ${stock.name.toLowerCase()} bales for $${revenue.toLocaleString()}`);
+        toast(`💰 Sold ${sold.toFixed(1)} t of ${cfg.name.toLowerCase()} for $${revenue.toLocaleString()}`);
       });
       row.appendChild(btn);
       rows.appendChild(row);
     }
+  }
+
+  // --- Bale storage structures: capacity exists, but there's no hauling
+  // mechanic yet to actually move bales in — say so plainly rather than
+  // showing a fake "0 stored" that looks broken. ---
+  const baleBuildings = save.buildings.filter((b) => b.kind === "baleBarn" || b.kind === "baleArea");
+  if (baleBuildings.length > 0) {
+    rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">📦 Bale Storage</div>`);
+    for (const b of baleBuildings) {
+      const cap = b.kind === "baleBarn" ? gameConfig.buildings.baleBarn.capacityBales : gameConfig.buildings.baleArea.capacityBales;
+      const row = document.createElement("div");
+      row.className = "inv-row inv-building";
+      row.innerHTML = `
+        <span class="icon">${BUILDING_ICON[b.kind]}</span>
+        <span class="info">
+          <div class="name">${buildingDisplayName(b.kind)} ${buildingIndex(b)}</div>
+          <div class="qty">${cap.toLocaleString()} bale capacity · not hauled to yet</div>
+        </span>`;
+      row.appendChild(locateButton(`${buildingDisplayName(b.kind)} ${buildingIndex(b)}`, b.pos));
+      const refund = buildingPrice(b.kind);
+      row.appendChild(
+        iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, () => {
+          if (!confirm(`Sell ${buildingDisplayName(b.kind)} ${buildingIndex(b)} for $${refund.toLocaleString()}?`)) return;
+          sellBuilding(save, b.id);
+          toast(`💰 Sold ${buildingDisplayName(b.kind)} ${buildingIndex(b)} for $${refund.toLocaleString()}`);
+          refreshInventory();
+          refreshBuildingMarkers();
+          updateHud();
+        }),
+      );
+      rows.appendChild(row);
+    }
+  }
+
+  // --- In-field bales (2026-07-14): every field's bales summed per product —
+  // this IS where every bale lives today (baling drops them on the field and
+  // nothing moves them since there's no hauling mechanic), sellable in one
+  // click here as well as from a field's own panel. ---
+  const stocks = baleInventory(save);
+  rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">🌾 In-Field Bales (not yet hauled)</div>`);
+  if (stocks.length === 0) {
+    rows.insertAdjacentHTML("beforeend", `<div class="silo-bar-empty">No bales sitting in any field right now.</div>`);
+  }
+  for (const stock of stocks) {
+    const tons = (stock.bales * gameConfig.forage.baleTons).toFixed(0);
+    const row = document.createElement("div");
+    row.className = "inv-row";
+    row.innerHTML = `
+      <span class="icon">${baleIconSvg(22, stock.color)}</span>
+      <span class="info">
+        <div class="name">${stock.name}</div>
+        <div class="qty">${stock.bales} bales · ${tons} t</div>
+      </span>
+      <span class="price">$${stock.pricePerBale.toLocaleString()}/bale</span>`;
+    const btn = document.createElement("button");
+    btn.className = "primary";
+    btn.textContent = `Sell all · $${stock.value.toLocaleString()}`;
+    btn.addEventListener("click", () => {
+      const { bales: sold, revenue } = sellBalesOfProduct(save, stock.product);
+      if (sold <= 0) return;
+      logSale("sellBales", { label: stock.name, bales: sold, tons: sold * gameConfig.forage.baleTons, revenue });
+      updateHud();
+      refreshInventory();
+      updateBaleMarkers();
+      if (selectedFieldId) refreshFieldPanel(true);
+      toast(`💰 Sold ${sold} ${stock.name.toLowerCase()} bales for $${revenue.toLocaleString()}`);
+    });
+    row.appendChild(btn);
+    rows.appendChild(row);
   }
 }
 

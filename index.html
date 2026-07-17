@@ -331,6 +331,18 @@
         letter-spacing: 0.05em; margin: 14px 0 2px; padding-bottom: 2px;
         border-bottom: 2px solid var(--cream-2);
       }
+      /* Building rows (silos / bale storage): name+capacity, a crop picker
+       * (silos only), then locate/sell — paired tightly with the capacity bar
+       * and sell row that follow, so the three read as one card. */
+      .inv-building { margin-bottom: 4px; }
+      .inv-crop-select {
+        padding: 4px 6px; border-radius: 6px; font-size: 12px; max-width: 130px;
+        border: 1.5px solid var(--wood); background: var(--cream); font-family: inherit;
+      }
+      .inv-sell-row {
+        background: none; border: none; margin: -6px 0 10px; padding: 0 4px;
+      }
+      .inv-sell-row .price { flex: 1; text-align: left; margin-right: 0; }
 
       /* Silo capacity bar — sits under each crop's inv-row, fills left→right. */
       .silo-bar { margin: -2px 0 10px; }
@@ -767,7 +779,7 @@
     <div id="inventory" class="panel">
       <button class="close" id="inv-close">✕</button>
       <h2>📦 Storage</h2>
-      <div class="sub">Grain bins &amp; bales · sold at local flat price (market &amp; hauling coming soon)</div>
+      <div class="sub">Your silos &amp; bale storage · sold at local flat price (market &amp; hauling coming soon)</div>
       <div id="inv-rows"></div>
     </div>
 
