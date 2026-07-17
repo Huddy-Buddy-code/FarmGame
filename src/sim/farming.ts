@@ -164,6 +164,8 @@ export function applyPlant(field: Field, crop: CropId, now: SimTime, rand: () =>
   field.autoFertDone = undefined;
   field.weedy = undefined;
   field.weeded = undefined;
+  field.fertilized = undefined;
+  field.lastCutProductivity = undefined;
   // Perennial: start this year's cutting count fresh.
   field.cutsThisYear = 0;
   field.cutYear = dateOf(now).year;
@@ -177,6 +179,9 @@ export function applyMowDone(field: Field, now: SimTime): void {
   if (field.cutYear !== year) {
     field.cutYear = year;
     field.cutsThisYear = 0;
+    // A new year's cutting cycle — the fertilize boost/taper restarts, so
+    // last year's fertilizing no longer applies until it's redone.
+    field.fertilized = undefined;
   }
   field.cutsThisYear = (field.cutsThisYear ?? 0) + 1;
   field.forageReady = true;
@@ -196,6 +201,8 @@ export function applyHarvestDone(field: Field): void {
   field.crop = undefined;
   field.plantedAt = undefined;
   field.trueYieldTonsPerAcre = undefined;
+  // Reset the yield boost — a fresh crop cycle starts at the default 100%.
+  field.fertilized = undefined;
 }
 
 /** Baling-complete effect: the windrows are gone and the field is left
@@ -209,6 +216,7 @@ export function applyBaleDone(field: Field): void {
   field.baleProduct = baleProductForField(field);
   field.forageReady = undefined;
   field.windrowed = undefined;
+  field.lastCutProductivity = undefined; // consumed by this bale run
   // Perennial: the stand regrows for its next cutting — never plowed under.
   // Annual (corn) residue: field settles to mulched, ready to re-plow.
   field.status = isPerennial(field.crop) ? "growing" : "mulched";
@@ -232,19 +240,49 @@ export function growthProgress(field: Field, now: SimTime): number {
 }
 
 /**
+ * Live productivity multiplier applied to a field's actual output (maintainer
+ * request, 2026-07-16 — no yield modifiers existed before this):
+ *  - Weeds (`field.weedy`) cost a flat -10%.
+ *  - Fertilizing adds +30% for an annual crop.
+ *  - For a perennial stand, the +30% fertilize boost tapers 10 points with
+ *    each cutting already taken this year — 130% → 120% → 110% → back to the
+ *    default 100% once all of the year's cuttings are done. Re-fertilizing
+ *    the following year restarts the taper (fertilized/cutsThisYear both
+ *    reset on the year turn — see applyMowDone).
+ * Read at whatever moment output is produced: live for a display estimate
+ * (yieldRange), or at task-completion time for the actual harvested/baled
+ * amount — both read the same current field state, so they agree.
+ */
+export function productivityMultiplier(field: Field, now: SimTime): number {
+  let mult = 1;
+  if (field.weedy) mult -= 0.1;
+  if (field.fertilized) {
+    if (isPerennial(field.crop)) {
+      const totalCuts = (field.crop && gameConfig.crops[field.crop].harvestMonths?.length) || 0;
+      if (totalCuts > 0) mult += 0.3 * Math.max(0, 1 - cutsThisYear(field, now) / totalCuts);
+    } else {
+      mult += 0.3;
+    }
+  }
+  return Math.max(0, mult);
+}
+
+/**
  * The VISIBLE yield range in tons/acre — wide at planting, narrowing toward the
  * hidden true value as harvest approaches (brief §6). Always contains the truth.
+ * Scaled by `productivityMultiplier` so weeds/fertilizing show up in the estimate.
  */
 export function yieldRange(field: Field, now: SimTime): { low: number; high: number } | null {
   if (!field.crop || field.trueYieldTonsPerAcre === undefined) return null;
   const cfg = gameConfig.crops[field.crop];
   const progress = growthProgress(field, now);
-  const fullHalf = cfg.baseYieldTonsPerAcre * cfg.yieldUncertainty;
+  const boost = productivityMultiplier(field, now);
+  const fullHalf = cfg.baseYieldTonsPerAcre * cfg.yieldUncertainty * boost;
   const half = fullHalf * (1 - progress * gameConfig.yieldRangeNarrowing);
-  const t = field.trueYieldTonsPerAcre;
+  const t = field.trueYieldTonsPerAcre * boost;
   // Center drifts from base toward truth so the band both narrows AND homes in,
   // while the truth always stays inside it.
-  const center = cfg.baseYieldTonsPerAcre + (t - cfg.baseYieldTonsPerAcre) * progress;
+  const center = (cfg.baseYieldTonsPerAcre + (field.trueYieldTonsPerAcre - cfg.baseYieldTonsPerAcre) * progress) * boost;
   const low = Math.max(0, Math.min(center - half, t));
   const high = Math.max(center + half, t);
   return { low, high };

@@ -30,7 +30,7 @@ import type { Meters } from "../geo/coords";
 import {
   inPlantingWindow, canPlow, applyPlow, applyPlant, applyHarvestDone, applyBaleDone,
   applyMowDone, inPlowWindow, hasStandingCrop, inWeedingWindow, canFertilizeNow,
-  isPerennial, balesPerAcreForField, canSeedPerennial,
+  isPerennial, balesPerAcreForField, canSeedPerennial, productivityMultiplier,
 } from "./farming";
 import { buildCoveragePath, sampleAt, workDoneAt, distanceAtWork } from "./coverage";
 import type { CoveragePath } from "./coverage";
@@ -1295,8 +1295,14 @@ function tickAgent(
       const baler = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
       const baleTons = gameConfig.forage.baleTons;
       // Even-divide the field's forage into whole bales so the count stays
-      // round(acres × balesPerAcre) — float-robust, and identical to before.
-      const totalBales = Math.max(1, Math.round(task.totalAcres * balesPerAcreForField(field)));
+      // round(acres × balesPerAcre × productivity) — float-robust, and
+      // identical to before now that productivity defaults to 1×. A
+      // perennial reads the snapshot taken at mow time (the taper is keyed to
+      // cuttings before THIS one, not the count after it advanced); corn
+      // stover has no snapshot and falls back to the live value, which is
+      // always 1× since fertilized was already reset by the harvest.
+      const boost = field.lastCutProductivity ?? productivityMultiplier(field, now);
+      const totalBales = Math.max(1, Math.round(task.totalAcres * balesPerAcreForField(field) * boost));
       const tonsPerAcre = task.totalAcres > 0 ? (totalBales * baleTons) / task.totalAcres : 0;
       if (!baler || tonsPerAcre <= 0) {
         budget = 0; // defensive: no baler hitched — shouldn't happen (auto-hitch)
@@ -1401,11 +1407,17 @@ function tickAgent(
     // hopper can still hold — clamp the distance target to the hopper's
     // remaining room, so it stops EXACTLY at the fill point instead of
     // cutting ground the hopper has no room to bank.
+    // Effective (boosted/penalized) tons/acre this field actually yields right
+    // now — weeds/fertilizing (productivityMultiplier, farming.ts) apply here
+    // so the hopper fills, and the harvested tonnage, both reflect it.
+    const effectiveYield = field.trueYieldTonsPerAcre !== undefined
+      ? field.trueYieldTonsPerAcre * productivityMultiplier(field, now)
+      : undefined;
     let target = path.total;
-    if (task.type === "harvest" && field.trueYieldTonsPerAcre) {
+    if (task.type === "harvest" && effectiveYield) {
       const capacity = harvesterCapacityTons(agent.size ?? "medium");
       const room = Math.max(0, capacity - (agent.grainOnboard ?? 0));
-      const roomAcres = room / field.trueYieldTonsPerAcre;
+      const roomAcres = room / effectiveYield;
       const roomWork = workDoneAt(path, dist) + (roomAcres * ACRE_M2) / path.swath;
       target = Math.min(path.total, distanceAtWork(path, roomWork));
     }
@@ -1423,7 +1435,7 @@ function tickAgent(
     agent.pos = s.pos;
     agent.heading = s.heading;
 
-    if (task.type === "harvest" && field.crop && field.trueYieldTonsPerAcre !== undefined) {
+    if (task.type === "harvest" && field.crop && effectiveYield !== undefined) {
       // Grain banks into the combine's own hopper (not the farm bin directly
       // anymore) — a Grain Trailer carries it the rest of the way. NOT
       // clamped to capacity here: the distance-target clamp above keeps this
@@ -1432,7 +1444,7 @@ function tickAgent(
       // tick can still bank a hair over the target (bug found in testing —
       // clamping here silently discarded that sliver of grain every fill
       // cycle instead of letting the hopper run fractionally over).
-      agent.grainOnboard = (agent.grainOnboard ?? 0) + (task.doneAcres - prevAcres) * field.trueYieldTonsPerAcre;
+      agent.grainOnboard = (agent.grainOnboard ?? 0) + (task.doneAcres - prevAcres) * effectiveYield;
       field.harvestedAcres = task.doneAcres;
       // Remember where/what this hopper came from — survives the harvest
       // task's own completion (and applyHarvestDone clearing field.crop),
@@ -1450,8 +1462,8 @@ function tickAgent(
       task.doneAcres = task.totalAcres;
       // Capture the tons harvested BEFORE completeTask (applyHarvestDone clears
       // field.trueYieldTonsPerAcre once the crop comes off).
-      const harvestTons = task.type === "harvest" && field.trueYieldTonsPerAcre !== undefined
-        ? task.totalAcres * field.trueYieldTonsPerAcre
+      const harvestTons = task.type === "harvest" && effectiveYield !== undefined
+        ? task.totalAcres * effectiveYield
         : undefined;
       completeTask(task, field, now, rand);
       recordCompletion(save, task, field, agent, now, harvestTons !== undefined ? { tons: harvestTons } : {});
@@ -1492,6 +1504,11 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
       applyHarvestDone(field);
       break;
     case "mow":
+      // Snapshot the productivity boost for THIS cut before applyMowDone
+      // advances cutsThisYear — the fertilize taper is keyed to how many
+      // cuttings were done BEFORE this one, and baling (which reads this
+      // snapshot) always happens after the count's already moved on.
+      field.lastCutProductivity = productivityMultiplier(field, now);
       // Perennial "harvest": the field is cut and left with forage to rake +
       // bale; the stand itself (crop/plantedAt) is untouched so it regrows.
       applyMowDone(field, now);
@@ -1512,10 +1529,12 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
       field.weeded = true;
       break;
     case "fertilize":
-      // Visual only: the wet-spray darkening lasts through this month
-      // (tickFarming clears it on the month turn). A fertility system to
-      // hook a yield effect into is still out of scope.
+      // fertilizedAt is visual only: the wet-spray darkening lasts through
+      // this month (tickFarming clears it on the month turn). fertilized
+      // persists for the rest of the crop cycle and drives the +30% yield
+      // boost (productivityMultiplier, farming.ts).
       field.fertilizedAt = now;
+      field.fertilized = true;
       break;
   }
 }

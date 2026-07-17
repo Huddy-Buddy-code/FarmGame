@@ -99,6 +99,16 @@ export interface Field {
    * ~20% (wet liquid spray) for the rest of THAT month, then dries back to
    * normal on the month turn (tickFarming clears this). */
   fertilizedAt?: SimTime;
+  /** This crop cycle has been fertilized — drives the +30% yield boost
+   * (`productivityMultiplier`). Reset at harvest/replanting; for a perennial
+   * stand it resets when the campaign year turns, so the boost/taper is
+   * per-year, tied to `cutsThisYear`/`cutYear`. */
+  fertilized?: boolean;
+  /** Productivity multiplier snapshotted the moment a perennial cut (mow)
+   * completes — the fertilize taper is keyed to cuttings before THIS one, and
+   * baling (which reads this) always runs after `cutsThisYear` has already
+   * advanced past that. Cleared once the bale using it settles. */
+  lastCutProductivity?: number;
   /** The field's two entrance/exit gates, on/near the boundary. Machines
    * leave the field via the nearest gate and enter through one (tasks.ts
    * route composition). Auto-placed at creation (`sim/access.ts`), draggable

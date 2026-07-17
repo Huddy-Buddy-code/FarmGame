@@ -47,7 +47,7 @@ import {
   getDaysPerMonth, setDaysPerMonth, minutesPerMonth,
 } from "./sim/calendar";
 import {
-  tickFarming, growthProgress, yieldRange, inPlantingWindow, canPlow,
+  tickFarming, growthProgress, yieldRange, productivityMultiplier, inPlantingWindow, canPlow,
   hasStandingCrop, inWeedingWindow, canFertilizeNow, isPerennial, canSeedPerennial,
   isPerennialDormant,
 } from "./sim/farming";
@@ -2485,12 +2485,13 @@ function wireFieldHover(map: maplibregl.Map) {
       hoveredId = hit.id;
       const cropIcon = hit.crop ? gameConfig.crops[hit.crop].emoji : "🟫";
       const cropName = hit.crop ? gameConfig.crops[hit.crop].name : "No crop planted";
+      const boost = Math.round(productivityMultiplier(hit, clock.time()) * 100);
       badge.innerHTML = `
         <div class="fb-icon">${cropIcon}</div>
         <div class="fb-text">
           <div class="fb-name">${fieldLabel(hit)}</div>
           <div class="fb-crop">${cropName}</div>
-          <div class="fb-boost">⚡ 100%</div>
+          <div class="fb-boost">⚡ ${boost}%</div>
         </div>`;
       badge.style.display = "flex";
     }
