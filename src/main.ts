@@ -201,6 +201,7 @@ async function main() {
     wireFieldDrawing(map);
     wireBuildingPlacement(map);
     wireFieldSelection(map);
+    wireFieldHover(map);
     wireTimeControls();
     buildCropCalendar();
     wireInventory();
@@ -2449,6 +2450,35 @@ function wireFieldSelection(map: maplibregl.Map) {
       toast("❌ " + (err as Error).message, 3500);
     }
   });
+}
+
+/** Small floating badge that follows the cursor over an owned field — crop +
+ * a productivity readout (maintainer request, 2026-07-16). No penalty/boost
+ * mechanic exists yet, so productivity is a flat 100% placeholder for every
+ * field until that system lands. */
+function wireFieldHover(map: maplibregl.Map) {
+  const badge = $("field-badge");
+  map.on("mousemove", (e) => {
+    if (mode !== "none") {
+      badge.style.display = "none";
+      return;
+    }
+    const p = toMeters([e.lngLat.lng, e.lngLat.lat]);
+    const hit = save.fields.find((f) => pointInPolygon(p, f.boundary));
+    if (!hit) {
+      badge.style.display = "none";
+      return;
+    }
+    const cropText = hit.crop ? `${gameConfig.crops[hit.crop].emoji} ${gameConfig.crops[hit.crop].name}` : "🟫 No crop planted";
+    badge.innerHTML = `
+      <div class="fb-name">${fieldLabel(hit)}</div>
+      <div class="fb-crop">${cropText}</div>
+      <div class="fb-boost">⚡ Productivity: 100%</div>`;
+    badge.style.left = `${e.originalEvent.clientX + 16}px`;
+    badge.style.top = `${e.originalEvent.clientY + 16}px`;
+    badge.style.display = "block";
+  });
+  map.on("mouseleave", () => (badge.style.display = "none"));
 }
 
 function openFieldPanel(fieldId: string) {

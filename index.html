@@ -188,6 +188,15 @@
         cursor: pointer; opacity: 0.6; transition: opacity 0.15s;
       }
       .fp-rename-btn:hover { opacity: 1; }
+
+      /* ---------- Field hover badge (maintainer request, 2026-07-16) ---------- */
+      #field-badge {
+        position: fixed; z-index: 45; display: none; pointer-events: none;
+        padding: 8px 12px; min-width: 150px;
+      }
+      #field-badge .fb-name { font-weight: 700; font-size: 14px; margin-bottom: 3px; }
+      #field-badge .fb-crop { font-size: 12px; color: #8a7658; margin-bottom: 4px; }
+      #field-badge .fb-boost { font-size: 12px; font-weight: 600; color: var(--green-dark); }
       #fieldpanel .close {
         position: absolute; top: 8px; right: 10px; border: none; background: none;
         font-size: 16px; padding: 2px 6px; color: #8a7658;
@@ -667,6 +676,9 @@
   </head>
   <body>
     <div id="map"></div>
+
+    <!-- Field hover badge: crop + productivity, follows the cursor over an owned field. -->
+    <div id="field-badge" class="panel"></div>
 
     <!-- Version marker so the maintainer can tell what's live vs. local. -->
     <div id="version-tag" style="position: absolute; left: 10px; top: 10px; z-index: 30; padding: 3px 8px; font-size: 11px; font-weight: 600; color: var(--cream); background: rgba(0,0,0,0.55); border-radius: 6px; pointer-events: none;">BETA 1.0</div>
