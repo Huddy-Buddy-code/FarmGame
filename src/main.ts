@@ -18,7 +18,7 @@ import type { Feature } from "geojson";
 import { loadCounty } from "./county/registry";
 import { setProjection, toMeters, toLngLat } from "./geo/coords";
 import type { LngLat, Meters } from "./geo/coords";
-import { areaAcres, pointInPolygon, nearestPointOnPolygon } from "./geo/geometry";
+import { areaAcres, pointInPolygon, nearestPointOnPolygon, centroidOf } from "./geo/geometry";
 import { naipSource } from "./map/naip";
 import { addRoadsLayer } from "./map/roadsLayer";
 import { OverlayEngine } from "./map/overlay";
@@ -2458,27 +2458,54 @@ function wireFieldSelection(map: maplibregl.Map) {
  * field until that system lands. */
 function wireFieldHover(map: maplibregl.Map) {
   const badge = $("field-badge");
+  let hoveredId: string | null = null;
+
+  function positionBadge(field: Field) {
+    const centroid = toLngLat(centroidOf(field.boundary));
+    const pt = map.project(centroid);
+    const rect = map.getContainer().getBoundingClientRect();
+    badge.style.left = `${rect.left + pt.x}px`;
+    badge.style.top = `${rect.top + pt.y}px`;
+  }
+
   map.on("mousemove", (e) => {
     if (mode !== "none") {
+      hoveredId = null;
       badge.style.display = "none";
       return;
     }
     const p = toMeters([e.lngLat.lng, e.lngLat.lat]);
     const hit = save.fields.find((f) => pointInPolygon(p, f.boundary));
     if (!hit) {
+      hoveredId = null;
       badge.style.display = "none";
       return;
     }
-    const cropText = hit.crop ? `${gameConfig.crops[hit.crop].emoji} ${gameConfig.crops[hit.crop].name}` : "🟫 No crop planted";
-    badge.innerHTML = `
-      <div class="fb-name">${fieldLabel(hit)}</div>
-      <div class="fb-crop">${cropText}</div>
-      <div class="fb-boost">⚡ Productivity: 100%</div>`;
-    badge.style.left = `${e.originalEvent.clientX + 16}px`;
-    badge.style.top = `${e.originalEvent.clientY + 16}px`;
-    badge.style.display = "block";
+    if (hit.id !== hoveredId) {
+      hoveredId = hit.id;
+      const cropIcon = hit.crop ? gameConfig.crops[hit.crop].emoji : "🟫";
+      const cropName = hit.crop ? gameConfig.crops[hit.crop].name : "No crop planted";
+      badge.innerHTML = `
+        <div class="fb-icon">${cropIcon}</div>
+        <div class="fb-text">
+          <div class="fb-name">${fieldLabel(hit)}</div>
+          <div class="fb-crop">${cropName}</div>
+          <div class="fb-boost">⚡ 100%</div>
+        </div>`;
+      badge.style.display = "flex";
+    }
+    positionBadge(hit);
   });
-  map.on("mouseleave", () => (badge.style.display = "none"));
+  map.on("mouseleave", () => {
+    hoveredId = null;
+    badge.style.display = "none";
+  });
+  // Stay pinned to the field's centroid while panning/zooming, not the cursor.
+  map.on("move", () => {
+    if (!hoveredId) return;
+    const field = save.fields.find((f) => f.id === hoveredId);
+    if (field) positionBadge(field);
+  });
 }
 
 function openFieldPanel(fieldId: string) {
