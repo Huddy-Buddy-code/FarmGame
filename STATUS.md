@@ -775,6 +775,21 @@ once per maintainer; modeled closely on the grain-cart `unloadHarvester` relay.
 - Existing jitter test (moved-fraction check) still passes unmodified against
   the new spacing-based magnitude. 219 green, typecheck clean.
 
+### Follow-up #5: mid-dump storage-fill now reroutes the rest of the load (2026-07-17)
+
+- Bug: when a load only PARTIALLY fit (barn had room for 1 of the 2 bales on
+  board), the leftover cargo set `waitingForStorage=true` and parked at that
+  same barn with `budget=0` forever — the Sell Point fallback only ran when
+  deciding a NEW trip's destination, not mid-dump on the current one.
+- Fix: on a partial `haulBalesInto`, re-run `chooseBaleDest` for what's left
+  right there (both the direct Hay-Spikes path and the trailer path) instead
+  of just flagging `waitingForStorage`. It'll find another storage building
+  with room, or fall back to a Sell Point, or (only if truly nothing exists)
+  still wait.
+- New test: medium Hay Spikes (2-bale load) against a barn with exactly 1
+  slot free + a Sell Point built — asserts the barn gets the 1 it had room
+  for and the other bale sells, no stall. 220 green, typecheck clean.
+
 ## Latest changes (2026-07-17, Equipment grid 5-per-row)
 
 - **Equipment cards now 5 per row** (was 4, briefly 2) — `.equip-grid` to

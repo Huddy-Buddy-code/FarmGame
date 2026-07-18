@@ -208,6 +208,26 @@ describe("Bale hauling relay (maintainer request, 2026-07-17)", () => {
     expect(save.tasks.find((t) => t.type === "haulBales")?.waitingForStorage).toBeFalsy();
   });
 
+  it("a partial unload (storage fills mid-dump) reroutes the rest of that same load to the Sell Point", () => {
+    const save = gameForHaul();
+    buyImplement(save, "haySpikes", "medium"); // carries 2 bales per trip
+    const barn = buyBuildingAt(save, "baleBarn", [-300, -300]);
+    barn.storedBales = { hay: BARN_CAP - 1 }; // room for exactly 1 more
+    buyBuildingAt(save, "sellPoint", [-320, -320]);
+    const field = baledField(save, 2, "hay");
+    const startMoney = save.money;
+
+    queueHaulBales(save, field.id);
+    runTasks(save, APRIL_1, noHaulLeft(save, field));
+
+    // The barn took the 1 it had room for; the other bale from the SAME
+    // load was rerouted to the Sell Point instead of stalling forever.
+    expect(storedBalesTotal(barn)).toBe(BARN_CAP);
+    expect(save.money).toBeCloseTo(startMoney + gameConfig.baleProducts.hay.pricePerBale, 0);
+    const task = save.tasks.find((t) => t.type === "haulBales");
+    expect(task?.waitingForStorage).toBeFalsy();
+  });
+
   it("queueHaulBales / fieldHasLooseBales: no double-dispatch, and none when the field is empty", () => {
     const save = gameForHaul();
     buyImplement(save, "haySpikes", "small");

@@ -1499,10 +1499,26 @@ function tickAgent(
           const added = store ? haulBalesInto(store, product, tCargo) : 0;
           trailerImpl.cargoBales = tCargo - added;
           if ((trailerImpl.cargoBales ?? 0) > 0) {
-            // Barn filled mid-dump — look for another destination next.
-            task.waitingForStorage = true;
-            task.trailerPhase = "toStorage";
-            budget = 0;
+            // Barn filled mid-dump — reroute what's left (another storage, or
+            // Sell Point as a last resort) instead of stalling on this one.
+            const dest = chooseBaleDest(save, product, agent.pos);
+            if (!dest) {
+              task.waitingForStorage = true;
+              task.trailerPhase = "toStorage";
+              budget = 0;
+              continue;
+            }
+            task.waitingForStorage = false;
+            task.trailerDest = dest.sell ? "sell" : "storage";
+            if (!samePos(agent.pos, dest.pos)) {
+              task.trailerPhase = "toStorage";
+              agent.state = "traveling";
+              budget = driveToward(save, agent, dest.pos, speed, budget);
+              continue;
+            }
+            task.trailerPhase = "dumping";
+            task.trailerTimer = gameConfig.hauling.dumpMinutes;
+            agent.state = "working";
             continue;
           }
           trailerImpl.cargoBaleProduct = undefined;
@@ -1632,10 +1648,26 @@ function tickAgent(
         const added = store ? haulBalesInto(store, product, spikes.cargoBales ?? 0) : 0;
         spikes.cargoBales = (spikes.cargoBales ?? 0) - added;
         if ((spikes.cargoBales ?? 0) > 0) {
-          // Barn filled mid-dump — look for another destination next.
-          task.waitingForStorage = true;
-          task.haulPhase = "toStorage";
-          budget = 0;
+          // Barn filled mid-dump — reroute what's left (another storage, or
+          // Sell Point as a last resort) instead of stalling on this one.
+          const dest = chooseBaleDest(save, product, agent.pos);
+          if (!dest) {
+            task.waitingForStorage = true;
+            task.haulPhase = "toStorage";
+            budget = 0;
+            continue;
+          }
+          task.waitingForStorage = false;
+          task.haulDest = dest.sell ? "sell" : "storage";
+          if (!samePos(agent.pos, dest.pos)) {
+            task.haulPhase = "toStorage";
+            agent.state = "traveling";
+            budget = driveToward(save, agent, dest.pos, speed, budget);
+            continue;
+          }
+          task.haulPhase = "dumping";
+          task.phaseTimer = gameConfig.hauling.dumpMinutes;
+          agent.state = "working";
           continue;
         }
         spikes.cargoBaleProduct = undefined;
