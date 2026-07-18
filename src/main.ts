@@ -45,7 +45,7 @@ import { SimClock } from "./sim/clock";
 import {
   formatDate, dateOf, MONTH_NAMES, MONTH_SHORT,
   START_MONTH, MONTHS_PER_YEAR, MINUTES_PER_DAY,
-  getDaysPerMonth, setDaysPerMonth, minutesPerMonth,
+  getDaysPerMonth, setDaysPerMonth, minutesPerMonth, nextMonthStart,
 } from "./sim/calendar";
 import {
   tickFarming, growthProgress, yieldRange, productivityMultiplier, inPlantingWindow, canPlow,
@@ -2413,6 +2413,12 @@ function wireTimeControls() {
     const mpm = minutesPerMonth();
     const target = (Math.floor(clock.time() / mpm) + 1) * mpm; // start of next month
     runMontage(target);
+  });
+
+  // Jump straight to the start of Spring (March 1) — always the NEXT one,
+  // even if the sim is already mid-March (mirrors nextMonthStart's semantics).
+  $("skip-spring").addEventListener("click", () => {
+    runMontage(nextMonthStart(clock.time(), 2)); // 2 = March, 0-based
   });
 
   // Calendar pace knob: how many real days make up a game month. Everything the

@@ -775,6 +775,13 @@ once per maintainer; modeled closely on the grain-cart `unloadHarvester` relay.
 - Existing jitter test (moved-fraction check) still passes unmodified against
   the new spacing-based magnitude. 219 green, typecheck clean.
 
+### Skip to Spring button (2026-07-17)
+
+- New "🌱 Skip to Spring" button at the end of `#timebar`, next to Skip month.
+  Reuses the existing `runMontage()` skip-ahead animation, targeting
+  `nextMonthStart(clock.time(), 2)` (March, 0-based) — always jumps to the
+  NEXT March 1, even mid-March. No new sim logic, UI-only wiring in `main.ts`.
+
 ### Follow-up #5: mid-dump storage-fill now reroutes the rest of the load (2026-07-17)
 
 - Bug: when a load only PARTIALLY fit (barn had room for 1 of the 2 bales on
