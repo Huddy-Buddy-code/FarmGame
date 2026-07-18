@@ -21,7 +21,7 @@
  */
 
 import { gameConfig, SIZE_RANK, FEET_TO_METERS } from "../config/gameConfig";
-import type { CropId, EquipmentSize } from "../config/gameConfig";
+import type { CropId, EquipmentSize, BaleProduct } from "../config/gameConfig";
 import type { SimTime } from "./clock";
 import type { SaveState, Field, FieldStatus, FarmTask, Agent, Implement, TaskType, FieldPlan, CompletedTask } from "../state/saveState";
 import { dateOf } from "./calendar";
@@ -34,7 +34,10 @@ import {
 } from "./farming";
 import { buildCoveragePath, sampleAt, workDoneAt, distanceAtWork } from "./coverage";
 import type { CoveragePath } from "./coverage";
-import { nearestFarmYard, nearestSiloForCrop, siloCapacityForCrop } from "./buildings";
+import {
+  nearestFarmYard, nearestSiloForCrop, siloCapacityForCrop,
+  nearestBaleStorageFor, haulBalesInto, nearestSellPointFor,
+} from "./buildings";
 import type { Building } from "../state/saveState";
 import { planRoute } from "./roadNet";
 import type { RoadNetwork } from "./roadNet";
@@ -53,6 +56,7 @@ export const TASK_AGENT_KIND: Record<TaskType, Agent["kind"]> = {
   rake: "tractor",
   bale: "tractor",
   unloadHarvester: "tractor",
+  haulBales: "tractor",
 };
 
 let taskSeq = 0;
@@ -70,12 +74,12 @@ export type EquipmentKind = "tractor" | "harvester";
 /** Buyable implements: a plow (tills), a planter (seeds), a sprayer (weeds or
  * fertilizes), a Grain Trailer (hauls a full combine to a silo) — same widths/
  * requirements, a tractor hitches one at a time. */
-export type ImplementKind = "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower";
+export type ImplementKind = "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower" | "haySpikes" | "baleTrailer";
 
 const EQUIPMENT_NAME: Record<EquipmentKind, string> = { tractor: "Tractor", harvester: "Combine" };
 const IMPLEMENT_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake", bailer: "Baler",
-  grainTrailer: "Grain Trailer", mower: "Mower",
+  grainTrailer: "Grain Trailer", mower: "Mower", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
 };
 const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
 
@@ -92,7 +96,7 @@ const FIELD_EXPENSE_ITEM: Partial<Record<TaskType, string>> = {
  * Queue panel's per-task implement icon (main.ts). */
 export const TASK_IMPLEMENT: Partial<Record<TaskType, ImplementKind>> = {
   plow: "plow", plant: "planter", mow: "mower", weed: "sprayer", fertilize: "sprayer",
-  rake: "rake", bale: "bailer", unloadHarvester: "grainTrailer",
+  rake: "rake", bale: "bailer", unloadHarvester: "grainTrailer", haulBales: "haySpikes",
 };
 
 /** Price of a power unit at a given size. */
@@ -108,6 +112,16 @@ export function harvesterCapacityTons(size: EquipmentSize): number {
 /** Cargo capacity of a Grain Trailer at `size`, tons. */
 export function grainTrailerCapacityTons(size: EquipmentSize): number {
   return gameConfig.equipment.grainTrailer[size].capacityTons;
+}
+
+/** How many bales the Hay Spikes hold at `size` (Small 1 / Medium 2). */
+export function haySpikesCapacityBales(size: EquipmentSize): number {
+  return gameConfig.equipment.haySpikes[size].capacityBales;
+}
+
+/** How many bales a Bale Trailer holds at `size` (Small 10 / Medium 20). */
+export function baleTrailerCapacityBales(size: EquipmentSize): number {
+  return gameConfig.equipment.baleTrailer[size].capacityBales;
 }
 
 /** Manual escape hatch (maintainer request, 2026-07-13): a harvester with
@@ -131,6 +145,8 @@ const IMPLEMENT_CONFIG: Record<ImplementKind, Record<EquipmentSize, { price: num
   bailer: gameConfig.equipment.bailer,
   grainTrailer: gameConfig.equipment.grainTrailer,
   mower: gameConfig.equipment.mower,
+  haySpikes: gameConfig.equipment.haySpikes,
+  baleTrailer: gameConfig.equipment.baleTrailer,
 };
 
 /** Price of an implement at a given size. */
@@ -306,6 +322,9 @@ export function sellImplement(save: SaveState, implId: string): { impl: Implemen
     if (host && host.state !== "idle") {
       throw new Error(`${host.name} is using that ${IMPLEMENT_NAME[impl.kind].toLowerCase()} — let it finish first`);
     }
+  }
+  if ((impl.cargoBales ?? 0) > 0) {
+    throw new Error(`That ${IMPLEMENT_NAME[impl.kind].toLowerCase()} still has ${impl.cargoBales} bale(s) loaded — deliver them first`);
   }
   const refund = impl.purchaseCost ?? implementPrice(impl.kind, impl.size);
   save.implements.splice(idx, 1);
@@ -560,7 +579,7 @@ export function reorderTask(save: SaveState, taskId: string, beforeTaskId: strin
 export function estimateTaskHours(save: SaveState, task: FarmTask): number {
   // Not an acres-based job — point-to-point hauling, no coverage path/width.
   // The UI shows its own phase text instead of an acres/hours estimate.
-  if (task.type === "unloadHarvester") return 0;
+  if (task.type === "unloadHarvester" || task.type === "haulBales") return 0;
   const field = save.fields.find((f) => f.id === task.fieldId);
   if (!field) return 0;
   const remainingAcres = Math.max(0, task.totalAcres - task.doneAcres);
@@ -654,6 +673,10 @@ function isStartable(task: FarmTask, field: Field): boolean {
   // Baler follows the rake: startable once raking has begun (windrowed) and the
   // field hasn't been baled yet (still "harvested").
   if (task.type === "bale") return field.status === "harvested" && !!field.windrowed;
+  // Haul Bales: startable while the field still has bales on the ground —
+  // field STATUS doesn't matter (bales sit on a mulched/re-plowed field the
+  // same way). If they're all gone (sold, or already hauled), it's moot.
+  if (task.type === "haulBales") return (field.baleLocations?.length ?? 0) > 0;
   return field.status === "ready"; // harvest
 }
 
@@ -681,6 +704,16 @@ const baleLastInside = new Map<string, Meters>();
 // cart bounce between gates as the combine swept back and forth (maintainer
 // report, 2026-07-13). Cleared with the task; a reload just re-picks once.
 const stageGateRuntime = new Map<string, Meters>();
+// The field-entrance gate a Bale Trailer committed to for a haul (same
+// oscillation-avoidance reasoning as the grain cart's staging gate). Keyed by
+// haulBales task id; cleared with the task.
+const haulEntranceRuntime = new Map<string, Meters>();
+// The specific bale a Hay-Spikes tractor is currently driving to, LOCKED for
+// the whole trip (maintainer report, 2026-07-17): re-picking "nearest bale"
+// every tick made the collector oscillate between storage and the field gate
+// — as it moved, which bale was nearest (and thus which gate the road route
+// used) flipped, so it drove back and forth. Locked until reached + loaded.
+const haulTargetRuntime = new Map<string, Meters>();
 
 /** Working width (meters) for a task: from the attached implement (plow/
  * planter), or the config combine header width for harvest. */
@@ -717,6 +750,8 @@ function clearTaskRuntime(taskId: string): void {
   baleTieRemaining.delete(taskId);
   baleLastInside.delete(taskId);
   stageGateRuntime.delete(taskId);
+  haulEntranceRuntime.delete(taskId);
+  haulTargetRuntime.delete(taskId);
 }
 
 /** Things that happened during a tick, for the UI to toast. */
@@ -979,6 +1014,143 @@ function ensureUnloadTask(save: SaveState, harvester: Agent, fieldId: string, cr
   });
 }
 
+/** Does `field` have loose bales worth hauling — bales on the ground and no
+ * haul job already covering it? */
+export function fieldHasLooseBales(save: SaveState, fieldId: string): boolean {
+  const field = save.fields.find((f) => f.id === fieldId);
+  return (field?.baleLocations?.length ?? 0) > 0 && !save.tasks.some((t) => t.type === "haulBales" && t.fieldId === fieldId);
+}
+
+/** Queue a "Haul Bales" job for a field's loose bales, if one isn't already
+ * running (system-generated after baling AND player-triggerable from the field
+ * panel — maintainer request, 2026-07-17). No cost, like `unloadHarvester`. A
+ * Hay-Spikes tractor picks it up via the generic assignment loop (and pulls in
+ * a Bale-Trailer helper there if one's idle). Returns the task, or undefined if
+ * there was nothing to haul / one's already going. */
+export function queueHaulBales(save: SaveState, fieldId: string): FarmTask | undefined {
+  const field = save.fields.find((f) => f.id === fieldId);
+  if (!field || (field.baleLocations?.length ?? 0) <= 0) return undefined;
+  if (save.tasks.some((t) => t.type === "haulBales" && t.fieldId === fieldId)) return undefined;
+  const task: FarmTask = {
+    id: `task-${++taskSeq}`,
+    type: "haulBales",
+    fieldId,
+    totalAcres: 1,
+    doneAcres: 0,
+    status: "queued",
+    costPaid: 0,
+    baleProduct: field.baleProduct ?? "cornStover",
+    haulPhase: "toBale",
+  };
+  save.tasks.push(task);
+  return task;
+}
+
+// --- Bale-hauling relay helpers (2026-07-17) -------------------------------
+
+/** Index of the bale nearest `p` in `locs` (the next one a Hay-Spikes tractor
+ * drives to). */
+function nearestBaleIndex(locs: Meters[], p: Meters): number {
+  let best = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < locs.length; i++) {
+    const d = Math.hypot(locs[i]![0] - p[0], locs[i]![1] - p[1]);
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/** Pull an idle tractor+Bale-Trailer into a Haul Bales job as the hauler half
+ * of the relay (auto-hitching a loose trailer if the spare tractor has none).
+ * No-op if there's no spare idle tractor / no trailer available — the
+ * Hay-Spikes tractor then hauls direct.
+ *
+ * TEMPORARILY DISABLED (maintainer request, 2026-07-17): the two-tractor relay
+ * confused the collector — it oscillated between the field and storage chasing
+ * the trailer. Short-circuited to a no-op so every haul is a straightforward
+ * Hay-Spikes-direct trip while that's sorted out; the relay code below is left
+ * intact to re-enable once fixed. */
+const TRAILER_RELAY_ENABLED = false;
+function assignTrailerHelper(save: SaveState, task: FarmTask, spikesAgent: Agent): void {
+  if (!TRAILER_RELAY_ENABLED) return;
+  const helper = save.agents.find(
+    (a) =>
+      a.kind === "tractor" &&
+      a.id !== spikesAgent.id &&
+      a.state === "idle" &&
+      !a.taskId &&
+      !!a.size &&
+      (!!attachedImplement(save, a.id, "baleTrailer") || !!availableImplementFor(save, a, "baleTrailer")),
+  );
+  if (!helper) return;
+  if (!attachedImplement(save, helper.id, "baleTrailer")) {
+    const trailer = availableImplementFor(save, helper, "baleTrailer");
+    if (!trailer) return;
+    for (const i of save.implements) if (i.attachedTo === helper.id) i.attachedTo = undefined;
+    trailer.attachedTo = helper.id;
+  }
+  const trailer = attachedImplement(save, helper.id, "baleTrailer")!;
+  trailer.cargoBales ??= 0;
+  trailer.cargoBaleProduct = task.baleProduct;
+  task.trailerAgentId = helper.id;
+  task.trailerPhase = "toEntrance";
+  helper.taskId = task.id;
+  helper.state = "traveling";
+}
+
+/** Where a bale hauler should head with its load: the nearest Bale Storage
+ * with room, or — if none exists or all of it's full — the nearest Sell
+ * Point (maintainer request, 2026-07-17: "prefer storage, fall back to
+ * selling"). `undefined` when neither exists (the caller waits, ⚠️). */
+function chooseBaleDest(save: SaveState, product: BaleProduct, from: Meters): { pos: Meters; sell: boolean } | undefined {
+  const store = nearestBaleStorageFor(save, product, from);
+  if (store) return { pos: store.pos, sell: false };
+  const sellPt = nearestSellPointFor(save, from);
+  if (sellPt) return { pos: sellPt.pos, sell: true };
+  return undefined;
+}
+
+/** Sell bales dropped at a Sell Point on the spot — a hauler's fallback when
+ * no Bale Storage exists or all of it's full (maintainer request,
+ * 2026-07-17). Records the sale like any other bale sale so it shows up in
+ * the Work Queue's Completed section + cashflow, even though no player click
+ * triggered it. */
+function sellHauledBales(save: SaveState, product: BaleProduct, n: number, now: SimTime): void {
+  if (n <= 0) return;
+  const cfg = gameConfig.baleProducts[product];
+  const revenue = Math.round(n * cfg.pricePerBale);
+  save.money += revenue;
+  recordCash(save, "cropRevenue", `${cfg.name} bales`, revenue);
+  appendCompletedTask(save, {
+    id: `sale-${++taskSeq}`,
+    type: "sellBales",
+    label: cfg.name,
+    bales: n,
+    revenue,
+    completedAt: now,
+  });
+}
+
+/** The whole relay is done: release both tractors and drop the task. */
+function finishHaul(save: SaveState, task: FarmTask, agent: Agent, events: TaskEvent[]): void {
+  events.push({ kind: "finished", task, agent });
+  for (const id of [task.agentId, task.trailerAgentId]) {
+    if (!id) continue;
+    const a = save.agents.find((x) => x.id === id);
+    if (a) {
+      a.taskId = undefined;
+      a.state = "idle";
+      clearAgentRoute(a.id);
+    }
+  }
+  const idx = save.tasks.indexOf(task);
+  if (idx >= 0) save.tasks.splice(idx, 1);
+  clearTaskRuntime(task.id);
+}
+
 function tickAgent(
   save: SaveState,
   agent: Agent,
@@ -1056,6 +1228,12 @@ function tickAgent(
       if (next.type === "bale") {
         const b = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
         if (b) b.cargoTons = 0;
+      }
+      // Starting a Haul Bales job: pull in an idle tractor+Bale-Trailer as the
+      // hauler half of the relay, if one's available (else the Hay-Spikes
+      // tractor hauls its 1–2 bales straight to storage itself).
+      if (next.type === "haulBales") {
+        assignTrailerHelper(save, next, agent);
       }
       events.push({ kind: "started", task: next, agent });
       continue;
@@ -1261,6 +1439,303 @@ function tickAgent(
       }
     }
 
+    // Haul Bales: a two-tractor relay, also point-to-point (not a coverage
+    // path), so handled here like unloadHarvester. One agent runs the
+    // Hay-Spikes brain (task.agentId — collects bales in-field), the other the
+    // Bale-Trailer brain (task.trailerAgentId — stages at the field entrance
+    // and runs full loads to storage). Both reference this same task; we branch
+    // by which one is being ticked (maintainer request, 2026-07-17).
+    if (task.type === "haulBales") {
+      const haulField = save.fields.find((f) => f.id === task.fieldId);
+      const product = task.baleProduct ?? "cornStover";
+      const speed = (gameConfig.work.travelSpeedKmh * 1000) / 60; // meters per sim-minute
+      const trailerAgent = task.trailerAgentId ? save.agents.find((a) => a.id === task.trailerAgentId) : undefined;
+      const trailerImpl = trailerAgent ? save.implements.find((i) => i.attachedTo === trailerAgent.id && i.kind === "baleTrailer") : undefined;
+      const hasTrailer = !!trailerAgent && !!trailerImpl;
+
+      if (!haulField) {
+        // Field sold mid-haul — nothing left to reference. Drop the whole job.
+        finishHaul(save, task, agent, events);
+        continue;
+      }
+
+      // --- TRAILER brain ---
+      if (agent.id === task.trailerAgentId) {
+        if (!trailerImpl) {
+          // Trailer got detached — demote to a direct haul; release this agent.
+          task.trailerAgentId = undefined;
+          task.trailerPhase = undefined;
+          agent.taskId = undefined;
+          clearAgentRoute(agent.id);
+          agent.state = "idle";
+          continue;
+        }
+        const trailerCap = baleTrailerCapacityBales(trailerImpl.size);
+        const tCargo = trailerImpl.cargoBales ?? 0;
+        const spikesImplNow = save.implements.find((i) => i.attachedTo === task.agentId && i.kind === "haySpikes");
+        const spikesCargo = spikesImplNow?.cargoBales ?? 0;
+        const fieldEmpty = (haulField.baleLocations?.length ?? 0) === 0;
+        const spikesDone = fieldEmpty && spikesCargo <= 0;
+
+        if (task.trailerPhase === "dumping") {
+          agent.state = "working";
+          const timer = task.trailerTimer ?? gameConfig.hauling.dumpMinutes;
+          const used = Math.min(timer, budget);
+          budget -= used;
+          if (timer - used > 1e-9) {
+            task.trailerTimer = timer - used;
+            continue;
+          }
+          task.trailerTimer = undefined;
+          if (task.trailerDest === "sell") {
+            sellHauledBales(save, product, tCargo, now);
+            trailerImpl.cargoBales = 0;
+            trailerImpl.cargoBaleProduct = undefined;
+            task.waitingForStorage = false;
+            task.trailerPhase = "toEntrance";
+            continue;
+          }
+          const store = nearestBaleStorageFor(save, product, agent.pos);
+          const added = store ? haulBalesInto(store, product, tCargo) : 0;
+          trailerImpl.cargoBales = tCargo - added;
+          if ((trailerImpl.cargoBales ?? 0) > 0) {
+            // Barn filled mid-dump — look for another destination next.
+            task.waitingForStorage = true;
+            task.trailerPhase = "toStorage";
+            budget = 0;
+            continue;
+          }
+          trailerImpl.cargoBaleProduct = undefined;
+          task.waitingForStorage = false;
+          task.trailerPhase = "toEntrance";
+          continue;
+        }
+
+        // Everything delivered and nothing left to collect — the relay's done.
+        if (spikesDone && tCargo <= 0) {
+          finishHaul(save, task, agent, events);
+          continue;
+        }
+
+        // Run to storage when the trailer's full, or the field's fully
+        // collected and it's holding the final partial load.
+        if (tCargo >= trailerCap - 1e-9 || (spikesDone && tCargo > 0)) {
+          const dest = chooseBaleDest(save, product, agent.pos);
+          if (!dest) {
+            task.waitingForStorage = true;
+            agent.state = "working";
+            budget = 0;
+            continue;
+          }
+          task.waitingForStorage = false;
+          task.trailerDest = dest.sell ? "sell" : "storage";
+          if (!samePos(agent.pos, dest.pos)) {
+            task.trailerPhase = "toStorage";
+            agent.state = "traveling";
+            budget = driveToward(save, agent, dest.pos, speed, budget);
+            continue;
+          }
+          task.trailerPhase = "dumping";
+          task.trailerTimer = gameConfig.hauling.dumpMinutes;
+          agent.state = "working";
+          continue;
+        }
+
+        // Otherwise stage at the field's entrance gate and wait to be loaded.
+        let gate = haulEntranceRuntime.get(task.id);
+        if (!gate && haulField.accessPoints && haulField.accessPoints.length >= 2) {
+          gate = nearestGate(haulField, agent.pos);
+          haulEntranceRuntime.set(task.id, gate);
+        }
+        if (gate && !samePos(agent.pos, gate)) {
+          task.trailerPhase = "toEntrance";
+          agent.state = "traveling";
+          budget = driveToward(save, agent, gate, speed, budget);
+          continue;
+        }
+        task.trailerPhase = "waiting";
+        agent.state = "working";
+        budget = 0;
+        continue;
+      }
+
+      // --- HAY-SPIKES brain (task.agentId) ---
+      const spikes = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "haySpikes");
+      if (!spikes) {
+        // Spikes detached — can't collect; drop the job (release both).
+        finishHaul(save, task, agent, events);
+        continue;
+      }
+      const spikesCap = haySpikesCapacityBales(spikes.size);
+
+      if (task.haulPhase === "loading") {
+        agent.state = "working";
+        const timer = task.phaseTimer ?? gameConfig.hauling.loadMinutes;
+        const used = Math.min(timer, budget);
+        budget -= used;
+        if (timer - used > 1e-9) {
+          task.phaseTimer = timer - used;
+          continue;
+        }
+        task.phaseTimer = undefined;
+        const locs = haulField.baleLocations ?? [];
+        if (locs.length > 0) {
+          locs.splice(nearestBaleIndex(locs, agent.pos), 1);
+          spikes.cargoBales = (spikes.cargoBales ?? 0) + 1;
+          spikes.cargoBaleProduct = product;
+        }
+        task.haulPhase = "toBale";
+        continue;
+      }
+
+      if (task.haulPhase === "unloadToTrailer") {
+        agent.state = "working";
+        const timer = task.phaseTimer ?? gameConfig.hauling.loadMinutes;
+        const used = Math.min(timer, budget);
+        budget -= used;
+        if (timer - used > 1e-9) {
+          task.phaseTimer = timer - used;
+          continue;
+        }
+        task.phaseTimer = undefined;
+        if (trailerImpl) {
+          const room = baleTrailerCapacityBales(trailerImpl.size) - (trailerImpl.cargoBales ?? 0);
+          const moved = Math.max(0, Math.min(spikes.cargoBales ?? 0, room));
+          spikes.cargoBales = (spikes.cargoBales ?? 0) - moved;
+          trailerImpl.cargoBales = (trailerImpl.cargoBales ?? 0) + moved;
+          trailerImpl.cargoBaleProduct = product;
+        }
+        if ((spikes.cargoBales ?? 0) <= 0) spikes.cargoBaleProduct = undefined;
+        task.haulPhase = "toBale";
+        continue;
+      }
+
+      if (task.haulPhase === "dumping") {
+        agent.state = "working";
+        const timer = task.phaseTimer ?? gameConfig.hauling.dumpMinutes;
+        const used = Math.min(timer, budget);
+        budget -= used;
+        if (timer - used > 1e-9) {
+          task.phaseTimer = timer - used;
+          continue;
+        }
+        task.phaseTimer = undefined;
+        if (task.haulDest === "sell") {
+          sellHauledBales(save, product, spikes.cargoBales ?? 0, now);
+          spikes.cargoBales = 0;
+          spikes.cargoBaleProduct = undefined;
+          task.waitingForStorage = false;
+          task.haulPhase = "toBale";
+          continue;
+        }
+        const store = nearestBaleStorageFor(save, product, agent.pos);
+        const added = store ? haulBalesInto(store, product, spikes.cargoBales ?? 0) : 0;
+        spikes.cargoBales = (spikes.cargoBales ?? 0) - added;
+        if ((spikes.cargoBales ?? 0) > 0) {
+          // Barn filled mid-dump — look for another destination next.
+          task.waitingForStorage = true;
+          task.haulPhase = "toStorage";
+          budget = 0;
+          continue;
+        }
+        spikes.cargoBaleProduct = undefined;
+        task.waitingForStorage = false;
+        task.haulPhase = "toBale";
+        continue;
+      }
+
+      // --- decision (phases toBale / toTrailer / toStorage / waiting) ---
+      const cargo = spikes.cargoBales ?? 0;
+      const fieldEmpty = (haulField.baleLocations?.length ?? 0) === 0;
+
+      // Still room on the spikes and bales left to grab → go collect one.
+      // LOCK onto a single target bale for the whole trip: re-choosing "nearest"
+      // every tick made the collector oscillate near the gate (maintainer
+      // report, 2026-07-17). Re-lock only if the committed bale is gone (loaded).
+      if (cargo < spikesCap && !fieldEmpty) {
+        const locs = haulField.baleLocations!;
+        let target = haulTargetRuntime.get(task.id);
+        if (!target || !locs.some((l) => samePos(l, target!))) {
+          const b = locs[nearestBaleIndex(locs, agent.pos)]!;
+          target = [b[0], b[1]];
+          haulTargetRuntime.set(task.id, target);
+        }
+        if (!samePos(agent.pos, target)) {
+          task.haulPhase = "toBale";
+          agent.state = "traveling";
+          budget = driveToward(save, agent, target, speed, budget);
+          continue;
+        }
+        haulTargetRuntime.delete(task.id); // reached it — free the lock
+        task.haulPhase = "loading";
+        task.phaseTimer = gameConfig.hauling.loadMinutes;
+        agent.state = "working";
+        continue;
+      }
+      // About to deliver (or wait) — no bale committed; clear any stale lock.
+      haulTargetRuntime.delete(task.id);
+
+      // Nothing on board and nothing left in the field.
+      if (cargo <= 0) {
+        if (hasTrailer && (trailerImpl!.cargoBales ?? 0) > 0) {
+          // Wait for the trailer to deliver its final load; it finishes the job.
+          task.haulPhase = "waiting";
+          agent.state = "working";
+          budget = 0;
+          continue;
+        }
+        finishHaul(save, task, agent, events);
+        continue;
+      }
+
+      // Carrying bales (spikes full, or field cleared with a partial load).
+      if (hasTrailer) {
+        const trailerRoom = baleTrailerCapacityBales(trailerImpl!.size) - (trailerImpl!.cargoBales ?? 0);
+        const trailerBusy = task.trailerPhase === "toStorage" || task.trailerPhase === "dumping";
+        if (trailerRoom <= 0 || trailerBusy) {
+          // Trailer full or off delivering — hold the load until it's back.
+          task.haulPhase = "waiting";
+          agent.state = "working";
+          budget = 0;
+          continue;
+        }
+        const target = trailerAgent!.pos;
+        if (!samePos(agent.pos, target)) {
+          task.haulPhase = "toTrailer";
+          agent.state = "traveling";
+          budget = driveToward(save, agent, target, speed, budget);
+          continue;
+        }
+        task.haulPhase = "unloadToTrailer";
+        task.phaseTimer = gameConfig.hauling.loadMinutes;
+        agent.state = "working";
+        continue;
+      }
+
+      // No trailer — haul the 1–2 bales straight to storage, falling back to
+      // a Sell Point if no storage exists / has room (maintainer request,
+      // 2026-07-17: "prefer storage, sell as a last resort").
+      const dest = chooseBaleDest(save, product, agent.pos);
+      if (!dest) {
+        task.waitingForStorage = true;
+        agent.state = "working";
+        budget = 0;
+        continue;
+      }
+      task.waitingForStorage = false;
+      task.haulDest = dest.sell ? "sell" : "storage";
+      if (!samePos(agent.pos, dest.pos)) {
+        task.haulPhase = "toStorage";
+        agent.state = "traveling";
+        budget = driveToward(save, agent, dest.pos, speed, budget);
+        continue;
+      }
+      task.haulPhase = "dumping";
+      task.phaseTimer = gameConfig.hauling.dumpMinutes;
+      agent.state = "working";
+      continue;
+    }
+
     const field = save.fields.find((f) => f.id === task.fieldId);
     if (!field) {
       // Field vanished mid-task (sold) — drop the job.
@@ -1330,7 +1805,32 @@ function tickAgent(
         // cut across — a bale must never land off the field).
         const inside = pointInPolygon(agent.pos, field.boundary);
         const drop = inside ? agent.pos : (baleLastInside.get(task.id) ?? agent.pos);
-        (field.baleLocations ??= []).push([drop[0], drop[1]]);
+        // Scatter each bale off the exact coverage lane so they don't land in a
+        // rigid lattice (restores the pre-hopper-model jitter lost in 60b002b,
+        // maintainer report 2026-07-17). Sized off the SPACING BETWEEN DROPS
+        // along the path (avg meters per bale), not the working width — the
+        // width is only a few meters (a 25 ft baler ≈ 7.6 m), too narrow to
+        // read as scatter at map scale; drop spacing is the actual gap between
+        // dots the eye sees, so a fraction of IT reads as real scatter
+        // (maintainer follow-up, 2026-07-17: raised the fraction to 30% — the
+        // width-based version was visually imperceptible). If the jittered
+        // point lands off-field, retry at half magnitude a few times before
+        // falling back to the exact on-field spot — a straight reject-on-miss
+        // was silently collapsing most drops back onto the lattice near field
+        // edges. `rand` is deterministic in tests (0.5 → zero offset), so bale
+        // COUNTS/positions in tests are unaffected. Only NEW drops jitter —
+        // bales already on the ground keep their recorded positions.
+        const dropSpacing = totalBales > 0 ? path.total / totalBales : 0;
+        let j = dropSpacing * gameConfig.forage.baleDropJitterFraction;
+        let finalDrop = drop;
+        for (let attempt = 0; attempt < 4 && j > 1e-6; attempt++, j /= 2) {
+          const candidate: Meters = [drop[0] + (rand() - 0.5) * 2 * j, drop[1] + (rand() - 0.5) * 2 * j];
+          if (pointInPolygon(candidate, field.boundary)) {
+            finalDrop = candidate;
+            break;
+          }
+        }
+        (field.baleLocations ??= []).push([finalDrop[0], finalDrop[1]]);
         baler.cargoTons = Math.max(0, baler.cargoTons - baleTons);
         continue;
       }
@@ -1376,6 +1876,11 @@ function tickAgent(
         agent.taskId = undefined;
         clearAgentRoute(agent.id);
         agent.state = "idle";
+        // A finished bale run leaves loose bales on the field — auto-dispatch a
+        // Haul Bales job to move them to storage (maintainer request,
+        // 2026-07-17). Also player-triggerable from the field panel;
+        // queueHaulBales no-ops if a haul's already covering the field.
+        queueHaulBales(save, field.id);
       }
       continue;
     }

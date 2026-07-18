@@ -648,6 +648,178 @@ Five systems in one pass (maintainer request, "take some liberty"):
   recovers case, the legacy single-silo guess, and the ambiguous-crop
   (deliberately-doesn't-guess) case.
 
+## Latest changes (2026-07-17, Structures tab card grid)
+
+- **Structures' owned-buildings list now uses the same card-grid look as
+  Equipment** (`buildStructuresList` in `src/main.ts`, `.equip-grid` on
+  `#structures-list` in `index.html`): 5-per-row, big icon (30px font-size —
+  buildings use an emoji glyph, not an SVG function, so this sizes the icon
+  differently than Equipment's `svg { width/height }` rule but lands the
+  same visual size), name/status/dot, actions row.
+- **New "assigned" dot/tint variant**: a silo actually assigned to a crop
+  reads as active — solid green, deliberately not pulsing like Equipment's
+  `.working` (a silo has no in-progress state to animate, unlike a machine
+  mid-task). Everything else (bale storage, barns, farm yard) stays gray —
+  no ownership/activity model exists yet for those.
+
+## Latest changes (2026-07-17, Equipment card height trim)
+
+- **Dropped the forced `aspect-ratio: 1/1`** on `.equip-card` — content now
+  hugs the top (`justify-content: flex-start`, padding trimmed to
+  `1px 3px 4px`) instead of being vertically centered in a square, so cards
+  are only as tall as their content needs (maintainer feedback: too much
+  empty space above the icon). No longer perfectly square, but noticeably
+  shorter.
+
+## Latest changes (2026-07-17, Bale Movement & Storage)
+
+Big feature — bales can now be HAULED off the field into Bale Storage (before
+this they only sat in `field.baleLocations` and sold from there). Built all at
+once per maintainer; modeled closely on the grain-cart `unloadHarvester` relay.
+
+- **Two new implements** (`gameConfig`, `saveState.Implement.kind`, icons):
+  **Hay Spikes** (tractor implement, Small 1 bale / Medium 2 — the in-field
+  collector) and **Bale Trailer** (Small 10 / Medium 20 — the bulk hauler,
+  like the Grain Trailer). Both in the Equipment shop + fleet cards; new SVG
+  icons in `ui/icons.ts`.
+- **New task `haulBales`** (`sim/tasks.ts`) — a two-tractor relay handled
+  point-to-point in `tickAgent` (branches by role, like unloadHarvester):
+  a Hay-Spikes tractor (`task.agentId`) collects bales in-field; if an idle
+  tractor+Bale-Trailer exists it's auto-recruited (`assignTrailerHelper`,
+  `task.trailerAgentId`) to stage at the field entrance, get loaded, and run
+  full loads to storage. No trailer → the spikes tractor hauls its 1–2 bales
+  straight to storage. Blocks (`waitingForStorage` ⚠️) when there's nowhere to
+  put bales, mirroring `waitingForSilo`.
+- **Trigger (both):** auto-queues the instant a bale run finishes (hook in the
+  baler completion), AND a manual "🚜 Haul to Storage" button in the field
+  panel. `queueHaulBales` / `fieldHasLooseBales` guard against double-dispatch.
+- **Storage** (`sim/buildings.ts`, `saveState.Building`): each Bale Barn/Area
+  now holds a per-product tally (`storedBales`), optional product assignment
+  (`assignedProduct`; unassigned accepts any, may hold a mix). **Bale Storage
+  Area is now UNLIMITED** (`gameConfig.buildings.baleArea.capacityBales =
+  Infinity`); only the Barn caps and blocks. Inventory tab rewritten to show
+  stored counts + an assign dropdown + per-product sell (`sellStoredBalesFrom`
+  in economy.ts); map popup + Structures list show stored/capacity.
+- **Tests:** new `tests/baleHaul.test.ts` (8) — direct haul, trailer relay,
+  barn-full blocking + unblock, product assignment, no-storage wait, dispatch
+  guards, and auto-queue-after-baling. Full suite 215 green, typecheck clean.
+- **Sell guards:** `sellImplement` refuses an implement still holding bales;
+  the existing idle-guard on `sellAgent` covers a mid-haul tractor.
+
+### Follow-up same day (2026-07-17)
+
+- **Trailer relay DISABLED for now** (`TRAILER_RELAY_ENABLED = false` gating
+  `assignTrailerHelper` in `sim/tasks.ts`): the two-tractor relay confused the
+  collector — it oscillated between field and storage chasing the trailer. All
+  hauls are now plain Hay-Spikes-direct trips; relay code left intact to
+  re-enable once fixed. Relay test flipped to assert the disabled behavior.
+- **Bale-drop jitter restored:** the tons-hopper baler rewrite (60b002b) had
+  dropped bales exactly at `agent.pos`, landing them in a rigid lattice along
+  the coverage lanes. Re-added a random offset per drop (falls back to the
+  on-field point if the jitter would push it off-field). Uses the tick `rand`,
+  so deterministic tests (`rand: () => 0.5`) see zero offset and are unaffected.
+
+### Follow-up #2 (2026-07-17)
+
+- **Collector oscillation fixed** (the "tractor drives back and forth between
+  storage and the field entrance until you move the gate" report): the
+  Hay-Spikes brain re-chose "nearest bale" every tick, so as it moved, which
+  bale was nearest — and thus which gate the road route used — flipped, and it
+  thrashed. Now it LOCKS onto one target bale for the whole trip
+  (`haulTargetRuntime`, same fix pattern as the grain cart's locked staging
+  gate), re-locking only once that bale is loaded.
+- **Jitter magnitude bumped** ±20%→±75% of swath — ±20% was too subtle to
+  visibly break the lane grid. NOTE: only NEW bale runs jitter; bales already
+  sitting on the ground keep their recorded lattice positions.
+- New tests: jitter-is-wired-to-rand (varying rand moves >50% of drops); relay
+  test asserts the disabled behavior. 216 green, typecheck clean.
+
+### Follow-up #3: Sell Point structure (2026-07-17)
+
+- **New building `sellPoint`** (`$10,000`, no capacity — config/saveState/
+  buildings.ts/buildingRender.ts icon 💵): a bale hauler's fallback
+  destination. Haulers now PREFER Bale Storage; only when none exists or all
+  of it's full do they drive to the nearest Sell Point and sell the load on
+  the spot at the flat bale price (recorded as a normal `sellBales` entry —
+  shows in the Work Queue's Completed section + cashflow same as a manual
+  sale, even though no click triggered it).
+- New shared decision helper `chooseBaleDest` (`sim/tasks.ts`) picks
+  storage-or-sell once per trip; the choice is LOCKED on the task
+  (`haulDest`/`trailerDest`) so arrival always matches what was decided
+  rather than re-resolving mid-drive (same locking discipline as the
+  bale-target and staging-gate fixes above). Wired into both the Hay-Spikes
+  direct-haul path and the (currently disabled) trailer relay path.
+- Structures shop gets a "Sell Point" tile (flat price, no size tiers, like
+  Farm Yard); Structures list + map popup show it via the existing generic
+  building rendering (no special-casing needed — it was already data-driven).
+- 4 new tests: sells when no storage exists; storage still wins when both
+  exist; barn-overflow spills to the sell point instead of jamming; never sets
+  `waitingForStorage` when a Sell Point is available. 219 green, typecheck
+  clean.
+
+### Follow-up #4: jitter was real but imperceptible (2026-07-17)
+
+- Root cause of "bales did not jitter": the offset was sized off the baler's
+  WORKING WIDTH (`path.swath`), which is only a few meters (25 ft baler ≈
+  7.6 m) — even at 75% that's ±5.7 m, invisible against a typical ~200 m gap
+  between drops on a real field. Rebased the jitter off the actual DROP
+  SPACING along the path (`path.total / totalBales`, avg meters between
+  bales) instead — the thing the eye actually reads as a "row." New config
+  knob `gameConfig.forage.baleDropJitterFraction = 0.3` (maintainer request:
+  "raise it significantly, try 30%") — 30% of a ~200 m spacing is ~±64 m,
+  over 10× the old absolute magnitude.
+- Also hardened the off-field fallback: instead of one reject-and-give-up
+  attempt (which was silently collapsing most edge-lane drops back onto the
+  lattice), it now retries at half magnitude up to 4 times before falling
+  back to the exact on-field spot.
+- Existing jitter test (moved-fraction check) still passes unmodified against
+  the new spacing-based magnitude. 219 green, typecheck clean.
+
+## Latest changes (2026-07-17, Equipment grid 5-per-row)
+
+- **Equipment cards now 5 per row** (was 4, briefly 2) — `.equip-grid` to
+  `grid-template-columns: repeat(5, 1fr)`. Card padding tightened further to
+  make room, but icon/text/dot went back UP a notch from the 4-per-row pass
+  (icon 24→30px, name 11→12px, status/sub ~9→10/9.5px, dot 7→9px) per
+  maintainer feedback that the 4-per-row version read too small. Still
+  near-square, still full text on hover via `title`.
+
+## Latest changes (2026-07-17, Equipment card polish — square + dot indicator)
+
+- **Cards are now near-square** (`aspect-ratio: 1/1`) and denser: dropped the
+  progress bar, single-line-truncated name/status/sub text (ellipsis +
+  `title` tooltip for the full string). Working % now folds into the status
+  text itself ("Mowing Field 1 · 42%") instead of a separate bar.
+- **New corner status dot + card tint** replace the old plain status line as
+  the "is it working" signal: pulsing green while actively working, gold
+  while driving, red for a harvester blocked waiting on a Grain Trailer,
+  gray otherwise. Implements inherit their host tractor's state (green/gold
+  if the tractor's mid-job, gray in the yard or hitched-but-idle).
+
+## Latest changes (2026-07-17, Equipment tab card grid)
+
+- **Machines/Implements condensed from a one-per-row list into a 2-column
+  card grid** (`index.html` `.equip-grid`/`.equip-card`, `src/main.ts`
+  `buildEquipMachines`/`buildEquipImplements`), with bigger icons (34px, up
+  from 20-22) since the card layout has room for them. New CSS is additive
+  (`.equip-row` stays untouched — the Structures tab's owned-buildings list
+  still uses it), so this only touches the two Equipment sections. Card
+  markup: icon → name → status → sub/progress/select → an `.ec-actions` row
+  for locate/sell buttons at the bottom.
+
+## Latest changes (2026-07-17, Structures tab)
+
+- **Buildings shop split out of the Equipment tab into its own toolbar tab,
+  "🏗️ Structures"** (`index.html`, `src/main.ts`), styled to match Equipment
+  exactly: fleet list of owned buildings by default (`buildStructuresList`,
+  reusing `.equip-row`), shop tucked behind a "＋ Buy structures" toggle
+  (`buildStructuresShop`). Equipment's own shop toggle now sells only
+  Machines/Implements. Extracted the dealer-lot row/section builders
+  (`shopSection`/`shopLine`) so both shops share the same grid rendering.
+  Silo crop assignment still lives in Inventory; Structures' sell button is
+  the plain full-refund sell used everywhere else. Updated the "no silos
+  built yet" inventory hint to point at Structures instead of Equipment.
+
 ## Latest changes (2026-07-13, unload trigger)
 
 - **"Unload Harvester" now queues as soon as the combine has ANY grain

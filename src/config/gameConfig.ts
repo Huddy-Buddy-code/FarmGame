@@ -164,6 +164,16 @@ export interface GameConfig {
      * config shape. `capacityTons` caps how much one trip can carry; a
      * trailer smaller than the hopper just takes a partial load. */
     grainTrailer: Record<EquipmentSize, { price: number; widthFt: number; capacityTons: number }>;
+    /** Hay Spikes (2026-07-17): a tractor implement that spears round bales to
+     * collect them out of the field — tiny capacity (Small 1 bale, Medium 2),
+     * `widthFt` unused (not a coverage tool). The in-field collector half of
+     * the bale-hauling relay (see `sim/tasks.ts` haulBales). */
+    haySpikes: Record<EquipmentSize, { price: number; widthFt: number; capacityBales: number }>;
+    /** Bale Trailer (2026-07-17): the bulk hauler half of the relay — like the
+     * Grain Trailer but for bales. Waits at a field entrance, is loaded by the
+     * Hay-Spikes tractor, then runs full loads to Bale Storage. `capacityBales`
+     * Small 10 / Medium 20; `widthFt` unused. */
+    baleTrailer: Record<EquipmentSize, { price: number; widthFt: number; capacityBales: number }>;
   };
 
   /** Grain hauling (maintainer request, 2026-07-12): the pause a tractor+
@@ -203,6 +213,13 @@ export interface GameConfig {
      * to feel like ~10 s at 1× (1× = 1 sim-min per real minute, so 10 s ≈ 0.17
      * sim-min). At higher time-compression it blurs past like everything else. */
     baleTieMinutes: number;
+    /** How far each bale is randomly scattered off its exact drop spot
+     * (maintainer report, 2026-07-17 — bales were landing in a rigid lattice
+     * along the coverage lanes), as a fraction of the average distance BETWEEN
+     * consecutive drops along the path — not the baler's working width, which
+     * is too narrow (a few meters) to read as scatter at map scale. 0.3 = each
+     * bale can land up to ±30% of a "drop interval" off its lane position. */
+    baleDropJitterFraction: number;
   };
 
   /** Bale products (2026-07-13) — what a field's dropped bales are worth and how
@@ -249,7 +266,8 @@ export interface GameConfig {
     /** Indoor bale storage — pricier, presumably weatherproof (flavor; no
      * mechanical difference yet). */
     baleBarn: { price: number; capacityBales: number };
-    /** Outdoor bale storage — cheaper. */
+    /** Outdoor bale storage — cheaper, unlimited capacity (`Infinity`); only
+     * the Barn caps (maintainer request, 2026-07-17). */
     baleArea: { price: number; capacityBales: number };
     /** Parks tractors/harvesters. `slots` = max machines. */
     tractorBarn: { price: number; slots: number };
@@ -257,6 +275,11 @@ export interface GameConfig {
     implementBarn: { price: number; slots: number };
     /** The farm's rally point — no capacity, just a place on the map. */
     farmYard: { price: number };
+    /** Sell Point (2026-07-17): a bale hauler's fallback when Bale Storage
+     * doesn't exist or is full — cheap, no capacity, sells whatever's dropped
+     * there on the spot at the flat bale price (same rate as selling from the
+     * Inventory tab). */
+    sellPoint: { price: number };
   };
 
   // --- Economy, fuel, contracts, condition, etc. get added here slice-by-
@@ -391,6 +414,21 @@ export const gameConfig: GameConfig = {
       medium: { price: 45_000, widthFt: 0, capacityTons: 60 },
       large: { price: 70_000, widthFt: 0, capacityTons: 100 },
     },
+    // Hay Spikes — cheap, low-capacity in-field bale collector. Small (1 bale)
+    // is pullable by any tractor; Medium (2 bales) needs a medium+. The large
+    // slot mirrors medium so the record type-checks; only Small/Medium are sold.
+    haySpikes: {
+      small: { price: 8_000, widthFt: 0, capacityBales: 1 },
+      medium: { price: 16_000, widthFt: 0, capacityBales: 2 },
+      large: { price: 16_000, widthFt: 0, capacityBales: 2 },
+    },
+    // Bale Trailer — the bulk hauler. Small 10 bales / Medium 20; large mirrors
+    // medium (type-check only, never offered).
+    baleTrailer: {
+      small: { price: 20_000, widthFt: 0, capacityBales: 10 },
+      medium: { price: 38_000, widthFt: 0, capacityBales: 20 },
+      large: { price: 38_000, widthFt: 0, capacityBales: 20 },
+    },
   },
   hauling: {
     loadMinutes: 0.17, // ≈ 10 s at 1×
@@ -406,6 +444,7 @@ export const gameConfig: GameConfig = {
     baleTons: 1,
     balePricePerBale: 45,
     baleTieMinutes: 0.17, // ≈ 10 s at 1×
+    baleDropJitterFraction: 0.3,
   },
   baleProducts: {
     // Corn residue — mirrors the legacy forage numbers so corn is unchanged.
@@ -424,10 +463,13 @@ export const gameConfig: GameConfig = {
       large: { price: 350_000, capacityTons: 1000 },
     },
     baleBarn: { price: 70_000, capacityBales: 300 },
-    baleArea: { price: 25_000, capacityBales: 300 },
+    // Outdoor bale storage — cheaper, and UNLIMITED capacity (maintainer
+    // request, 2026-07-17): only the indoor Barn caps how many bales fit.
+    baleArea: { price: 25_000, capacityBales: Infinity },
     tractorBarn: { price: 60_000, slots: 3 },
     implementBarn: { price: 40_000, slots: 4 },
     farmYard: { price: 15_000 },
+    sellPoint: { price: 10_000 },
   },
   yieldRangeNarrowing: 0.85,
   loan: {

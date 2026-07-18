@@ -10,7 +10,7 @@
 
 import { gameConfig } from "../config/gameConfig";
 import type { CropId, BaleProduct } from "../config/gameConfig";
-import type { SaveState, Field, Agent, Implement } from "../state/saveState";
+import type { SaveState, Field, Agent, Implement, Building } from "../state/saveState";
 import { areaAcres } from "../geo/geometry";
 import { agentPrice, implementPrice } from "./tasks";
 import type { EquipmentKind } from "./tasks";
@@ -80,6 +80,19 @@ export function baleInventory(save: SaveState): BaleStock[] {
   }
   // Stable, readable order (highest value first).
   return out.sort((a, b) => b.value - a.value);
+}
+
+/** Sell the bales of `product` stored in one Bale Storage building at the flat
+ * price (2026-07-17 — bales can now be hauled into storage). Mutates the save. */
+export function sellStoredBalesFrom(save: SaveState, building: Building, product: BaleProduct): { bales: number; revenue: number } {
+  const bales = building.storedBales?.[product] ?? 0;
+  if (bales <= 0) return { bales: 0, revenue: 0 };
+  const cfg = gameConfig.baleProducts[product];
+  const revenue = Math.round(bales * cfg.pricePerBale);
+  building.storedBales![product] = 0;
+  save.money += revenue;
+  recordCash(save, "cropRevenue", `${cfg.name} bales`, revenue);
+  return { bales, revenue };
 }
 
 /** Sell EVERY field's bales of one product at once (Inventory "Sell all"). */

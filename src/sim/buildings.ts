@@ -12,7 +12,7 @@
  */
 
 import { gameConfig } from "../config/gameConfig";
-import type { CropId, EquipmentSize } from "../config/gameConfig";
+import type { CropId, EquipmentSize, BaleProduct } from "../config/gameConfig";
 import type { BuildingKind, Building, SaveState } from "../state/saveState";
 import type { Meters } from "../geo/coords";
 import { recordCash } from "./ledger";
@@ -35,6 +35,7 @@ export const BUILDING_NAME: Record<BuildingKind, string> = {
   tractorBarn: "Tractor Barn",
   implementBarn: "Implement Barn",
   farmYard: "Farm Yard",
+  sellPoint: "Sell Point",
 };
 
 const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
@@ -110,14 +111,86 @@ export function assignSiloCrop(save: SaveState, buildingId: string, crop: CropId
   building.assignedCrop = crop;
 }
 
-/** Total bale storage across all owned Bale Barns + Bale Areas. Computed for
- * the UI/future use — nothing currently caps bale creation against this. */
+/** True for the two bale-storage building kinds (Barn + Area). */
+export function isBaleStorage(kind: BuildingKind): kind is "baleBarn" | "baleArea" {
+  return kind === "baleBarn" || kind === "baleArea";
+}
+
+/** Bale capacity of one storage building — the Barn's fixed cap, or `Infinity`
+ * for an Area (outdoor storage is unlimited, maintainer request 2026-07-17). */
+export function baleStorageCapacityOf(kind: "baleBarn" | "baleArea"): number {
+  return gameConfig.buildings[kind].capacityBales;
+}
+
+/** Total bale storage across all owned Bale Barns + Bale Areas — `Infinity`
+ * once any Area exists (an Area is uncapped). */
 export function baleCapacity(save: SaveState): number {
-  return save.buildings.reduce((sum, b) => {
-    if (b.kind === "baleBarn") return sum + gameConfig.buildings.baleBarn.capacityBales;
-    if (b.kind === "baleArea") return sum + gameConfig.buildings.baleArea.capacityBales;
-    return sum;
-  }, 0);
+  return save.buildings.reduce((sum, b) => (isBaleStorage(b.kind) ? sum + baleStorageCapacityOf(b.kind) : sum), 0);
+}
+
+/** How many bales are physically stored in one building, summed across products. */
+export function storedBalesTotal(building: Building): number {
+  const s = building.storedBales;
+  if (!s) return 0;
+  let n = 0;
+  for (const k in s) n += s[k as BaleProduct] ?? 0;
+  return n;
+}
+
+/** Free bale slots in one storage building — `Infinity` for an Area. */
+export function baleStorageRoom(building: Building): number {
+  if (!isBaleStorage(building.kind)) return 0;
+  return baleStorageCapacityOf(building.kind) - storedBalesTotal(building);
+}
+
+/** Can this store take `product`? Unassigned stores accept anything (and may
+ * then hold a mix); an assigned store only its one product. */
+export function baleStorageAccepts(building: Building, product: BaleProduct): boolean {
+  return isBaleStorage(building.kind) && (building.assignedProduct === undefined || building.assignedProduct === product);
+}
+
+/** The nearest Bale Storage to `from` that accepts `product` and has room —
+ * where a bale hauler dumps its load (mirrors `nearestSiloForCrop`). The
+ * caller re-checks room right before dumping (it can fill in between). */
+export function nearestBaleStorageFor(save: SaveState, product: BaleProduct, from: Meters): Building | undefined {
+  let best: Building | undefined;
+  let bestD = Infinity;
+  for (const b of save.buildings) {
+    if (!isBaleStorage(b.kind) || !baleStorageAccepts(b, product) || baleStorageRoom(b) <= 0) continue;
+    const d = Math.hypot(b.pos[0] - from[0], b.pos[1] - from[1]);
+    if (d < bestD) {
+      bestD = d;
+      best = b;
+    }
+  }
+  return best;
+}
+
+/** The nearest Sell Point to `from`, if one's been built — a bale hauler's
+ * fallback destination when no Bale Storage exists or all of it's full
+ * (maintainer request, 2026-07-17). Unlike storage it has no capacity and
+ * takes any product; the caller sells on arrival rather than storing. */
+export function nearestSellPointFor(save: SaveState, from: Meters): Building | undefined {
+  return nearestOfKind(save, "sellPoint", from);
+}
+
+/** Move up to `n` bales of `product` into `building`, clamped to its free room
+ * (unlimited for an Area). Returns how many actually landed. */
+export function haulBalesInto(building: Building, product: BaleProduct, n: number): number {
+  const added = Math.max(0, Math.min(n, baleStorageRoom(building)));
+  if (added <= 0) return 0;
+  const s = (building.storedBales ??= {});
+  s[product] = (s[product] ?? 0) + added;
+  return added;
+}
+
+/** Assign (or clear, with `undefined`) which product a Bale Store is dedicated
+ * to. Throws if the building isn't bale storage. */
+export function assignBaleStorageProduct(save: SaveState, buildingId: string, product: BaleProduct | undefined): void {
+  const building = save.buildings.find((b) => b.id === buildingId);
+  if (!building) throw new Error(`Building ${buildingId} not found`);
+  if (!isBaleStorage(building.kind)) throw new Error(`${BUILDING_NAME[building.kind]} can't store bales`);
+  building.assignedProduct = product;
 }
 
 /** Max machines/implements a Tractor Barn / Implement Barn holds, and how many

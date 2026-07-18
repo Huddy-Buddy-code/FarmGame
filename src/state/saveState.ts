@@ -137,8 +137,11 @@ export interface Field {
 export type GrainBin = Record<CropId, number>;
 
 /** Placeable farm structures (maintainer request, 2026-07-12). A single point,
- * not a polygon like `Field` — see `sim/buildings.ts`. */
-export type BuildingKind = "silo" | "baleBarn" | "baleArea" | "tractorBarn" | "implementBarn" | "farmYard";
+ * not a polygon like `Field` — see `sim/buildings.ts`.
+ * `sellPoint` (2026-07-17): a bale hauler's fallback destination when no Bale
+ * Storage exists or all of it's full — no capacity, no product assignment,
+ * just cashes out whatever's dropped there at the flat bale price. */
+export type BuildingKind = "silo" | "baleBarn" | "baleArea" | "tractorBarn" | "implementBarn" | "farmYard" | "sellPoint";
 
 export interface Building {
   id: string;
@@ -151,6 +154,16 @@ export interface Building {
    * player on click). A silo holds no capacity until assigned — grain
    * capacity is tracked per crop, not pooled across crops. */
   assignedCrop?: CropId;
+  /** Bale-storage-only (baleBarn/baleArea, 2026-07-17): bales physically
+   * stored here, counted per product (a bale is self-describing, so unlike a
+   * silo a store can hold a mix). Filled by the bale-hauling relay
+   * (`sim/tasks.ts` haulBales). A Barn caps at `capacityBales`; an Area is
+   * unlimited (`gameConfig.buildings.baleArea.capacityBales === Infinity`). */
+  storedBales?: Partial<Record<BaleProduct, number>>;
+  /** Bale-storage-only (optional): dedicate this store to ONE product — only
+   * that product hauls in. Unassigned (undefined) accepts any product (the
+   * default; mirrors an unassigned silo but bales may then be mixed). */
+  assignedProduct?: BaleProduct;
 }
 
 /** What an agent is doing right now (brief §9 state machine — "drive home at
@@ -191,7 +204,7 @@ export interface Agent {
  * tractor is a power unit; an implement gives it a job it can do. */
 export interface Implement {
   id: string;
-  kind: "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower";
+  kind: "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower" | "haySpikes" | "baleTrailer";
   size: EquipmentSize;
   /** Id of the tractor this is hitched to, or undefined if parked in the yard. */
   attachedTo?: string;
@@ -201,6 +214,11 @@ export interface Implement {
    * to 0/undefined once fully dumped at a silo. */
   cargoTons?: number;
   cargoCrop?: CropId;
+  /** Hay Spikes / Bale Trailer-only (2026-07-17): bales currently carried, and
+   * which product. Cleared back to 0/undefined once dumped (into a trailer,
+   * for spikes; into storage, for a trailer). */
+  cargoBales?: number;
+  cargoBaleProduct?: BaleProduct;
 }
 
 /** Fieldwork the player has ordered. Tasks queue up and agents (tractor for
@@ -209,7 +227,7 @@ export interface Implement {
  * gated by plow/plant/harvest, they just need a standing crop in the field.
  * `unloadHarvester` is system-generated (never player-queued) — a tractor+
  * Grain Trailer hauling a full combine's hopper to a silo. */
-export type TaskType = "plow" | "plant" | "harvest" | "mow" | "weed" | "fertilize" | "rake" | "bale" | "unloadHarvester";
+export type TaskType = "plow" | "plant" | "harvest" | "mow" | "weed" | "fertilize" | "rake" | "bale" | "unloadHarvester" | "haulBales";
 
 export interface FarmTask {
   id: string;
@@ -236,6 +254,31 @@ export interface FarmTask {
    * assigned to the crop, or the assigned silo(s) are at capacity) — surfaced
    * as a ⚠️ in the UI until the player clears it. */
   waitingForSilo?: boolean;
+  /** haulBales-only (2026-07-17): the two-agent bale-hauling relay. `agentId`
+   * is the Hay-Spikes tractor collecting in-field; `trailerAgentId` is the
+   * optional idle tractor+Bale-Trailer helper that stages at a field entrance
+   * and runs full loads to storage (undefined = spikes tractor hauls direct).
+   * `baleProduct` is what this field's bales are (captured at creation). Each
+   * agent tracks its own leg + pause timer so both can be busy at once. */
+  trailerAgentId?: string;
+  baleProduct?: BaleProduct;
+  haulPhase?: "toBale" | "loading" | "toTrailer" | "unloadToTrailer" | "toStorage" | "dumping" | "waiting";
+  trailerPhase?: "toEntrance" | "waiting" | "toStorage" | "dumping";
+  /** Sim-minutes left in the trailer helper's current load/dump pause (the
+   * spikes tractor uses `phaseTimer`; the trailer needs its own so both can
+   * pause simultaneously). */
+  trailerTimer?: number;
+  /** haulBales-only: true while a hauler is parked with nowhere to put bales
+   * (no Bale Storage exists, or every eligible store is full) — ⚠️ in the UI. */
+  waitingForStorage?: boolean;
+  /** haulBales-only (2026-07-17): which kind of destination the spikes/trailer
+   * tractor is currently headed to or dumping at — "storage" if it's driving
+   * toward Bale Storage, "sell" if it fell back to a Sell Point (no storage
+   * exists/has room). Decided once when the trip starts (`chooseBaleDest`) and
+   * locked for that trip so arrival always matches what was decided, rather
+   * than re-deciding mid-drive. */
+  haulDest?: "storage" | "sell";
+  trailerDest?: "storage" | "sell";
   /** What was paid when the task was queued (plow cost / seed inputs) —
    * refunded in full if a still-queued task is canceled. */
   costPaid: number;

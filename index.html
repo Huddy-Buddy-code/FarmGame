@@ -158,7 +158,7 @@
          on it, anchored just above it, and only as tall as their content (then
          capped + scroll) — so short panels hug the bar and tall ones grow upward.
          Bottom-anchored with no `top`, so height stays content-driven. */
-      #fieldstab, #equiptab, #cropcal, #inventory, #financetab, #settingstab {
+      #fieldstab, #equiptab, #structurestab, #cropcal, #inventory, #financetab, #settingstab {
         position: absolute; left: 50%; transform: translateX(-50%);
         bottom: 72px; z-index: 30; width: 50vw; box-sizing: border-box;
         max-height: calc(100vh - 190px); overflow-y: auto;
@@ -480,7 +480,15 @@
       }
       /* Buy shop: a dealer-lot grid — one product line per row, size tiers in
          fixed aligned columns so specs/prices compare straight down. */
-      #equip-shop { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+      #equip-shop, #structures-shop { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+
+      /* ---------- Structures tab (silo/barn/yard shop, split out of Equipment, 2026-07-17) ---------- */
+      #structurestab h2 { margin: 0 0 2px; font-size: 18px; }
+      #structurestab .sub { font-size: 12px; color: #8a7658; margin-bottom: 10px; }
+      #structurestab .close {
+        position: absolute; top: 10px; right: 12px; border: none; background: none;
+        font-size: 16px; padding: 2px 6px; color: #8a7658;
+      }
       .shop-section {
         font-size: 11px; font-weight: 700; color: #8a7658; text-transform: uppercase;
         letter-spacing: 0.05em; margin: 8px 0 0; padding-bottom: 2px;
@@ -538,6 +546,61 @@
       .equip-row .er-status { font-size: 12px; color: #8a7658; }
       .equip-row .er-sub { font-size: 11px; color: #a08a68; margin-top: 1px; }
       .equip-row .progress { height: 7px; margin: 4px 0 1px; }
+
+      /* Machines/Implements condensed into a near-square card grid (maintainer
+         request, 2026-07-17): bigger icons, single-line truncated text, no
+         progress bar — a corner dot + tinted border carry "is it working"
+         instead (pulses while actively working). */
+      .equip-grid {
+        display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 8px 0;
+      }
+      .equip-card {
+        position: relative;
+        display: flex; flex-direction: column; align-items: center; justify-content: flex-start; text-align: center;
+        gap: 1px; background: var(--cream-2); border: 1.5px solid var(--wood);
+        border-radius: 10px; padding: 1px 3px 4px; min-width: 0;
+        transition: background 0.15s, border-color 0.15s;
+      }
+      .equip-card.implement { opacity: 0.92; }
+      .equip-card.working { border-color: var(--green-dark); background: #e9f1de; }
+      .equip-card.traveling { border-color: var(--gold); background: #f7ecd2; }
+      .equip-card.waiting { border-color: var(--red); background: #f8e3e0; }
+      .equip-card.assigned { border-color: var(--green-dark); background: #e9f1de; }
+      .equip-card .icon { display: inline-flex; align-items: center; justify-content: center; font-size: 30px; line-height: 1; }
+      .equip-card .icon svg { width: 30px; height: 30px; }
+      .equip-card .ec-name {
+        font-weight: 700; font-size: 12px; line-height: 1.1; max-width: 100%;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .equip-card .ec-status {
+        font-size: 10px; color: #8a7658; line-height: 1.1; max-width: 100%;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .equip-card .ec-sub {
+        font-size: 9.5px; color: #a08a68; line-height: 1.1; max-width: 100%;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .equip-card .hitch-select, .equip-card .er-crop-select {
+        width: 100%; max-width: none; margin-top: 1px; font-size: 9.5px; padding: 1px 2px;
+      }
+      .equip-card .ec-actions { display: flex; gap: 3px; margin-top: 2px; }
+      .equip-card .ec-actions button { padding: 2px 5px; font-size: 12px; }
+
+      /* Corner status dot: gray idle, gold traveling, red waiting-blocked,
+         pulsing green while actually working. */
+      .ec-dot {
+        position: absolute; top: 4px; right: 4px; width: 9px; height: 9px;
+        border-radius: 50%; background: #cbbc9d; border: 1.5px solid var(--wood);
+      }
+      .ec-dot.traveling { background: var(--gold); }
+      .ec-dot.waiting { background: var(--red); }
+      .ec-dot.working { background: var(--green); animation: ec-pulse 1.4s infinite; }
+      .ec-dot.assigned { background: var(--green); } /* solid, no pulse — a silo has no "in progress" state to animate */
+      @keyframes ec-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(93, 138, 58, 0.55); }
+        70% { box-shadow: 0 0 0 6px rgba(93, 138, 58, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(93, 138, 58, 0); }
+      }
       .er-btn { padding: 4px 8px; font-size: 14px; }
       .er-btn:disabled { opacity: 0.4; cursor: default; }
       .er-crop-select {
@@ -751,6 +814,7 @@
     <div id="toolbar" class="panel">
       <button id="btn-fields" class="primary">🌾 Fields</button>
       <button id="btn-equip">🚜 Equipment</button>
+      <button id="btn-structures">🏗️ Structures</button>
       <button id="btn-cropcal">📆 Crop Calendar</button>
       <button id="btn-inventory">📦 Inventory</button>
       <button id="btn-finance">🏦 Finance</button>
@@ -771,9 +835,19 @@
       <button id="equip-buy-toggle" class="primary" style="width:100%; margin-bottom:6px;">＋ Buy equipment</button>
       <div id="equip-shop" style="display:none"></div>
       <div class="equip-heading">Machines</div>
-      <div id="equip-machines"></div>
+      <div id="equip-machines" class="equip-grid"></div>
       <div class="equip-heading">Implements</div>
-      <div id="equip-implements"></div>
+      <div id="equip-implements" class="equip-grid"></div>
+    </div>
+
+    <div id="structurestab" class="panel">
+      <button class="close" id="structures-close">✕</button>
+      <h2>🏗️ Structures</h2>
+      <div class="sub">Silos, barns &amp; yards — storage and shelter for the farm</div>
+      <button id="structures-buy-toggle" class="primary" style="width:100%; margin-bottom:6px;">＋ Buy structures</button>
+      <div id="structures-shop" style="display:none"></div>
+      <div class="equip-heading">Structures</div>
+      <div id="structures-list" class="equip-grid"></div>
     </div>
 
     <div id="inventory" class="panel">

@@ -30,7 +30,8 @@ import { updateBuildingMarkers, BUILDING_ICON } from "./field/buildingRender";
 import {
   buyBuildingAt, sellBuilding, buildingPrice, buildingDisplayName, initBuildingIdCounters,
   BUILDING_NAME, siloCapacityForCrop, siloCapacityOf, assignSiloCrop,
-  baleCapacity, barnSlotTotal, nearestFarmYard,
+  barnSlotTotal, nearestFarmYard,
+  baleStorageCapacityOf, storedBalesTotal, assignBaleStorageProduct,
 } from "./sim/buildings";
 import { distanceAtWork } from "./sim/coverage";
 import type { CoveragePath } from "./sim/coverage";
@@ -39,7 +40,7 @@ import {
   switchFarm, deleteFarm, getActiveFarmId, loadGameFor,
 } from "./state/persistence";
 import type { PersistedGame } from "./state/persistence";
-import { sellGrain, sellBales, netWorth, baleInventory, sellBalesOfProduct } from "./sim/economy";
+import { sellGrain, sellBales, netWorth, baleInventory, sellBalesOfProduct, sellStoredBalesFrom } from "./sim/economy";
 import { SimClock } from "./sim/clock";
 import {
   formatDate, dateOf, MONTH_NAMES, MONTH_SHORT,
@@ -58,7 +59,7 @@ import {
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
   reorderTask, estimateTaskHours, forageDue, defaultPlan, forcePlow,
   harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
-  appendCompletedTask,
+  appendCompletedTask, haySpikesCapacityBales, baleTrailerCapacityBales, queueHaulBales, fieldHasLooseBales,
 } from "./sim/tasks";
 import { buildRoadNetwork } from "./sim/roadNet";
 import type { RoadNetwork } from "./sim/roadNet";
@@ -66,7 +67,7 @@ import { defaultAccessPoints } from "./sim/access";
 import {
   MACHINE_ICON, IMPLEMENT_ICON_SVG, tractorIconSvg, combineIconSvg, baleIconSvg,
   plowIconSvg, planterIconSvg, sprayerIconSvg, rakeIconSvg, balerIconSvg, grainTrailerIconSvg,
-  grainHeaderIconSvg, mowerIconSvg,
+  grainHeaderIconSvg, mowerIconSvg, haySpikesIconSvg, baleTrailerIconSvg,
 } from "./ui/icons";
 import type { EquipmentKind, ImplementKind } from "./sim/tasks";
 import {
@@ -77,7 +78,7 @@ import {
 } from "./sim/ledger";
 import type { FarmTask, Agent, Implement, FieldStatus, TaskType, CompletedTask } from "./state/saveState";
 import { gameConfig } from "./config/gameConfig";
-import type { CropId, EquipmentSize } from "./config/gameConfig";
+import type { CropId, EquipmentSize, BaleProduct } from "./config/gameConfig";
 
 // Which county to play. Later this comes from a save / county picker.
 const COUNTY_ID = "story-ia";
@@ -207,6 +208,7 @@ async function main() {
     wireInventory();
     wireFieldsTab();
     wireEquipTab();
+    wireStructuresTab();
     wireFinanceTab();
     wireSettingsTab();
     wirePersistence();
@@ -302,6 +304,7 @@ function tickWorld(prev: number) {
     if (selectedFieldId) refreshFieldPanel();
     refreshFieldsTab();
     refreshEquipTab();
+    refreshStructuresTab();
     refreshFinanceTab();
     refreshQueuePanel();
   }
@@ -365,6 +368,7 @@ function taskVerb(task: FarmTask): string {
   if (task.type === "rake") return "raking";
   if (task.type === "bale") return "baling";
   if (task.type === "unloadHarvester") return "hauling grain";
+  if (task.type === "haulBales") return "hauling bales";
   return "harvesting";
 }
 
@@ -697,11 +701,18 @@ function sectionDivider(label: string): HTMLElement {
 const IMPLEMENT_KIND_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake",
   bailer: "Baler", grainTrailer: "Grain Trailer", mower: "Mower",
+  haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
 };
 function implementInfoLines(kind: ImplementKind, size: EquipmentSize): { name: string; detail: string } {
   const name = `${IMPLEMENT_KIND_NAME[kind]} - ${SIZE_LABEL[size]}`;
   if (kind === "grainTrailer") {
     return { name, detail: `${grainTrailerCapacityTons(size)} t Capacity` };
+  }
+  if (kind === "haySpikes") {
+    return { name, detail: `${haySpikesCapacityBales(size)} bale capacity` };
+  }
+  if (kind === "baleTrailer") {
+    return { name, detail: `${baleTrailerCapacityBales(size)} bale capacity` };
   }
   return { name, detail: `${gameConfig.equipment[kind][size].widthFt} ft Working Width` };
 }
@@ -748,6 +759,18 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
       pct: capT > 0 ? Math.min(100, (cargo / capT) * 100) : 0,
       current: `${cargo.toFixed(1)} t`,
       total: `${capT} t`,
+    };
+  } else if (task.type === "haulBales") {
+    const spikes = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "haySpikes");
+    if (!spikes) return "";
+    iconSvg = (IMPLEMENT_ICON_SVG.haySpikes ?? plowIconSvg)(IMPLEMENT_QUEUE_ICON_PX);
+    info = implementInfoLines("haySpikes", spikes.size);
+    const capB = haySpikesCapacityBales(spikes.size);
+    const onboard = spikes.cargoBales ?? 0;
+    fill = {
+      pct: capB > 0 ? Math.min(100, (onboard / capB) * 100) : 0,
+      current: `${onboard} bale${onboard === 1 ? "" : "s"}`,
+      total: `${capB}`,
     };
   } else if (task.type === "bale") {
     const impl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
@@ -811,6 +834,24 @@ function buildQueueRow(task: FarmTask): HTMLElement {
         <div class="qr-name">Unload Harvester · ${prettyId(task.fieldId)}</div>
         ${agent ? `<div class="qr-machine">${agent.name}</div>` : ""}
         <div class="qr-sub">${sub}</div>
+        ${implementRowHtml(task, agent)}
+      </span>`;
+    return row; // system task — not draggable/cancelable, it self-regenerates
+  }
+
+  if (task.type === "haulBales") {
+    // Two-tractor relay, not acres-based — show the collector's leg + how many
+    // bales remain in the field. The trailer half (if any) shows its own name.
+    const trailerAgent = task.trailerAgentId ? save.agents.find((a) => a.id === task.trailerAgentId) : undefined;
+    const remaining = save.fields.find((f) => f.id === task.fieldId)?.baleLocations?.length ?? 0;
+    const row = document.createElement("div");
+    row.className = "queue-row" + (isActive ? " active" : " queued") + (task.waitingForStorage ? " warn" : "");
+    row.innerHTML = `
+      ${iconHtml}
+      <span class="qr-info">
+        <div class="qr-name">Haul Bales · ${prettyId(task.fieldId)}</div>
+        ${agent ? `<div class="qr-machine">${agent.name}${trailerAgent ? ` + ${trailerAgent.name}` : ""}</div>` : ""}
+        <div class="qr-sub">${haulSubText(task)}${remaining > 0 ? ` · ${remaining} left in field` : ""}</div>
         ${implementRowHtml(task, agent)}
       </span>`;
     return row; // system task — not draggable/cancelable, it self-regenerates
@@ -911,7 +952,8 @@ function refreshQueuePanel(): void {
     .map((t) => {
       const impl = t.agentId ? save.implements.find((i) => i.attachedTo === t.agentId) : undefined;
       const cargoBucket = impl?.cargoTons !== undefined ? Math.round(impl.cargoTons * 50) : "";
-      return `${t.id}:${t.status}:${t.agentId ?? ""}:${Math.round((t.doneAcres / t.totalAcres) * 100)}:${t.unloadPhase ?? ""}:${t.waitingForSilo ?? ""}:${cargoBucket}`;
+      const bales = (impl?.cargoBales ?? "") + ":" + (save.fields.find((f) => f.id === t.fieldId)?.baleLocations?.length ?? "");
+      return `${t.id}:${t.status}:${t.agentId ?? ""}:${Math.round((t.doneAcres / t.totalAcres) * 100)}:${t.unloadPhase ?? ""}:${t.waitingForSilo ?? ""}:${cargoBucket}:${t.haulPhase ?? ""}:${t.trailerPhase ?? ""}:${t.waitingForStorage ?? ""}:${bales}`;
     })
     .join("|") + `#${completed.length}:${nowDate.year}:${nowDate.month}`;
   if (key === lastQueueKey) return;
@@ -966,7 +1008,7 @@ function refreshQueuePanel(): void {
 const TASK_PAST_VERB: Record<TaskType, string> = {
   plow: "Plowed", plant: "Planted", harvest: "Harvested", mow: "Mowed",
   weed: "Weeded", fertilize: "Fertilized", rake: "Raked", bale: "Baled",
-  unloadHarvester: "Hauled",
+  unloadHarvester: "Hauled", haulBales: "Hauled bales",
 };
 
 /** One compact, non-interactive row per finished job OR sale — sized like a
@@ -1112,7 +1154,7 @@ function toast(text: string, ms = 2600) {
 // The four bottom-toolbar panels are MUTUALLY EXCLUSIVE — opening one closes any
 // other. Clicking the active panel's own button closes it (toggle).
 // ---------------------------------------------------------------------------
-const TOOLBAR_PANELS = ["fieldstab", "equiptab", "cropcal", "inventory", "financetab", "settingstab"];
+const TOOLBAR_PANELS = ["fieldstab", "equiptab", "structurestab", "cropcal", "inventory", "financetab", "settingstab"];
 function toggleToolbarPanel(id: string, onOpen?: () => void): void {
   const opening = $(id).style.display !== "block";
   for (const p of TOOLBAR_PANELS) $(p).style.display = "none";
@@ -1150,7 +1192,7 @@ function refreshInventory() {
   const silos = save.buildings.filter((b) => b.kind === "silo");
   rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">🛢️ Grain Silos</div>`);
   if (silos.length === 0) {
-    rows.insertAdjacentHTML("beforeend", `<div class="silo-bar-empty">No silos built yet — buy one from the Equipment tab.</div>`);
+    rows.insertAdjacentHTML("beforeend", `<div class="silo-bar-empty">No silos built yet — buy one from the Structures tab.</div>`);
   }
   for (const silo of silos) {
     const capacity = siloCapacityOf(silo.size ?? "small");
@@ -1261,35 +1303,76 @@ function refreshInventory() {
     }
   }
 
-  // --- Bale storage structures: capacity exists, but there's no hauling
-  // mechanic yet to actually move bales in — say so plainly rather than
-  // showing a fake "0 stored" that looks broken. ---
+  // --- Bale storage structures (2026-07-17): now hold hauled bales (per
+  // product), each with an optional product assignment (unassigned accepts
+  // any). A Barn caps; an Area is unlimited. ---
   const baleBuildings = save.buildings.filter((b) => b.kind === "baleBarn" || b.kind === "baleArea");
   if (baleBuildings.length > 0) {
     rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">📦 Bale Storage</div>`);
     for (const b of baleBuildings) {
-      const cap = b.kind === "baleBarn" ? gameConfig.buildings.baleBarn.capacityBales : gameConfig.buildings.baleArea.capacityBales;
+      const name = `${buildingDisplayName(b.kind)} ${buildingIndex(b)}`;
+      const cap = baleStorageCapacityOf(b.kind as "baleBarn" | "baleArea");
+      const stored = storedBalesTotal(b);
+      const capText = cap === Infinity ? "unlimited" : `${stored} / ${cap.toLocaleString()}`;
       const row = document.createElement("div");
       row.className = "inv-row inv-building";
       row.innerHTML = `
         <span class="icon">${BUILDING_ICON[b.kind]}</span>
         <span class="info">
-          <div class="name">${buildingDisplayName(b.kind)} ${buildingIndex(b)}</div>
-          <div class="qty">${cap.toLocaleString()} bale capacity · not hauled to yet</div>
+          <div class="name">${name}</div>
+          <div class="qty">${capText} bales${cap === Infinity ? ` · ${stored} stored` : ""}</div>
         </span>`;
-      row.appendChild(locateButton(`${buildingDisplayName(b.kind)} ${buildingIndex(b)}`, b.pos));
+
+      // Optional product assignment — mirrors the silo crop dropdown.
+      const select = document.createElement("select");
+      select.className = "inv-crop-select";
+      const products: BaleProduct[] = ["cornStover", "hay", "alfalfaHay"];
+      select.innerHTML =
+        `<option value="">— any product —</option>` +
+        products.map((p) => `<option value="${p}">${gameConfig.baleProducts[p].name}</option>`).join("");
+      select.value = b.assignedProduct ?? "";
+      select.addEventListener("change", () => {
+        assignBaleStorageProduct(save, b.id, (select.value || undefined) as BaleProduct | undefined);
+        refreshInventory();
+      });
+      row.appendChild(select);
+      row.appendChild(locateButton(name, b.pos));
       const refund = buildingPrice(b.kind);
       row.appendChild(
         iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, () => {
-          if (!confirm(`Sell ${buildingDisplayName(b.kind)} ${buildingIndex(b)} for $${refund.toLocaleString()}?`)) return;
+          if (!confirm(`Sell ${name} for $${refund.toLocaleString()}?`)) return;
           sellBuilding(save, b.id);
-          toast(`💰 Sold ${buildingDisplayName(b.kind)} ${buildingIndex(b)} for $${refund.toLocaleString()}`);
+          toast(`💰 Sold ${name} for $${refund.toLocaleString()}`);
           refreshInventory();
           refreshBuildingMarkers();
           updateHud();
         }),
       );
       rows.appendChild(row);
+
+      // Per-product stored tally, each sellable at the flat price.
+      for (const p of products) {
+        const n = b.storedBales?.[p] ?? 0;
+        if (n <= 0) continue;
+        const cfg = gameConfig.baleProducts[p];
+        const value = Math.round(n * cfg.pricePerBale);
+        const sellRow = document.createElement("div");
+        sellRow.className = "inv-row inv-sell-row";
+        sellRow.innerHTML = `<span class="price">${cfg.name} · ${n} bale${n === 1 ? "" : "s"} · $${cfg.pricePerBale.toLocaleString()}/bale</span>`;
+        const sellBtn = document.createElement("button");
+        sellBtn.className = "primary";
+        sellBtn.textContent = `Sell all · $${value.toLocaleString()}`;
+        sellBtn.addEventListener("click", () => {
+          const { bales: sold, revenue } = sellStoredBalesFrom(save, b, p);
+          if (sold <= 0) return;
+          logSale("sellBales", { label: cfg.name, bales: sold, tons: sold * gameConfig.forage.baleTons, revenue });
+          updateHud();
+          refreshInventory();
+          toast(`💰 Sold ${sold} stored ${cfg.name.toLowerCase()} bales for $${revenue.toLocaleString()}`);
+        });
+        sellRow.appendChild(sellBtn);
+        rows.appendChild(sellRow);
+      }
     }
   }
 
@@ -1696,6 +1779,114 @@ function wireEquipTab() {
   });
 }
 
+/** Structures tab: buildings' shop, split out of Equipment (maintainer
+ * request, 2026-07-17), styled to match it — a fleet list of owned
+ * buildings with the shop tucked behind a "＋ Buy structures" toggle. Silo
+ * crop assignment/sale still happens from the Inventory tab; this tab's
+ * sell button here is the same "sell back for full refund" as everywhere
+ * else (land/equipment). */
+function wireStructuresTab() {
+  $("btn-structures").addEventListener("click", () => toggleToolbarPanel("structurestab", () => refreshStructuresTab(true)));
+  $("structures-close").addEventListener("click", () => ($("structurestab").style.display = "none"));
+
+  $("structures-buy-toggle").addEventListener("click", () => {
+    const shop = $("structures-shop");
+    const open = shop.style.display !== "block";
+    shop.style.display = open ? "block" : "none";
+    $("structures-buy-toggle").textContent = open ? "✕ Close shop" : "＋ Buy structures";
+    if (open) buildStructuresShop();
+  });
+}
+
+/** Refresh after any building purchase/sale: HUD cash, map markers, panel. */
+function afterStructuresChange(): void {
+  updateHud();
+  refreshBuildingMarkers();
+  refreshStructuresTab(true);
+}
+
+/** Rebuild the Structures tab — cheap no-op while hidden. Mirrors
+ * refreshEquipTab: only re-renders the shop while it's open (affordability
+ * may have changed), always re-renders the owned list. */
+let lastStructuresKey = "";
+function refreshStructuresTab(force = false) {
+  const el = $("structurestab");
+  if (el.style.display !== "block") return;
+  const key = save.buildings.map((b) => `${b.id}:${b.assignedCrop ?? ""}`).join("|") + `|$${Math.round(save.money)}`;
+  if (!force && key === lastStructuresKey) return;
+  lastStructuresKey = key;
+
+  if ($("structures-shop").style.display === "block") buildStructuresShop();
+  buildStructuresList();
+}
+
+/** Owned buildings, one row per structure — same `.equip-row` layout as the
+ * Equipment tab's Machines/Implements lists. */
+function buildStructuresList(): void {
+  const rows = $("structures-list");
+  rows.innerHTML = "";
+  if (save.buildings.length === 0) {
+    rows.innerHTML = `<div id="fields-empty">No structures yet — buy a silo so harvested grain has somewhere to go.</div>`;
+    return;
+  }
+  for (const b of save.buildings) {
+    const name = `${buildingDisplayName(b.kind, b.size)} ${buildingIndex(b)}`;
+    const refund = buildingPrice(b.kind, b.size);
+    const specText = structureSpecText(b);
+
+    // Same dot language as Equipment: a silo actually assigned to a crop
+    // reads as "active" (solid green, no pulse — there's no in-progress
+    // state to animate); everything else is passive infrastructure (gray).
+    const stateClass = b.kind === "silo" && b.assignedCrop ? "assigned" : "idle";
+
+    const row = document.createElement("div");
+    row.className = `equip-card ${stateClass}`;
+    row.innerHTML = `
+      <span class="ec-dot ${stateClass}" title="${specText}"></span>
+      <span class="icon">${BUILDING_ICON[b.kind]}</span>
+      <div class="ec-name">${name}</div>
+      <div class="ec-status" title="${specText}">${specText}</div>`;
+
+    const actions = document.createElement("div");
+    actions.className = "ec-actions";
+    actions.appendChild(locateButton(name, b.pos));
+    actions.appendChild(
+      iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, () => {
+        if (!confirm(`Sell ${name} for $${refund.toLocaleString()}?`)) return;
+        sellBuilding(save, b.id);
+        toast(`💰 Sold ${name} for $${refund.toLocaleString()}`);
+        afterStructuresChange();
+      }),
+    );
+    row.appendChild(actions);
+    rows.appendChild(row);
+  }
+}
+
+/** One-line capacity/role summary for a building's status line. */
+function structureSpecText(b: Building): string {
+  switch (b.kind) {
+    case "silo": {
+      const cap = siloCapacityOf(b.size ?? "small");
+      return b.assignedCrop
+        ? `${cap.toLocaleString()} t capacity · assigned to ${gameConfig.crops[b.assignedCrop].name}`
+        : `${cap.toLocaleString()} t capacity · unassigned`;
+    }
+    case "baleBarn":
+      return `${storedBalesTotal(b)} / ${baleStorageCapacityOf("baleBarn").toLocaleString()} bales · indoor`;
+    case "baleArea":
+      return `${storedBalesTotal(b)} bales · outdoor · unlimited`;
+    case "tractorBarn":
+      return `${gameConfig.buildings.tractorBarn.slots} machine slots`;
+    case "implementBarn":
+      return `${gameConfig.buildings.implementBarn.slots} implement slots`;
+    case "farmYard":
+      return "Rally point — gear parks here";
+    case "sellPoint":
+      return "Bale hauler fallback — sells on the spot when storage is full/missing";
+  }
+}
+
 /** Refresh after any fleet change: HUD cash, map dots, panels. */
 function afterFleetChange(): void {
   updateHud();
@@ -1724,6 +1915,23 @@ const UNLOAD_PHASE_TEXT: Record<string, string> = {
   toSilo: "Hauling to the silo…",
   dumping: "Unloading at the silo…",
 };
+
+const HAUL_PHASE_TEXT: Record<string, string> = {
+  toBale: "Collecting bales…",
+  loading: "Spearing a bale…",
+  toTrailer: "Carrying to the trailer…",
+  unloadToTrailer: "Loading the trailer…",
+  toStorage: "Hauling to storage…",
+  dumping: "Unloading at storage…",
+  waiting: "Waiting…",
+};
+
+/** One-line status for a Haul Bales job's queue row — the spikes tractor's leg,
+ * or a ⚠️ if a hauler is stuck with nowhere to store. */
+function haulSubText(task: FarmTask): string {
+  if (task.waitingForStorage) return "⚠️ Waiting for storage room";
+  return HAUL_PHASE_TEXT[task.haulPhase ?? "toBale"] ?? "Hauling bales…";
+}
 
 function agentStatusText(agent: Agent): { text: string; pct: number | null } {
   const task = agent.taskId ? save.tasks.find((t) => t.id === agent.taskId) : undefined;
@@ -1777,59 +1985,64 @@ function refreshEquipTab(force = false) {
   buildEquipImplements();
 }
 
-/**
- * The equipment shop, rebuilt (maintainer request, 2026-07-12): a dealer-lot
- * layout. Three sections — Machines, Implements, Buildings — each row a
- * product line with its icon + name on the left and ALIGNED size-tier cards
- * across fixed columns (Small/Medium/Large), so prices and specs compare at a
- * glance. Tiers a line doesn't come in show as an em-dash placeholder rather
- * than shifting the grid.
- */
+/** Shared dealer-lot builders: a section header row + one product-line row
+ * per shop, size tiers in ALIGNED columns (Small/Medium/Large) so prices and
+ * specs compare straight down. Tiers a line doesn't come in show as an
+ * em-dash placeholder rather than shifting the grid. Used by both the
+ * Equipment shop (Machines/Implements) and the Structures shop (Buildings —
+ * split into its own tab, maintainer request, 2026-07-17). */
+function shopSection(shop: HTMLElement, label: string): void {
+  const h = document.createElement("div");
+  h.className = "shop-section";
+  h.textContent = label;
+  shop.appendChild(h);
+  const head = document.createElement("div");
+  head.className = "shop-row shop-head";
+  head.innerHTML = `<div></div><div>Small</div><div>Medium</div><div>Large</div>`;
+  shop.appendChild(head);
+}
+
+/** One product line: label cell + one cell per size column. */
+function shopLine(
+  shop: HTMLElement, label: string, iconSvg: string,
+  cells: Partial<Record<EquipmentSize, { spec: string; price: number; onBuy: () => void }>>,
+): void {
+  const row = document.createElement("div");
+  row.className = "shop-row";
+  row.innerHTML = `<div class="shop-line-label"><span class="icon">${iconSvg}</span><span>${label}</span></div>`;
+  for (const size of SIZES) {
+    const c = cells[size];
+    if (!c) {
+      row.insertAdjacentHTML("beforeend", `<div class="shop-na">—</div>`);
+      continue;
+    }
+    const btn = document.createElement("button");
+    btn.className = "shop-card";
+    btn.innerHTML = `<span class="spec">${c.spec}</span><span class="price">$${c.price.toLocaleString()}</span>`;
+    btn.disabled = c.price > save.money;
+    btn.title = btn.disabled ? `Costs $${c.price.toLocaleString()} — not enough cash` : `Buy ${label} - ${SIZE_LABEL[size]}`;
+    btn.addEventListener("click", () => {
+      try {
+        c.onBuy();
+      } catch (err) {
+        toast("❌ " + (err as Error).message, 3500);
+      }
+    });
+    row.appendChild(btn);
+  }
+  shop.appendChild(row);
+}
+
+/** The Equipment shop: Machines + Implements (Buildings live in the
+ * Structures tab, see `buildStructuresShop`). */
 function buildEquipShop(): void {
   const shop = $("equip-shop");
   shop.innerHTML = "";
-
-  const section = (label: string) => {
-    const h = document.createElement("div");
-    h.className = "shop-section";
-    h.textContent = label;
-    shop.appendChild(h);
-    const head = document.createElement("div");
-    head.className = "shop-row shop-head";
-    head.innerHTML = `<div></div><div>Small</div><div>Medium</div><div>Large</div>`;
-    shop.appendChild(head);
-  };
-
-  /** One product line: label cell + one cell per size column. */
+  const section = (label: string) => shopSection(shop, label);
   const line = (
     label: string, iconSvg: string,
     cells: Partial<Record<EquipmentSize, { spec: string; price: number; onBuy: () => void }>>,
-  ) => {
-    const row = document.createElement("div");
-    row.className = "shop-row";
-    row.innerHTML = `<div class="shop-line-label"><span class="icon">${iconSvg}</span><span>${label}</span></div>`;
-    for (const size of SIZES) {
-      const c = cells[size];
-      if (!c) {
-        row.insertAdjacentHTML("beforeend", `<div class="shop-na">—</div>`);
-        continue;
-      }
-      const btn = document.createElement("button");
-      btn.className = "shop-card";
-      btn.innerHTML = `<span class="spec">${c.spec}</span><span class="price">$${c.price.toLocaleString()}</span>`;
-      btn.disabled = c.price > save.money;
-      btn.title = btn.disabled ? `Costs $${c.price.toLocaleString()} — not enough cash` : `Buy ${label} - ${SIZE_LABEL[size]}`;
-      btn.addEventListener("click", () => {
-        try {
-          c.onBuy();
-        } catch (err) {
-          toast("❌ " + (err as Error).message, 3500);
-        }
-      });
-      row.appendChild(btn);
-    }
-    shop.appendChild(row);
-  };
+  ) => shopLine(shop, label, iconSvg, cells);
 
   const buyImpl = (kind: Parameters<typeof buyImplement>[1], size: EquipmentSize) => () => {
     const i = buyImplement(save, kind, size);
@@ -1884,25 +2097,41 @@ function buildEquipShop(): void {
   line("Grain Trailer", grainTrailerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${grainTrailerCapacityTons(s)} t cargo`, price: implementPrice("grainTrailer", s), onBuy: buyImpl("grainTrailer", s),
   }])));
+  // Hay Spikes: in-field bale collector — Small (1 bale) & Medium (2).
+  line("Hay Spikes", haySpikesIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
+    spec: `${haySpikesCapacityBales(s)} bale${haySpikesCapacityBales(s) === 1 ? "" : "s"} · collects`, price: implementPrice("haySpikes", s), onBuy: buyImpl("haySpikes", s),
+  }])));
+  // Bale Trailer: bulk bale hauler — Small (10) & Medium (20).
+  line("Bale Trailer", baleTrailerIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
+    spec: `${baleTrailerCapacityBales(s)} bale cargo`, price: implementPrice("baleTrailer", s), onBuy: buyImpl("baleTrailer", s),
+  }])));
+}
 
-  section("Buildings");
+/** The Structures shop (split out of Equipment, maintainer request,
+ * 2026-07-17): every buildable — Silo (size-tiered) plus the single-size
+ * barns/yards in a grid below it. */
+function buildStructuresShop(): void {
+  const shop = $("structures-shop");
+  shop.innerHTML = "";
+
   const placeBuilding = (kind: BuildingKind, size?: EquipmentSize) => () => {
     mode = `building:${kind}`;
     if (kind === "silo") pendingSiloSize = size ?? "small";
-    $("equiptab").style.display = "none";
+    $("structurestab").style.display = "none";
     toast(`🏗️ Click the map to place your ${buildingDisplayName(kind, size)}`);
   };
-  line("Silo", `<span class="shop-emoji">${BUILDING_ICON.silo}</span>`, Object.fromEntries(SIZES.map((s) => [s, {
+  shopLine(shop, "Silo", `<span class="shop-emoji">${BUILDING_ICON.silo}</span>`, Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${siloCapacityOf(s).toLocaleString()} t grain`,
     price: buildingPrice("silo", s),
     onBuy: placeBuilding("silo", s),
   }])));
   const OTHER_BUILDINGS: Array<[Exclude<BuildingKind, "silo">, string]> = [
     ["baleBarn", `${gameConfig.buildings.baleBarn.capacityBales} bales · indoor`],
-    ["baleArea", `${gameConfig.buildings.baleArea.capacityBales} bales · outdoor`],
+    ["baleArea", `unlimited · outdoor`],
     ["tractorBarn", `${gameConfig.buildings.tractorBarn.slots} machine slots`],
     ["implementBarn", `${gameConfig.buildings.implementBarn.slots} implement slots`],
     ["farmYard", "rally point — gear parks here"],
+    ["sellPoint", "bale hauler fallback — sells on the spot"],
   ];
   const grid = document.createElement("div");
   grid.className = "shop-bgrid";
@@ -1931,24 +2160,30 @@ function buildEquipMachines(): void {
   rows.innerHTML = "";
   for (const agent of save.agents) {
     const { text, pct } = agentStatusText(agent);
+    const taskText = pct !== null ? `${text} · ${pct.toFixed(0)}%` : text;
     const carried =
       agent.kind === "tractor"
         ? save.implements.find((i) => i.attachedTo === agent.id)
         : undefined;
     const sub = agent.kind === "tractor"
-      ? `<div class="er-sub">🔧 ${carried ? implementName(save, carried) : "no implement"}</div>`
+      ? `<div class="ec-sub" title="${carried ? implementName(save, carried) : "no implement"}">🔧 ${carried ? implementName(save, carried) : "no implement"}</div>`
       : "";
 
+    // Corner dot + card tint carry "is it working" at a glance (maintainer
+    // request, 2026-07-17, replacing the old progress bar): pulsing green
+    // while actually working, gold while driving, red if a harvester is
+    // blocked waiting on a Grain Trailer, gray otherwise.
+    const waiting = agent.kind === "harvester" ? harvesterWaitingText(agent) : null;
+    const stateClass = agent.state === "working" ? "working" : agent.state === "traveling" ? "traveling" : waiting ? "waiting" : "idle";
+
     const row = document.createElement("div");
-    row.className = "equip-row";
+    row.className = `equip-card ${stateClass}`;
     row.innerHTML = `
-      <span class="icon">${(AGENT_ICON[agent.kind] ?? tractorIconSvg)(20)}</span>
-      <span class="er-info">
-        <div class="er-name">${agent.name}</div>
-        <div class="er-status">${text}</div>
-        ${sub}
-        ${pct !== null ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
-      </span>`;
+      <span class="ec-dot ${stateClass}" title="${taskText}"></span>
+      <span class="icon">${(AGENT_ICON[agent.kind] ?? tractorIconSvg)(30)}</span>
+      <div class="ec-name">${agent.name}</div>
+      <div class="ec-status" title="${taskText}">${taskText}</div>
+      ${sub}`;
 
     // Manual escape hatch: a harvester holding grain with no `lastCrop` on
     // record (a leftover from before that tracking existed, ambiguous
@@ -1976,10 +2211,12 @@ function buildEquipMachines(): void {
       row.appendChild(select);
     }
 
-    row.appendChild(locateButton(agent.name, agent.pos));
+    const actions = document.createElement("div");
+    actions.className = "ec-actions";
+    actions.appendChild(locateButton(agent.name, agent.pos));
 
     const refund = agent.purchaseCost ?? (agent.size ? agentPrice(agent.kind as EquipmentKind, agent.size) : 0);
-    row.appendChild(
+    actions.appendChild(
       iconButton("💰", agent.state !== "idle" ? `${agent.name} is mid-job` : `Sell · $${refund.toLocaleString()}`, agent.state !== "idle", () => {
         if (!confirm(`Sell ${agent.name} for $${refund.toLocaleString()}?`)) return;
         const { refund: paid } = sellAgent(save, agent.id);
@@ -1987,6 +2224,7 @@ function buildEquipMachines(): void {
         toast(`💰 Sold ${agent.name} for $${paid.toLocaleString()}`);
       }),
     );
+    row.appendChild(actions);
     rows.appendChild(row);
   }
 }
@@ -2011,19 +2249,26 @@ function buildEquipImplements(): void {
       ? `${grainTrailerCapacityTons(impl.size)}t capacity${impl.cargoTons ? ` · ${impl.cargoTons.toFixed(1)}t onboard` : ""}`
       : `${gameConfig.equipment[impl.kind][impl.size].widthFt} ft wide`;
 
+    // Same dot language as the Machines cards: green while its host tractor
+    // is actively working, gold while driving, gray otherwise (in the yard
+    // or hitched to an idle tractor).
+    const stateClass = host?.state === "working" ? "working" : host?.state === "traveling" ? "traveling" : "idle";
+    const statusText = `${where} · ${sizeLine}`;
+
     const row = document.createElement("div");
-    row.className = "equip-row implement";
+    row.className = `equip-card implement ${stateClass}`;
     row.innerHTML = `
-      <span class="icon">${(IMPLEMENT_ICON[impl.kind] ?? plowIconSvg)(22)}</span>
-      <span class="er-info">
-        <div class="er-name">${implementName(save, impl)}</div>
-        <div class="er-status">${where} · ${sizeLine}</div>
-      </span>`;
+      <span class="ec-dot ${stateClass}" title="${statusText}"></span>
+      <span class="icon">${(IMPLEMENT_ICON[impl.kind] ?? plowIconSvg)(30)}</span>
+      <div class="ec-name">${implementName(save, impl)}</div>
+      <div class="ec-status" title="${statusText}">${statusText}</div>`;
 
     row.appendChild(hitchSelector(impl));
 
     const busy = !!host && host.state !== "idle";
-    row.appendChild(
+    const actions = document.createElement("div");
+    actions.className = "ec-actions";
+    actions.appendChild(
       iconButton("💰", busy ? `${host!.name} is using this` : `Sell · $${refund.toLocaleString()}`, busy, () => {
         if (!confirm(`Sell ${implementName(save, impl)} for $${refund.toLocaleString()}?`)) return;
         const { refund: paid } = sellImplement(save, impl.id);
@@ -2031,6 +2276,7 @@ function buildEquipImplements(): void {
         toast(`💰 Sold for $${paid.toLocaleString()}`);
       }),
     );
+    row.appendChild(actions);
     rows.appendChild(row);
   }
 }
@@ -2429,7 +2675,7 @@ function wireFieldDrawing(map: maplibregl.Map) {
 // ---------------------------------------------------------------------------
 // Field selection + the cozy side panel.
 /** One-click placement for buildings (mode = `building:<kind>`, set from the
- * Equipment panel's Buildings group). Unlike field drawing there's no draft —
+ * Structures tab's shop). Unlike field drawing there's no draft —
  * the first click buys and drops it, then resets to "none" whether or not
  * the purchase succeeded (so a misclick/insufficient funds doesn't strand
  * the player in placement mode). */
@@ -2467,15 +2713,17 @@ function buildingCapacityText(building: Building): string {
       return `Holds ${per} t of ${cfg.name.toLowerCase()} · farm total ${siloCapacityForCrop(save, building.assignedCrop).toLocaleString()} t`;
     }
     case "baleBarn":
-      return `Bale capacity: ${gameConfig.buildings.baleBarn.capacityBales.toLocaleString()} · farm total ${baleCapacity(save).toLocaleString()}`;
+      return `Bale storage: ${storedBalesTotal(building)} / ${baleStorageCapacityOf("baleBarn").toLocaleString()} bales`;
     case "baleArea":
-      return `Bale capacity: ${gameConfig.buildings.baleArea.capacityBales.toLocaleString()} · farm total ${baleCapacity(save).toLocaleString()}`;
+      return `Bale storage: ${storedBalesTotal(building)} bales · unlimited (outdoor)`;
     case "tractorBarn":
       return `Tractor slots: ${gameConfig.buildings.tractorBarn.slots} · farm total ${barnSlotTotal(save, "tractorBarn")}`;
     case "implementBarn":
       return `Implement slots: ${gameConfig.buildings.implementBarn.slots} · farm total ${barnSlotTotal(save, "implementBarn")}`;
     case "farmYard":
       return "Rally point — new equipment parks here";
+    case "sellPoint":
+      return "No capacity — a bale hauler sells here on the spot when Bale Storage is missing or full";
   }
 }
 
@@ -2914,6 +3162,26 @@ function refreshFieldPanel(force = false) {
       toast(`💰 Sold ${sold} bales for $${revenue.toLocaleString()}`);
     });
     actions.appendChild(btn);
+
+    // Haul these bales to Bale Storage (a Hay-Spikes tractor collects them,
+    // pulling in a Bale Trailer if one's idle). Hidden once a haul's already
+    // covering the field — baling auto-queues one (maintainer request,
+    // 2026-07-17).
+    if (fieldHasLooseBales(save, field.id)) {
+      const haulBtn = document.createElement("button");
+      haulBtn.innerHTML = `🚜 Haul to Storage`;
+      haulBtn.title = "Send a Hay-Spikes tractor to move these bales into Bale Storage";
+      haulBtn.addEventListener("click", () => {
+        if (!queueHaulBales(save, field.id)) {
+          toast("Nothing to haul, or a haul's already running");
+          return;
+        }
+        refreshQueuePanel();
+        refreshFieldPanel(true);
+        toast("🚜 Haul Bales queued — a Hay-Spikes tractor is on it");
+      });
+      actions.appendChild(haulBtn);
+    }
   }
 
   // --- Manual controls (only when NOT auto-managed; the planner drives the rest). ---

@@ -257,6 +257,36 @@ export function mowerIconSvg(size = 22): string {
   `);
 }
 
+/** Hay Spikes (2026-07-17): a rear 3-point frame carrying two forward
+ * (west-pointing) spears that skewer a round bale — the in-field bale
+ * collector. Shows one speared bale for readability. */
+export function haySpikesIconSvg(size = 22): string {
+  return svg(size, `
+    <rect x="25.5" y="12.5" width="2.4" height="9" rx="0.6" fill="${STEEL_D}"/>
+    <path d="M25.8 15 h-3 M25.8 19 h-3" stroke="${STEEL}" stroke-width="1.4"/>
+    <path d="M22.8 15 h-16 M22.8 19 h-16" stroke="${STEEL}" stroke-width="1.6" stroke-linecap="round"/>
+    <ellipse cx="12" cy="17" rx="8" ry="7.4" fill="${BALE_TINTS.hay.fill}" stroke="${BALE_TINTS.hay.stroke}" stroke-width="1.2"/>
+    <path d="M5 14.5 c3 1.4 11 1.4 14 0 M4.4 17.4 c3.4 1.8 11.8 1.8 15.2 0 M5.4 20.2 c3 1.4 10 1.4 13 0" stroke="${BALE_TINTS.hay.band}" stroke-width="0.8" fill="none"/>
+  `);
+}
+
+/** Bale Trailer (2026-07-17): a flat-deck trailer stacked with round bales —
+ * the bulk hauler half of the bale relay. */
+export function baleTrailerIconSvg(size = 22): string {
+  const bale = (cx: number, cy: number, r: number) =>
+    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${BALE_TINTS.hay.fill}" stroke="${BALE_TINTS.hay.stroke}" stroke-width="0.9"/>` +
+    `<circle cx="${cx}" cy="${cy}" r="${(r * 0.4).toFixed(1)}" fill="${BALE_TINTS.hay.core}" stroke="${BALE_TINTS.hay.stroke}" stroke-width="0.5"/>`;
+  return svg(size, `
+    <rect x="1.5" y="17.4" width="4" height="1.4" rx="0.5" fill="${STEEL_D}"/>
+    <rect x="4.5" y="17.6" width="23" height="2.4" rx="0.6" fill="${STEEL}" stroke="${STEEL_D}" stroke-width="0.6"/>
+    ${bale(9, 14.4, 3.4)}
+    ${bale(16, 14.4, 3.4)}
+    ${bale(23, 14.4, 3.4)}
+    ${wheel(11, 22, 3)}
+    ${wheel(21, 22, 3)}
+  `);
+}
+
 /** Machines (power units), by agent kind. */
 export const MACHINE_ICON: Record<string, (size?: number) => string> = {
   tractor: tractorIconSvg,
@@ -272,4 +302,6 @@ export const IMPLEMENT_ICON_SVG: Record<string, (size?: number) => string> = {
   bailer: balerIconSvg,
   grainTrailer: grainTrailerIconSvg,
   mower: mowerIconSvg,
+  haySpikes: haySpikesIconSvg,
+  baleTrailer: baleTrailerIconSvg,
 };

@@ -19,6 +19,7 @@ export const BUILDING_ICON: Record<BuildingKind, string> = {
   tractorBarn: "🏠",
   implementBarn: "🧰",
   farmYard: "🚩",
+  sellPoint: "💵",
 };
 
 const buildingMarkers = new Map<string, maplibregl.Marker>();
