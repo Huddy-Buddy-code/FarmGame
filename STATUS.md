@@ -775,6 +775,29 @@ once per maintainer; modeled closely on the grain-cart `unloadHarvester` relay.
 - Existing jitter test (moved-fraction check) still passes unmodified against
   the new spacing-based magnitude. 219 green, typecheck clean.
 
+### Fertilizer cost split out of planting, and made per-crop (2026-07-17)
+
+- Bug (maintainer catch): `inputCostPerAcre` (paid at planting) was already
+  bundling "seed, fertilizer, chemicals" into one number, but there's ALSO a
+  separate Fertilize task with its own charge — the fertilizer material cost
+  was being paid twice. And the Fertilize task's cost was a single global
+  flat rate (`fertilizeCostPerAcre: 35`) applied to every crop alike, which
+  is unrealistic — corn is a heavy N user, soybeans fix their own nitrogen,
+  hay crops need an annual topdress. $35/ac undercounts real fertilizer by
+  roughly an order of magnitude for corn.
+- Fix: moved `fertilizeCostPerAcre` from a flat `GameConfig` number to a
+  per-crop `CropConfig` field (`gameConfig.crops[crop].fertilizeCostPerAcre`,
+  `sim/tasks.ts` `taskCost()`), and rebalanced both numbers per crop against
+  Corn Belt extension-budget ballparks (seed+chem only at planting, fert
+  material + ~$20/ac pass fee at fertilize time):
+  - Corn: inputCostPerAcre 450→240, fertilizeCostPerAcre (new) 230
+  - Soybeans: inputCostPerAcre 300→250, fertilizeCostPerAcre (new) 70
+  - Grass: inputCostPerAcre 120→100, fertilizeCostPerAcre (new) 110
+  - Alfalfa: inputCostPerAcre 180→160, fertilizeCostPerAcre (new) 90
+  Total planting+fertilize $/ac lands close to the old combined number for
+  corn/soy, just correctly split across the two tasks that actually charge
+  for it. No test depended on the old flat rate — 220 green, typecheck clean.
+
 ### Skip to Spring button (2026-07-17)
 
 - New "🌱 Skip to Spring" button at the end of `#timebar`, next to Skip month.
