@@ -951,6 +951,31 @@ once per maintainer; modeled closely on the grain-cart `unloadHarvester` relay.
 - **Bale marker rendering:** all bales now render (was capped 150); incremental
   append + even subsampling for huge fields.
 
+## Latest changes (2026-07-20, Bale Trailer relay re-enabled)
+
+- **`TRAILER_RELAY_ENABLED` flipped back to `true`** (`sim/tasks.ts`). The
+  two-tractor bale relay is live again after the earlier oscillation was
+  root-caused: the Hay-Spikes collector was steering at the trailer's LIVE
+  (moving) position, so the road router flip-flopped its route.
+- **Fix — a single locked rendezvous gate.** New `haulStagingGate(task, field)`
+  picks the field gate nearest the BALES' centroid (maintainer choice: the
+  collector shuttles far more often than the trailer hauls, so minimize the
+  shuttle) and caches it in `haulEntranceRuntime`. Both brains read that one
+  fixed point. The collector now only drives to the trailer when it's actually
+  PARKED (`trailerPhase === "waiting"`) with room — while the trailer is
+  arriving or off on a storage run, the collector holds its load in-field and
+  waits, exactly as specified. Never targets the live trailer position again.
+- **Selection is fully automatic** (maintainer choice, 2026-07-20): any idle
+  tractor that has — or can hitch — a Bale Trailer is auto-recruited when a
+  Haul Bales job starts (`assignTrailerHelper`, unchanged logic, just
+  un-gated). No spare tractor → the collector hauls direct, as before.
+- Tests: the old "relay is DISABLED" assertion was rewritten to verify the
+  relay engages, the trailer carries the load, and a 12-bale field fully
+  delivers via a small (10-bale) trailer + small (1-bale) spikes without
+  stalling; added a "no spare tractor → hauls direct" case. 221 green,
+  typecheck clean. **Not visually verified** (Browser Preview off) — worth
+  watching a real relay run in `npm run dev` to confirm no residual jitter.
+
 ## Known gaps / unverified
 
 - **Economy is placeholder** — flat sell price. No buyers, capacity, or hauling yet.

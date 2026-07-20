@@ -83,11 +83,11 @@ describe("Bale hauling relay (maintainer request, 2026-07-17)", () => {
     expect(spikes.attachedTo).toBe(tractor.id);
   });
 
-  it("trailer relay is DISABLED for now (maintainer request, 2026-07-17) — the Hay-Spikes tractor hauls direct even with a trailer available", () => {
+  it("trailer relay (re-enabled 2026-07-20): an idle tractor+Bale Trailer is auto-recruited, the trailer carries the load, and the whole field is delivered", () => {
     const save = gameForHaul();
-    buyImplement(save, "haySpikes", "small"); // 1 bale
-    buyImplement(save, "baleTrailer", "small"); // 10 bales — present but must stay unused
-    buyAgent(save, "tractor", "medium", [0, 0]); // an idle spare tractor that could pull it
+    buyImplement(save, "haySpikes", "small"); // 1 bale per shuttle
+    buyImplement(save, "baleTrailer", "small"); // 10 bales — the relay hauler
+    buyAgent(save, "tractor", "medium", [0, 0]); // idle spare to pull the trailer
     const area = buyBuildingAt(save, "baleArea", [-500, -500]);
     const field = baledField(save, 12, "hay");
 
@@ -101,10 +101,26 @@ describe("Bale hauling relay (maintainer request, 2026-07-17)", () => {
       return noHaulLeft(save, field)();
     });
 
-    expect(recruitedTrailer).toBe(false); // no helper recruited while disabled
-    expect(trailerCarried).toBe(false); // the trailer never touched a bale
-    expect(storedBalesTotal(area)).toBe(12); // still fully delivered, direct
-    expect(save.agents.every((a) => a.taskId === undefined)).toBe(true);
+    expect(recruitedTrailer).toBe(true); // the spare tractor was pulled in
+    expect(trailerCarried).toBe(true); // the trailer actually hauled bales
+    expect(storedBalesTotal(area)).toBe(12); // whole field delivered
+    expect(save.agents.every((a) => a.taskId === undefined)).toBe(true); // both released
+    expect(save.implements.find((i) => i.kind === "baleTrailer")?.cargoBales ?? 0).toBe(0);
+    expect(save.implements.find((i) => i.kind === "haySpikes")?.cargoBales ?? 0).toBe(0);
+  });
+
+  it("no spare tractor → the relay never engages and the Hay-Spikes tractor hauls direct", () => {
+    const save = gameForHaul();
+    buyImplement(save, "haySpikes", "small");
+    buyImplement(save, "baleTrailer", "small"); // present, but no idle tractor to pull it
+    const area = buyBuildingAt(save, "baleArea", [-500, -500]);
+    const field = baledField(save, 4, "hay");
+
+    const task = queueHaulBales(save, field.id)!;
+    runTasks(save, APRIL_1, noHaulLeft(save, field));
+
+    expect(task.trailerAgentId).toBeUndefined(); // nobody free to haul
+    expect(storedBalesTotal(area)).toBe(4); // delivered direct anyway
   });
 
   it("a full Bale Barn blocks (waitingForStorage) until room is freed", () => {

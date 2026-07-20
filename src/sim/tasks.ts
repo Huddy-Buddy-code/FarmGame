@@ -1063,17 +1063,45 @@ function nearestBaleIndex(locs: Meters[], p: Meters): number {
   return best;
 }
 
+/** Mean position of a field's loose bales (undefined if none). */
+function baleCentroid(field: Field): Meters | undefined {
+  const locs = field.baleLocations;
+  if (!locs || locs.length === 0) return undefined;
+  let x = 0, y = 0;
+  for (const [bx, by] of locs) { x += bx; y += by; }
+  return [x / locs.length, y / locs.length];
+}
+
+/** The Bale-Trailer's parking spot for a haul job: the field gate nearest the
+ * BALES (maintainer request, 2026-07-17 — the Hay-Spikes tractor shuttles to
+ * the trailer far more often than the trailer hauls to storage, so shortening
+ * the shuttle matters most). Chosen once and LOCKED in `haulEntranceRuntime`
+ * so both relay brains agree on a fixed rendezvous — a moving target is what
+ * made the collector oscillate before. `undefined` for a gateless field. */
+function haulStagingGate(task: FarmTask, field: Field): Meters | undefined {
+  const locked = haulEntranceRuntime.get(task.id);
+  if (locked) return locked;
+  if (!field.accessPoints || field.accessPoints.length === 0) return undefined;
+  const ref = baleCentroid(field) ?? field.accessPoints[0]!;
+  const gate = nearestGate(field, ref);
+  haulEntranceRuntime.set(task.id, gate);
+  return gate;
+}
+
 /** Pull an idle tractor+Bale-Trailer into a Haul Bales job as the hauler half
  * of the relay (auto-hitching a loose trailer if the spare tractor has none).
  * No-op if there's no spare idle tractor / no trailer available — the
  * Hay-Spikes tractor then hauls direct.
  *
- * TEMPORARILY DISABLED (maintainer request, 2026-07-17): the two-tractor relay
- * confused the collector — it oscillated between the field and storage chasing
- * the trailer. Short-circuited to a no-op so every haul is a straightforward
- * Hay-Spikes-direct trip while that's sorted out; the relay code below is left
- * intact to re-enable once fixed. */
-const TRAILER_RELAY_ENABLED = false;
+ * The trailer stages at a FIXED gate (nearest the bales, locked in
+ * `haulEntranceRuntime`) and the Hay-Spikes tractor shuttles bales out to it;
+ * when full (or the field's cleared) the trailer runs the load to storage and
+ * the collector waits in-field for its return (maintainer request,
+ * 2026-07-20 — re-enabled after the earlier oscillation was traced to the
+ * collector chasing the trailer's *moving* position instead of its parked
+ * gate). Selection is fully automatic: any idle tractor with (or able to
+ * hitch) a Bale Trailer is used. */
+const TRAILER_RELAY_ENABLED = true;
 function assignTrailerHelper(save: SaveState, task: FarmTask, spikesAgent: Agent): void {
   if (!TRAILER_RELAY_ENABLED) return;
   const helper = save.agents.find(
@@ -1099,6 +1127,10 @@ function assignTrailerHelper(save: SaveState, task: FarmTask, spikesAgent: Agent
   task.trailerPhase = "toEntrance";
   helper.taskId = task.id;
   helper.state = "traveling";
+  // Lock the staging gate now (nearest the bales) so both brains rendezvous at
+  // one fixed point from the very first tick.
+  const field = save.fields.find((f) => f.id === task.fieldId);
+  if (field) haulStagingGate(task, field);
 }
 
 /** Where a bale hauler should head with its load: the nearest Bale Storage
@@ -1557,12 +1589,9 @@ function tickAgent(
           continue;
         }
 
-        // Otherwise stage at the field's entrance gate and wait to be loaded.
-        let gate = haulEntranceRuntime.get(task.id);
-        if (!gate && haulField.accessPoints && haulField.accessPoints.length >= 2) {
-          gate = nearestGate(haulField, agent.pos);
-          haulEntranceRuntime.set(task.id, gate);
-        }
+        // Otherwise stage at the locked entrance gate (nearest the bales) and
+        // wait to be loaded.
+        const gate = haulStagingGate(task, haulField);
         if (gate && !samePos(agent.pos, gate)) {
           task.trailerPhase = "toEntrance";
           agent.state = "traveling";
@@ -1723,19 +1752,23 @@ function tickAgent(
       // Carrying bales (spikes full, or field cleared with a partial load).
       if (hasTrailer) {
         const trailerRoom = baleTrailerCapacityBales(trailerImpl!.size) - (trailerImpl!.cargoBales ?? 0);
-        const trailerBusy = task.trailerPhase === "toStorage" || task.trailerPhase === "dumping";
-        if (trailerRoom <= 0 || trailerBusy) {
-          // Trailer full or off delivering — hold the load until it's back.
+        // Only shuttle to the trailer once it's actually PARKED at its gate with
+        // room. While it's still arriving ("toEntrance") or off on a run
+        // ("toStorage"/"dumping"), hold the load in-field and wait — chasing the
+        // trailer's moving position is exactly what made this oscillate before.
+        const trailerReady = task.trailerPhase === "waiting" && trailerRoom > 0;
+        if (!trailerReady) {
           task.haulPhase = "waiting";
           agent.state = "working";
           budget = 0;
           continue;
         }
-        const target = trailerAgent!.pos;
-        if (!samePos(agent.pos, target)) {
+        // Rendezvous at the trailer's LOCKED parked gate, never its live pos.
+        const gate = haulStagingGate(task, haulField) ?? trailerAgent!.pos;
+        if (!samePos(agent.pos, gate)) {
           task.haulPhase = "toTrailer";
           agent.state = "traveling";
-          budget = driveToward(save, agent, target, speed, budget);
+          budget = driveToward(save, agent, gate, speed, budget);
           continue;
         }
         task.haulPhase = "unloadToTrailer";
