@@ -440,7 +440,7 @@ export function taskCost(field: Field, type: TaskType, crop?: CropId): number {
   if (type === "plant") return Math.round(acres * gameConfig.crops[crop!].inputCostPerAcre);
   if (type === "mow") return Math.round(acres * gameConfig.mowCostPerAcre);
   if (type === "weed") return Math.round(acres * gameConfig.weedCostPerAcre);
-  if (type === "fertilize") return Math.round(acres * gameConfig.fertilizeCostPerAcre);
+  if (type === "fertilize") return Math.round(acres * gameConfig.crops[crop ?? field.crop!].fertilizeCostPerAcre);
   if (type === "rake") return Math.round(acres * gameConfig.forage.rakeCostPerAcre);
   if (type === "bale") return Math.round(acres * gameConfig.forage.baleCostPerAcre);
   return 0; // harvest: fuel/wages arrive with the cost-model slice (brief §8)

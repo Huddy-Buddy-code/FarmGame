@@ -38,8 +38,18 @@ export interface CropConfig {
   name: string;
   /** HUD icon — cozy UI shorthand. */
   emoji: string;
-  /** Planting inputs (seed, fertilizer, chemicals), paid at planting (brief §8). */
+  /** Planting inputs — SEED + herbicide/pesticide CHEMICALS only, paid at
+   * planting (brief §8). Fertilizer is deliberately excluded: it's its own
+   * pass ([[fertilizeCostPerAcre]] below), so it isn't paid twice. */
   inputCostPerAcre: number;
+  /** Fertilizer, per acre: material (N-P-K/topdress) + application fuel/wear,
+   * charged on the FERTILIZE task, not at planting. Varies a lot by crop —
+   * corn is a heavy N user, soybeans fix their own N (P&K top-up only), hay
+   * crops get an annual topdress. Real-world per-acre ballpark (Corn Belt,
+   * university extension budgets, 2023-24): corn ~$180-220 material, soy
+   * ~$40-60, hay ~$70-100 — plus ~$20/ac fuel+wear for the pass itself,
+   * same rate as [[plowCostPerAcre]]. */
+  fertilizeCostPerAcre: number;
   /** Expected yield in tons/acre a typical season lands around. */
   baseYieldTonsPerAcre: number;
   /** Yield uncertainty half-width as a fraction of base (±30% = 0.3). The TRUE
@@ -102,9 +112,10 @@ export interface GameConfig {
    * from re-plowing the instant a field is harvested; ground rests until the
    * field naturally comes back around to plowable. */
   plowMonths: number[];
-  /** Cost to weed/fertilize, per acre — same pay-on-queue pattern as plow. */
+  /** Cost to weed, per acre — same pay-on-queue pattern as plow. Fertilize
+   * moved to a per-crop cost ([[CropConfig.fertilizeCostPerAcre]]) since real
+   * fertilizer need varies far more by crop than weeding chemicals do. */
   weedCostPerAcre: number;
-  fertilizeCostPerAcre: number;
   /** Cost to mow (cut) a perennial forage field, per acre (2026-07-13). */
   mowCostPerAcre: number;
 
@@ -295,7 +306,8 @@ export const gameConfig: GameConfig = {
     corn: {
       name: "Corn",
       emoji: "🌽",
-      inputCostPerAcre: 450,
+      inputCostPerAcre: 240, // seed + herbicide/pesticide only (fertilizer below)
+      fertilizeCostPerAcre: 230, // heavy N user — ~$210 material + $20 pass
       baseYieldTonsPerAcre: 5.5, // ~200 bu/ac
       yieldUncertainty: 0.3,
       plantMonths: [3, 4], // Apr–May
@@ -306,7 +318,8 @@ export const gameConfig: GameConfig = {
     soybeans: {
       name: "Soybeans",
       emoji: "🫘",
-      inputCostPerAcre: 300,
+      inputCostPerAcre: 250, // seed (pricier trait genetics) + herbicide
+      fertilizeCostPerAcre: 70, // fixes its own N — just a P&K top-up + pass
       baseYieldTonsPerAcre: 1.6, // ~60 bu/ac
       yieldUncertainty: 0.3,
       plantMonths: [4, 5], // May–Jun
@@ -320,7 +333,8 @@ export const gameConfig: GameConfig = {
     grass: {
       name: "Grass",
       emoji: "🌾",
-      inputCostPerAcre: 120, // establishment seed
+      inputCostPerAcre: 100, // establishment seed only
+      fertilizeCostPerAcre: 110, // annual topdress (N-P-K) + pass, hay removes a lot of nutrients
       baseYieldTonsPerAcre: 0,
       yieldUncertainty: 0,
       plantMonths: [2], // March
@@ -336,7 +350,8 @@ export const gameConfig: GameConfig = {
     alfalfa: {
       name: "Alfalfa",
       emoji: "☘️",
-      inputCostPerAcre: 180,
+      inputCostPerAcre: 160, // alfalfa seed is pricey — establishment cost stays high
+      fertilizeCostPerAcre: 90, // fixes its own N — annual P&K/S topdress + pass
       baseYieldTonsPerAcre: 0,
       yieldUncertainty: 0,
       plantMonths: [2], // March
@@ -354,7 +369,6 @@ export const gameConfig: GameConfig = {
   plowCostPerAcre: 20,
   plowMonths: [11, 0, 1], // Dec–Feb (winter only)
   weedCostPerAcre: 15,
-  fertilizeCostPerAcre: 35,
   mowCostPerAcre: 12,
   work: {
     // Slower than road travel: a working pass is deliberate. Tuned so a medium
