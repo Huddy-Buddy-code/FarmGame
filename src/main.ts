@@ -423,7 +423,7 @@ function updateAgentMarkers(): void {
       bob.className = "agent-bob";
       const glyph = document.createElement("span");
       glyph.className = "agent-glyph";
-      glyph.innerHTML = machineIconHtml(agent.kind, agent.size, 40);
+      glyph.innerHTML = machineIconHtml(agent.kind, agent.size, 60);
       bob.appendChild(glyph);
       el.appendChild(bob);
       marker = new maplibregl.Marker({ element: el }).setLngLat(toLngLat(agent.pos)).addTo(mapRef);
@@ -620,9 +620,14 @@ function updateReveals(): void {
         // Raking reveals windrows over the harvested surface strip-by-strip; the
         // baler then reveals clean/mulched over those windrows as it collects.
         windrowed: task.type === "rake",
-        // Real implement width, so a mid-work field's headland frame (if any)
-        // matches the machine actually driving it, not a generic default.
-        swathM: path.swath,
+        // Real implement width, so a mid-work field's headland frame + pass
+        // texture match the machine actually driving it — BUT only for tasks
+        // whose implement defines the baked status's geometry (plow furrows,
+        // planter/crop rows, cut stubble, windrows). Weed/fertilize just overlay
+        // on the existing crop; feeding them the (wide) sprayer swath would
+        // redraw the crop's headland frame at sprayer width — a bogus perimeter
+        // band. Omit it so they fall back to the crop's own default swath.
+        swathM: task.type === "weed" || task.type === "fertilize" ? undefined : path.swath,
         seed: hashSeed(task.fieldId),
       });
       r = { taskId: task.id, fieldId: task.fieldId, baked, lastDist: 0, lastUpload: 0 };
@@ -875,7 +880,7 @@ function implRowForBaleTrailer(task: FarmTask): string {
 function buildQueueRow(task: FarmTask): HTMLElement {
   const isActive = task.status === "active";
   const agent = isActive && task.agentId ? save.agents.find((a) => a.id === task.agentId) : undefined;
-  const iconHtml = agent ? `<span class="icon">${machineIconHtml(agent.kind, agent.size, 64)}</span>` : "";
+  const iconHtml = agent ? `<span class="icon">${machineIconHtml(agent.kind, agent.size, 96)}</span>` : "";
 
   if (task.type === "unloadHarvester") {
     // Not acres-based — no %/hours estimate; show the phase instead.
@@ -2123,7 +2128,7 @@ function buildEquipShop(): void {
   };
 
   section("Machines");
-  line("Tractor", machineIconHtml("tractor", undefined, 52), Object.fromEntries(SIZES.map((s) => [s, {
+  line("Tractor", machineIconHtml("tractor", "medium", 78), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${SIZE_LABEL[s]} power unit`,
     price: agentPrice("tractor", s),
     onBuy: () => {
@@ -2132,7 +2137,7 @@ function buildEquipShop(): void {
       toast(`Bought ${a.name} — parked at the yard`);
     },
   }])));
-  line("Combine", machineIconHtml("harvester", undefined, 52), Object.fromEntries(SIZES.map((s) => [s, {
+  line("Combine", machineIconHtml("harvester", "medium", 78), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${gameConfig.equipment.harvester[s].widthFt} ft header · ${harvesterCapacityTons(s)} t hopper`,
     price: agentPrice("harvester", s),
     onBuy: () => {
@@ -2252,7 +2257,7 @@ function buildEquipMachines(): void {
     row.className = `equip-card ${stateClass}`;
     row.innerHTML = `
       <span class="ec-dot ${stateClass}" title="${taskText}"></span>
-      <span class="icon">${machineIconHtml(agent.kind, agent.size, 60)}</span>
+      <span class="icon">${machineIconHtml(agent.kind, agent.size, 90)}</span>
       <div class="ec-name">${agent.name}</div>
       <div class="ec-status" title="${taskText}">${taskText}</div>
       ${sub}`;

@@ -1208,6 +1208,13 @@ thickness and corner turns.
   screenshot). Fixed: straight windrows now clip to `innerBoundary`, and a new
   `windrowFrame()` traces one piled windrow per headland ring so the perimeter
   laps curve with the boundary. Same treatment the status rows already got.
+- Follow-up 3: weed/fertilize reveals showed a bogus wide perimeter band. They
+  bake the crop's SAME status ("growing") but were handed the sprayer's
+  `path.swath` (60–120 ft), redrawing the crop's headland frame at sprayer
+  width instead of planter width. Fix in `main.ts` updateReveals: pass
+  `swathM` only for geometry-defining tasks; weed/fertilize now omit it and
+  fall back to `defaultSwathM` (planter width for growing). Rake still passes
+  its swath (windrows want it).
 
 ## Known gaps / unverified
 
