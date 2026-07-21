@@ -1078,6 +1078,22 @@ verified** (Browser Preview off).
   Preview off) — worth watching Inventory update during a harvest/haul in
   `npm run dev`.
 
+## Latest changes (2026-07-20, auto Skip-Month when idle)
+
+- New: if the farm has NO work (no queued or active tasks) for 1 minute of real
+  time, it fires the Skip-Month montage on its own, so idle downtime doesn't
+  need repeated clicks. `maybeAutoSkipMonth` in `main.ts`, called from the game
+  loop; `AUTO_SKIP_IDLE_MS = 60_000`, targets the start of the next month (same
+  as the Skip Month button). Gated on the clock running and no montage in
+  flight; any pending task (including system hauls/unloads) resets the idle
+  clock; re-arms after each auto-skip (so it steps one month per idle minute).
+- Toggle: a "⏩ Auto" button in the timebar turns it on/off (`.active` = on),
+  persisted in `localStorage` (`farm.autoSkip`), default ON. `maybeAutoSkipMonth`
+  bails immediately when off.
+- UI/timing only; typecheck + 225 tests green. **Not visually verified**
+  (Browser Preview off). Possible refinement if it feels intrusive: also
+  suppress the auto-skip while a toolbar menu is open.
+
 ## Known gaps / unverified
 
 - **Economy is placeholder** — flat sell price. No buyers, capacity, or hauling yet.

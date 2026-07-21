@@ -273,6 +273,7 @@ function gameLoop(ts: number) {
   const before = clock.time();
   clock.advance(realSeconds);
   tickWorld(before);
+  maybeAutoSkipMonth();
 
   requestAnimationFrame(gameLoop);
 }
@@ -2479,6 +2480,17 @@ function wireTimeControls() {
     runMontage(nextMonthStart(clock.time(), 2)); // 2 = March, 0-based
   });
 
+  // Auto-skip toggle: highlight (.active) reflects on/off; state persists.
+  const autoBtn = $("auto-skip");
+  autoBtn.classList.toggle("active", autoSkipEnabled);
+  autoBtn.addEventListener("click", () => {
+    autoSkipEnabled = !autoSkipEnabled;
+    autoBtn.classList.toggle("active", autoSkipEnabled);
+    localStorage.setItem("farm.autoSkip", autoSkipEnabled ? "on" : "off");
+    idleSinceReal = null; // restart the idle clock either way
+    toast(autoSkipEnabled ? "⏩ Auto-skip idle months: ON" : "⏸ Auto-skip idle months: OFF");
+  });
+
   // Calendar pace knob: how many real days make up a game month. Everything the
   // player cares about (crop growth, harvest-band positions) is keyed to MONTHS,
   // so this cleanly rescales the whole farming loop — a shorter month = faster
@@ -2498,6 +2510,33 @@ function wireTimeControls() {
  * player watches the field green up / ripen instead of teleporting. All skipped
  * time IS simulated (no shortcuts), just at very high compression.
  */
+/** Auto-advance the season through dead stretches: if the farm's had no work
+ * (no queued OR active tasks) for this long of REAL time, fire the same
+ * Skip-Month montage on its own — so idle downtime doesn't need repeated
+ * clicks (maintainer request, 2026-07-20). Re-arms after each auto-skip. */
+const AUTO_SKIP_IDLE_MS = 60_000;
+let idleSinceReal: number | null = null;
+// Toggle (⏩ Auto button); persisted across reloads. Default ON.
+let autoSkipEnabled = localStorage.getItem("farm.autoSkip") !== "off";
+function maybeAutoSkipMonth(): void {
+  // Off, mid-montage, paused, or any pending work (incl. system hauls) → reset
+  // the idle clock and do nothing.
+  if (!autoSkipEnabled || montageActive || clock.isPaused() || save.tasks.length > 0) {
+    idleSinceReal = null;
+    return;
+  }
+  const nowReal = performance.now();
+  if (idleSinceReal === null) {
+    idleSinceReal = nowReal;
+    return;
+  }
+  if (nowReal - idleSinceReal < AUTO_SKIP_IDLE_MS) return;
+  idleSinceReal = null; // re-arm; the next idle minute triggers the next skip
+  const mpm = minutesPerMonth();
+  const target = (Math.floor(clock.time() / mpm) + 1) * mpm; // start of next month
+  runMontage(target);
+}
+
 let montageActive = false;
 function runMontage(target: number) {
   if (montageActive) return;
