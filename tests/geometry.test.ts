@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { areaMeters, areaAcres, boundsOf, padBounds, smoothPolygon, nearestPointOnPolygon } from "../src/geo/geometry";
+import { areaMeters, areaAcres, boundsOf, padBounds, smoothPolygon, nearestPointOnPolygon, offsetPolygonInward } from "../src/geo/geometry";
 import type { Meters } from "../src/geo/coords";
 
 /**
@@ -64,6 +64,42 @@ describe("geometry (meters)", () => {
       const copy = square.map((p) => [...p] as Meters);
       smoothPolygon(square, 3);
       expect(square).toEqual(copy);
+    });
+  });
+
+  /**
+   * offsetPolygonInward drives the headland-lap frame (both the coverage-path
+   * geometry and the finished-field texture) — each successive lap is one
+   * more inward offset of the last, so it needs to shrink a known shape by a
+   * known, predictable amount and refuse to produce nonsense once it's out of
+   * room, rather than silently returning a self-intersecting sliver.
+   */
+  describe("offsetPolygonInward (headland lap tracing)", () => {
+    it("shrinks a square by exactly `distance` on every side", () => {
+      const offset = offsetPolygonInward(square, 20)!;
+      expect(offset).not.toBeNull();
+      expect(boundsOf(offset)).toEqual([20, 20, 180, 180]);
+      expect(areaMeters(offset)).toBeCloseTo(160 * 160, 6);
+    });
+
+    it("composes: two 20 m offsets match one 40 m offset", () => {
+      const twice = offsetPolygonInward(offsetPolygonInward(square, 20)!, 20)!;
+      const once = offsetPolygonInward(square, 40)!;
+      expect(boundsOf(twice)).toEqual(boundsOf(once));
+    });
+
+    it("returns null once the offset would collapse the shape (too small/no room left)", () => {
+      // A 200 m square offset by 95 m a side leaves only a 10 m sliver (2.5% of
+      // the original area) — well under the 15% collapse guard.
+      expect(offsetPolygonInward(square, 95)).toBeNull();
+      // Offsetting past the polygon's own half-width is even more clearly gone.
+      expect(offsetPolygonInward(square, 150)).toBeNull();
+    });
+
+    it("rejects degenerate input (distance <= 0, or too few points)", () => {
+      expect(offsetPolygonInward(square, 0)).toBeNull();
+      expect(offsetPolygonInward(square, -5)).toBeNull();
+      expect(offsetPolygonInward([[0, 0], [1, 0]], 1)).toBeNull();
     });
   });
 

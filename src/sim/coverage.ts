@@ -18,7 +18,8 @@
  */
 
 import type { Meters } from "../geo/coords";
-import { boundsOf } from "../geo/geometry";
+import { boundsOf, offsetPolygonInward } from "../geo/geometry";
+import type { TaskType } from "../state/saveState";
 
 export interface CoveragePath {
   /** Ordered route points, in meters. */
@@ -179,7 +180,15 @@ export function buildCoveragePath(boundary: Meters[], swath: number): CoveragePa
   // Rotate the route back to meters.
   const pts = localPts.map((p) => rot(p, angle));
 
-  // Cumulative full + work lengths.
+  return accumulatePath(pts, seg, swath, angle);
+}
+
+/** Build a `CoveragePath` from an already-decided route: walk consecutive
+ * points, summing full-route length (`cum`) and in-field-only length (`work`)
+ * as it goes. Split out of `buildCoveragePath` so headland-lap routes
+ * (boundary loops + interior lane-fill, stitched together) can reuse the exact
+ * same accounting instead of duplicating it. */
+export function accumulatePath(pts: Meters[], inField: boolean[], swath: number, angle: number): CoveragePath {
   const cum = [0];
   const work = [0];
   let total = 0;
@@ -189,12 +198,114 @@ export function buildCoveragePath(boundary: Meters[], swath: number): CoveragePa
     const b = pts[i + 1]!;
     const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
     total += len;
-    if (seg[i]) totalWork += len;
+    if (inField[i]) totalWork += len;
     cum.push(total);
     work.push(totalWork);
   }
+  return { pts, cum, work, inField, total, totalWork, swath, angle };
+}
 
-  return { pts, cum, work, inField: seg, total, totalWork, swath, angle };
+/** Per-task-type headland behavior: how many perimeter laps a tractor drives
+ * around the field boundary, and whether that happens before or after the
+ * straight interior lane-fill (maintainer spec, 2026-07-20). Read by both the
+ * sim (which path to actually drive) and the renderer (how wide a boundary
+ * frame the finished texture shows) — see `field/fieldRender.ts`. */
+export interface HeadlandConfig {
+  laps: number;
+  order: "first" | "last";
+}
+export const TASK_HEADLANDS: Partial<Record<TaskType, HeadlandConfig>> = {
+  plow: { laps: 6, order: "last" },
+  plant: { laps: 3, order: "last" },
+  fertilize: { laps: 1, order: "last" },
+  weed: { laps: 1, order: "last" },
+  mow: { laps: 3, order: "first" },
+  rake: { laps: 3, order: "first" },
+  bale: { laps: 3, order: "first" },
+  harvest: { laps: 3, order: "first" },
+};
+
+/** Trace up to `laps` ring CENTERLINES, one implement-width apart, the first
+ * inset half a swath from the true boundary — same convention the interior
+ * lane-fill already uses for its own first/last lane, so a lap's outer edge
+ * touches the true boundary exactly instead of the tractor driving ON the
+ * property line. Stops early (not erroring) once `offsetPolygonInward` runs
+ * out of field to shrink. `innerBoundary` is whatever's left over for the
+ * interior lane-fill — inset a further half-swath past the last ring traced,
+ * so the two fills tile with no gap or overlap; the original boundary itself
+ * if not even one lap fits. */
+export function buildHeadlandLaps(boundary: Meters[], swath: number, laps: number): { rings: Meters[][]; innerBoundary: Meters[] } {
+  const rings: Meters[][] = [];
+  let centerline = offsetPolygonInward(boundary, swath / 2);
+  while (centerline && rings.length < laps) {
+    rings.push(centerline);
+    centerline = offsetPolygonInward(centerline, swath);
+  }
+  if (rings.length === 0) return { rings: [], innerBoundary: boundary };
+  const last = rings[rings.length - 1]!;
+  const innerBoundary = offsetPolygonInward(last, swath / 2) ?? last;
+  return { rings, innerBoundary };
+}
+
+/** One piece of a route: `work[i]` flags whether `pts[i]`→`pts[i+1]` is
+ * productive field work (mirrors `CoveragePath.inField`, before the pieces are
+ * stitched together and their cumulative distances computed). */
+interface PathPiece {
+  pts: Meters[];
+  work: boolean[];
+}
+
+/** One full lap around `ring`, back to its own start — the whole loop counts
+ * as work (it's a real driven pass, same as an interior lane). */
+function ringPiece(ring: Meters[]): PathPiece {
+  return { pts: [...ring, ring[0]!], work: ring.map(() => true) };
+}
+
+function pathToPiece(path: CoveragePath): PathPiece {
+  return { pts: path.pts, work: path.inField };
+}
+
+/** Concatenate route pieces end to end, with a non-work TRANSIT segment
+ * bridging wherever one piece ends and the next begins — same convention
+ * `buildCoveragePath` already uses between cells. */
+function joinPieces(pieces: PathPiece[]): { pts: Meters[]; inField: boolean[] } {
+  const pts: Meters[] = [];
+  const inField: boolean[] = [];
+  const append = (p: Meters, segIsWork: boolean) => {
+    if (pts.length > 0) inField.push(segIsWork);
+    pts.push(p);
+  };
+  for (const piece of pieces) {
+    append(piece.pts[0]!, false); // transit in from the previous piece (ignored if this is the very first point)
+    for (let i = 1; i < piece.pts.length; i++) append(piece.pts[i]!, piece.work[i - 1]!);
+  }
+  return { pts, inField };
+}
+
+/**
+ * A coverage path that drives `laps` loops around the field boundary either
+ * before or after the normal straight-lane interior fill (brief §10 follow-up,
+ * 2026-07-20 — real headland passes: several laps around the edge, then fill
+ * the middle in straight rows, or the reverse). The interior fill itself is
+ * built by the UNMODIFIED `buildCoveragePath` on whatever boundary the laps
+ * leave behind — cellular decomposition, concave-notch handling, etc. all
+ * carry over untouched.
+ *
+ * If the field is too small/narrow for even one lap, this degrades to a plain
+ * `buildCoveragePath(boundary, swath)` — same as a task with no headland config.
+ */
+export function buildHeadlandCoveragePath(boundary: Meters[], swath: number, laps: number, order: "first" | "last"): CoveragePath {
+  const { rings, innerBoundary } = buildHeadlandLaps(boundary, swath, laps);
+  const interior = buildCoveragePath(innerBoundary, swath);
+  if (rings.length === 0) return interior;
+
+  const ringPieces = rings.map(ringPiece);
+  const pieces = order === "first"
+    ? [...ringPieces, pathToPiece(interior)] // outer lap in -> ... -> innermost lap -> interior
+    : [pathToPiece(interior), ...[...ringPieces].reverse()]; // interior -> innermost lap out -> ... -> outer lap (true boundary) last
+
+  const { pts, inField } = joinPieces(pieces);
+  return accumulatePath(pts, inField, swath, interior.angle);
 }
 
 /** Semicircular headland turn linking `from` (a lane end) to `to` (next lane

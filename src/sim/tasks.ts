@@ -32,7 +32,7 @@ import {
   applyMowDone, inPlowWindow, hasStandingCrop, inWeedingWindow, canFertilizeNow,
   isPerennial, balesPerAcreForField, canSeedPerennial, productivityMultiplier,
 } from "./farming";
-import { buildCoveragePath, sampleAt, workDoneAt, distanceAtWork } from "./coverage";
+import { buildCoveragePath, buildHeadlandCoveragePath, sampleAt, workDoneAt, distanceAtWork, TASK_HEADLANDS } from "./coverage";
 import type { CoveragePath } from "./coverage";
 import {
   nearestFarmYard, nearestSiloForCrop, siloCapacityForCrop,
@@ -736,7 +736,11 @@ function taskSwathMeters(save: SaveState, task: FarmTask, agent: Agent): number 
 function getActivePath(save: SaveState, task: FarmTask, field: Field, agent: Agent): CoveragePath {
   let path = pathCache.get(task.id);
   if (!path) {
-    path = buildCoveragePath(field.boundary, taskSwathMeters(save, task, agent));
+    const swath = taskSwathMeters(save, task, agent);
+    const headland = TASK_HEADLANDS[task.type];
+    path = headland
+      ? buildHeadlandCoveragePath(field.boundary, swath, headland.laps, headland.order)
+      : buildCoveragePath(field.boundary, swath);
     pathCache.set(task.id, path);
   }
   return path;

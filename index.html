@@ -693,6 +693,9 @@
          transform MapLibre owns for positioning (touching it hides the marker). */
       .agent-dot .agent-bob { display: inline-flex; }
       .agent-dot .agent-glyph { display: inline-flex; transition: transform 0.12s linear; }
+      /* Photographic machine sprites (machineImages.ts) drop in where a matching
+         PNG exists; sized square like the SVGs they replace, never distorted. */
+      .machine-img { display: block; object-fit: contain; }
       .agent-dot.working { border-color: var(--green-dark); }
       .agent-dot.working .agent-bob { animation: chug 0.9s infinite; }
       /* ⚠️ a tractor/harvester stuck on a silo with no room (maintainer

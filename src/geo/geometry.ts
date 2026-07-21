@@ -143,6 +143,80 @@ export function centroidOf(ring: Meters[]): Meters {
   return [cx / (6 * a), cy / (6 * a)];
 }
 
+/** Intersection of two infinite lines, each given as a point + direction.
+ * `null` if they're parallel (or nearly so). */
+function lineIntersect(p1: Meters, d1: Meters, p2: Meters, d2: Meters): Meters | null {
+  const denom = d1[0] * d2[1] - d1[1] * d2[0];
+  if (Math.abs(denom) < 1e-9) return null;
+  const dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+  const t = (dx * d2[1] - dy * d2[0]) / denom;
+  return [p1[0] + d1[0] * t, p1[1] + d1[1] * t];
+}
+
+/**
+ * Inward-offset a polygon ring by `distance` meters — each edge's line moves
+ * toward the polygon's interior, and consecutive offset lines are re-intersected
+ * for the new vertices (used to trace successive headland laps, brief §10: each
+ * lap is one implement-width further in from the last).
+ *
+ * Returns `null` if the offset has nowhere sensible left to go: the result
+ * collapses to a sliver (area below 15% of the input ring's — a field too
+ * small/narrow for another lap), an edge intersection is parallel/undefined, or
+ * a vertex lands unreasonably far outside the original ring (a near-parallel
+ * edge pair blowing up the intersection point). Callers stop lapping on `null`
+ * rather than erroring — this is an expected "ran out of field" signal, not a bug.
+ */
+export function offsetPolygonInward(ring: Meters[], distance: number): Meters[] | null {
+  const n = ring.length;
+  if (n < 3 || distance <= 0) return null;
+  const centroid = centroidOf(ring);
+  const [minE, minN, maxE, maxN] = boundsOf(ring);
+  const guardPad = distance * 4 + Math.max(maxE - minE, maxN - minN);
+
+  const lines: Array<{ p: Meters; dir: Meters }> = [];
+  for (let i = 0; i < n; i++) {
+    const a = ring[i]!, b = ring[(i + 1) % n]!;
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len, uy = dy / len;
+    const n1: Meters = [-uy, ux];
+    const n2: Meters = [uy, -ux];
+    const mid: Meters = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const toC: Meters = [centroid[0] - mid[0], centroid[1] - mid[1]];
+    const inward = n1[0] * toC[0] + n1[1] * toC[1] > n2[0] * toC[0] + n2[1] * toC[1] ? n1 : n2;
+    lines.push({ p: [a[0] + inward[0] * distance, a[1] + inward[1] * distance], dir: [ux, uy] });
+  }
+
+  const out: Meters[] = [];
+  for (let i = 0; i < n; i++) {
+    const prev = lines[(i - 1 + n) % n]!;
+    const cur = lines[i]!;
+    const pt = lineIntersect(prev.p, prev.dir, cur.p, cur.dir);
+    if (!pt || !Number.isFinite(pt[0]) || !Number.isFinite(pt[1])) return null;
+    if (pt[0] < minE - guardPad || pt[0] > maxE + guardPad || pt[1] < minN - guardPad || pt[1] > maxN + guardPad) return null;
+    out.push(pt);
+  }
+
+  // A valid inward offset moves each edge along its OWN direction — it never
+  // reverses one. Once the offset distance exceeds what an edge's local
+  // geometry allows, the naive intersection still finds a small, simple-
+  // looking polygon (a point-reflection through the shape's center, which
+  // doesn't flip its overall winding sign — so that's not a reliable signal
+  // here), but one or more edges come out backwards relative to the input.
+  // Reject that rather than hand back a shape that looks plausible but isn't
+  // the shrink it claims to be.
+  for (let i = 0; i < n; i++) {
+    const a = out[i]!, b = out[(i + 1) % n]!;
+    const dot = (b[0] - a[0]) * lines[i]!.dir[0] + (b[1] - a[1]) * lines[i]!.dir[1];
+    if (dot <= 0) return null;
+  }
+
+  const inputArea = areaMeters(ring);
+  if (inputArea < 1e-6) return null;
+  if (areaMeters(out) < inputArea * 0.15) return null;
+  return out;
+}
+
 /** Convenience: area in hectares (1 ha = 10,000 m²) and acres (1 ac = 4046.8564 m²). */
 export function areaHectares(ring: Meters[]): number {
   return areaMeters(ring) / 10_000;

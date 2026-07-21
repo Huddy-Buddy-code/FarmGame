@@ -271,6 +271,21 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     expect(tractor.state).toBe("idle");
   });
 
+  it("plow's 6 headland laps still fully complete the field (physical model)", () => {
+    // Maintainer spec (2026-07-20): plow drives 6 perimeter laps (headlands
+    // last), then the straight interior lane-fill — verifies the new
+    // buildHeadlandCoveragePath wiring end to end, not just the geometry.
+    const save = gameWithAgents();
+    const field = freshField("stubble");
+    save.fields.push(field);
+    enqueueTask(save, field, "plow", WINTER_1);
+    runUntil(save, WINTER_1, () => field.status === "tilled");
+    expect(field.status).toBe("tilled");
+    expect(save.tasks).toHaveLength(0);
+    const tractor = save.agents.find((a) => a.kind === "tractor")!;
+    expect(tractor.state).toBe("idle");
+  });
+
   it("a queued plant waits for the plow, then the tractor does both in order", () => {
     const save = gameWithAgents();
     const field = freshField("stubble");

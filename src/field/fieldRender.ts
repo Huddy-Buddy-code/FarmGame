@@ -19,7 +19,9 @@
 import type { Meters } from "../geo/coords";
 import { smoothPolygon } from "../geo/geometry";
 import type { FieldStatus } from "../state/saveState";
+import { gameConfig, FEET_TO_METERS } from "../config/gameConfig";
 import type { CropId } from "../config/gameConfig";
+import { buildHeadlandLaps, TASK_HEADLANDS } from "../sim/coverage";
 import type { Surface } from "../map/overlay";
 
 export interface FieldPaintParams {
@@ -41,6 +43,11 @@ export interface FieldPaintParams {
   /** Perennial stand in winter dormancy — override the whole texture with a
    * light-brown dead/dormant grass look (2026-07-14). */
   dormant?: boolean;
+  /** Implement working width (meters) for this field's headland frame — pass
+   * the task's ACTUAL swath while a job is active (main.ts's reveal bake) so
+   * the border matches the real implement; omitted for idle/static repaints,
+   * which fall back to a representative medium-implement default. */
+  swathM?: number;
   seed?: number;
 }
 
@@ -101,8 +108,27 @@ export function drawFieldTexture(
       return;
     }
 
+    // Headland framing (brief §10 follow-up, 2026-07-20): row-bearing statuses
+    // whose originating task drives perimeter laps (see TASK_HEADLANDS) show a
+    // boundary-hugging frame instead of straight rows running edge to edge.
+    // Overlay-only tasks (fertilize/weed) don't change row geometry, so
+    // they're not statuses here and need no frame.
+    const laps = headlandLapsForStatus(p.status, p.crop);
+    const swathM = p.swathM ?? defaultSwathM(p.status, p.crop);
+    const { rings, innerBoundary } = laps > 0 ? buildHeadlandLaps(boundary, swathM, laps) : { rings: [], innerBoundary: boundary };
+
     // NOTE on scale: the overlay renders at 0.5 m/px, so "spacing 1.6" ≈ 0.8 m —
     // true corn-row scale. Constants below are px at that resolution.
+
+    // Interior pass width (2026-07-20): the non-headland features that record
+    // individual machine passes — the alternating pass stripes and the per-pass
+    // chaff windrows — are spaced at the ACTUAL implement swath, the same
+    // `swathM` that sizes the headland frame. So a Large combine lays wide
+    // passes and a Small one lays tight passes, instead of one hardcoded
+    // default. (Crop/furrow ROWS stay at agronomic spacing — a wider planter
+    // doesn't change 30-inch corn rows, so those keep their fixed constants.)
+    const passPx = Math.max(6, swathM * pxPerM);
+    const paintStatusRows = () => {
     switch (p.status) {
       case "stubble":
         rows(ctx, w, h, angle, 6, "#c8b98f", 1.6, 0.14); // faint old combine passes
@@ -161,16 +187,16 @@ export function drawFieldTexture(
           // regrowth already showing, not tan chaff like a combined grain field.
           rows(ctx, w, h, angle, 2.2, dark, 0.9, 0.3);
           rows(ctx, w, h, angle, 2.2, light, 0.6, 0.22, 1); // lit stubble tufts
-          passStripes(ctx, w, h, angle, 18, 0.06); // mower passes
+          passStripes(ctx, w, h, angle, passPx, 0.06); // mower passes, at mower swath
           canopyMottle(ctx, w, h, seed + 7, dark, light, 0.5, areaScale);
           break;
         }
         // Cut stubble: strong parallel cut lines, header-width pass stripes,
         // and pale chaff windrows out the back of the combine.
         rows(ctx, w, h, angle, 2.2, "#93835a", 0.9, 0.3);
-        passStripes(ctx, w, h, angle, 18, 0.07); // alternating header passes
-        rows(ctx, w, h, angle, 18, "#cfc094", 3.4, 0.3, 9); // chaff lines
-        rows(ctx, w, h, angle, 18, "#a2905f", 1.2, 0.2, 11.5); // chaff shadow
+        passStripes(ctx, w, h, angle, passPx, 0.07); // alternating header passes, at header width
+        rows(ctx, w, h, angle, passPx, "#cfc094", 3.4, 0.3, passPx / 2); // chaff windrow, one per pass
+        rows(ctx, w, h, angle, passPx, "#a2905f", 1.2, 0.2, passPx / 2 + 2.5); // chaff shadow just below
         break;
 
       case "mulched":
@@ -179,8 +205,22 @@ export function drawFieldTexture(
         // as separate map markers.)
         rows(ctx, w, h, angle, 5, "#7f8f5e", 1.1, 0.22);
         rows(ctx, w, h, angle, 5, "#aebd88", 0.7, 0.18, 2.5); // lit mown edges
-        passStripes(ctx, w, h, angle, 25, 0.05);
+        passStripes(ctx, w, h, angle, passPx, 0.05); // baling/mowing passes, at implement swath
         break;
+    }
+    };
+
+    if (rings.length > 0) {
+      // Interior fill is clipped tighter than the field, leaving room for the
+      // frame bands; the frame itself is drawn back at the outer (field) clip.
+      ctx.save();
+      tracePolygon(ctx, innerBoundary, toPixel);
+      ctx.clip();
+      paintStatusRows();
+      ctx.restore();
+      headlandFrame(ctx, toPixel, rings, swathM, pxPerM, dark, light);
+    } else {
+      paintStatusRows();
     }
 
     // Weed pressure: rank, bright patches strewn over whatever's underneath.
@@ -208,9 +248,28 @@ export function drawFieldTexture(
       const pile = hay ? "#8f9152" : "#7a6a3f";
       const crest = hay ? "#bcbb7e" : "#a89263";
       const shade = hay ? "#5c5f33" : "#4f4529";
-      rows(ctx, w, h, angle, 15, pile, 3.2, 0.5);       // the piled windrow
-      rows(ctx, w, h, angle, 15, crest, 1.4, 0.4, 1.6); // sunlit crest
-      rows(ctx, w, h, angle, 15, shade, 1.0, 0.3, -1.4); // shaded near edge
+      // One windrow per rake pass, so the spacing tracks the rake's swath —
+      // same `passPx` logic mow/bale use, not a hardcoded gap. (The ±1.6/1.4
+      // crest/shade offsets are the lit-top/shaded-side of a SINGLE windrow, so
+      // they stay fixed px, not proportional to the spacing.)
+      const straightWindrows = () => {
+        rows(ctx, w, h, angle, passPx, pile, 3.2, 0.5);       // the piled windrow
+        rows(ctx, w, h, angle, passPx, crest, 1.4, 0.4, 1.6); // sunlit crest
+        rows(ctx, w, h, angle, passPx, shade, 1.0, 0.3, -1.4); // shaded near edge
+      };
+      // Like the status rows, windrows respect the headland: straight rows fill
+      // only the interior, and the perimeter laps TURN to follow the boundary —
+      // otherwise the rows run straight off the edge, ignoring the field shape.
+      if (rings.length > 0) {
+        ctx.save();
+        tracePolygon(ctx, innerBoundary, toPixel);
+        ctx.clip();
+        straightWindrows();
+        ctx.restore();
+        windrowFrame(ctx, toPixel, rings, pile, crest);
+      } else {
+        straightWindrows();
+      }
     }
 
     ctx.restore();
@@ -291,6 +350,117 @@ function palette(p: FieldPaintParams): { base: string; dark: string; light: stri
 export function fieldEdgeColor(p: FieldPaintParams): string {
   const { base, dark } = palette(p);
   return lerpColor(base, dark, 0.3);
+}
+
+/** How many headland laps a status's frame should show — read off
+ * `TASK_HEADLANDS` (`sim/coverage.ts`) via whichever task type lays down that
+ * status's row geometry, so the sim's drive path and the finished texture
+ * never drift apart. 0 = no frame (overlay-only statuses, or a perennial
+ * sward that has no row geometry to frame in the first place). */
+function headlandLapsForStatus(status: FieldStatus, crop: CropId | undefined): number {
+  switch (status) {
+    case "tilled":
+      return TASK_HEADLANDS.plow?.laps ?? 0;
+    case "planted":
+    case "growing":
+      return TASK_HEADLANDS.plant?.laps ?? 0;
+    case "ready":
+      // Perennial forage is a dense sward with no crop rows at all (see the
+      // `ready` case above) — nothing for a frame to distinguish.
+      if (crop === "grass" || crop === "alfalfa") return 0;
+      return TASK_HEADLANDS.plant?.laps ?? 0;
+    case "harvested":
+    case "mulched":
+      // mow/rake/bale/harvest all share the same {laps: 3, order: "first"}
+      // config (maintainer spec, 2026-07-20) — any one of them is the source.
+      return TASK_HEADLANDS.harvest?.laps ?? 0;
+    default:
+      return 0;
+  }
+}
+
+/** Representative implement width (meters) for a status's frame when no live
+ * task swath is available (idle/static repaint) — the same medium-size
+ * default `estimateTaskHours` falls back to for a queued task. */
+function defaultSwathM(status: FieldStatus, crop: CropId | undefined): number {
+  const ft = (() => {
+    switch (status) {
+      case "tilled": return gameConfig.equipment.plow.medium.widthFt;
+      case "planted":
+      case "growing":
+      case "ready":
+        return gameConfig.equipment.planter.medium.widthFt;
+      case "harvested":
+      case "mulched":
+        return crop === "grass" || crop === "alfalfa"
+          ? gameConfig.equipment.mower.medium.widthFt
+          : gameConfig.equipment.harvester.medium.widthFt;
+      default:
+        return gameConfig.equipment.plow.medium.widthFt;
+    }
+  })();
+  return ft * FEET_TO_METERS;
+}
+
+/** The headland frame itself: each traced ring stroked at swath width (a dark
+ * pass + a thinner lit centerline, the same "lit edge" trick `rows()` uses),
+ * following the boundary shape and turning at every corner — a real headland
+ * pass doesn't stay parallel to the interior rows the way a straight lane does. */
+function headlandFrame(
+  ctx: CanvasRenderingContext2D,
+  toPixel: (m: Meters) => [number, number],
+  rings: Meters[][],
+  swathM: number,
+  pxPerM: number,
+  dark: string,
+  light: string,
+): void {
+  const widthPx = swathM * pxPerM;
+  for (const ring of rings) {
+    ctx.save();
+    tracePolygon(ctx, ring, toPixel);
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = dark;
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = widthPx * 1.05;
+    ctx.stroke();
+    ctx.strokeStyle = light;
+    ctx.globalAlpha = 0.32;
+    ctx.lineWidth = widthPx * 0.4;
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+/** Windrows along the raked headland laps: one piled row per ring, TRACED along
+ * the boundary so the perimeter windrows curve with the field instead of running
+ * straight off the edge — a rake works the headland first (order:"first"), so its
+ * outer passes follow the perimeter. One windrow per ring matches the interior
+ * "one per pass"; stroked like the straight windrows (a thick pile + a lit
+ * crest). */
+function windrowFrame(
+  ctx: CanvasRenderingContext2D,
+  toPixel: (m: Meters) => [number, number],
+  rings: Meters[][],
+  pile: string,
+  crest: string,
+): void {
+  ctx.save();
+  ctx.lineJoin = "round";
+  for (const ring of rings) {
+    tracePolygon(ctx, ring, toPixel);
+    ctx.strokeStyle = pile;
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = 3.2;
+    ctx.stroke();
+    ctx.strokeStyle = crest;
+    ctx.globalAlpha = 0.4;
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
 }
 
 // --- texture building blocks ------------------------------------------------

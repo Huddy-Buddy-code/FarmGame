@@ -1094,6 +1094,121 @@ verified** (Browser Preview off).
   (Browser Preview off). Possible refinement if it feels intrusive: also
   suppress the auto-skip while a toolbar menu is open.
 
+## Latest changes (2026-07-20, photographic machine sprites)
+
+- New workflow: AI-generated PNGs dropped into `src/assets/Equipment/` are
+  auto-discovered by filename and preferred over the hand-drawn SVGs. New file
+  `src/ui/machineImages.ts` — `import.meta.glob` builds a `kind|size → url`
+  registry; `machineImageUrl(kind, size?)` (exact size → size-agnostic → any
+  size fallback) and `machineImgTag(url, px)`. Filename convention
+  `<Kind>_<Size>_sideleft.png` (e.g. `Tractor_Medium_sideleft.png`); "Combine"
+  aliases the `harvester` kind; art faces WEST like the SVGs (main.ts mirrors).
+- `main.ts`: new `machineIconHtml(kind, size, px)` helper picks image-or-SVG;
+  wired into map markers, active Work-Queue rows, fleet cards, and the Tractor/
+  Combine shop rows. Dropped now-unused `combineIconSvg` import. `.machine-img`
+  CSS rule added in `index.html`.
+- First test asset in place: `Tractor_Medium_sideleft.png`. **⚠️ It has a dark
+  baked-in background** — needs a TRANSPARENT version or it shows as an opaque
+  box over the map in-field. Prompt going forward must include "transparent
+  background, transparent PNG".
+- Typecheck + 225 tests green. **Not visually verified** (Browser Preview off) —
+  needs eyes in `npm run dev`: in-field marker, shop/fleet thumbnails, and the
+  heading flip on the photo.
+
+## Latest changes (2026-07-20, headland laps — per-task perimeter passes)
+
+Real fieldwork isn't always straight lanes edge to edge: many operations drive
+2-8 laps around the boundary first or last, then fill the interior in straight
+rows. Maintainer spec: plow (last, 6 laps), plant (last, 3), fertilize/weed
+(last, 1), mow/rake/bale/harvest (first, 3). Both the coverage-path (so the
+tractor actually drives it) and the texture (so a finished field visually
+shows the frame, not straight rows to the edge) needed it.
+
+- **`geo/geometry.ts`**: new `offsetPolygonInward(ring, distance)` — inward
+  polygon offset (each edge's line moved along its own inward normal, then
+  re-intersected). Guards: rejects a distance that would invert an edge's
+  direction (offsetting past what an edge's local geometry allows doesn't
+  collapse the shape to nothing — it turns it inside out, but a point-
+  reflection through the polygon's center doesn't flip the shoelace sign, so
+  that's not a usable signal; per-edge direction is), and rejects a result
+  under 15% of the input area (a sliver too small to be worth another lap).
+- **`sim/coverage.ts`**: extracted `accumulatePath` (pure refactor) out of
+  `buildCoveragePath`'s tail so new code can reuse the cum/work accounting.
+  New `buildHeadlandLaps` (traces ring CENTERLINES one implement-width apart,
+  the first inset half a swath — same convention the interior lane-fill
+  already uses for its own first/last lane, so a lap's outer edge touches the
+  true boundary rather than the tractor driving ON the property line) and
+  `buildHeadlandCoveragePath(boundary, swath, laps, order)` (stitches ring
+  loops + the **unmodified** `buildCoveragePath` interior fill, with a
+  non-work transit between phases — reuses ALL of the existing cellular
+  decomposition/concave-notch handling untouched). New exported
+  `TASK_HEADLANDS` config table (laps + first/last per task type) — the
+  single source of truth both the sim and the renderer read.
+- **`sim/tasks.ts`**: `getActivePath` branches on `TASK_HEADLANDS[task.type]`
+  to call the headland builder instead of the plain one. No new persisted
+  save field: `doneAcres` already resumes any path (verified directly, not
+  assumed) since `buildHeadlandCoveragePath` is a pure deterministic function
+  of its inputs — reload rebuilds the identical path and re-derives position
+  via the existing `distanceAtWork`/`workDoneAt` round-trip.
+- **`field/fieldRender.ts`**: row-bearing statuses whose task has a headland
+  config (tilled/planted/growing/ready-grain/harvested/mulched — perennial
+  hay/alfalfa `ready` has no row geometry to frame, so it's excluded) now clip
+  their interior rows to the shrunken inner boundary and draw a new
+  `headlandFrame` — each ring stroked at swath width with a lit centerline,
+  same "lit edge" trick `rows()` already uses. New `swathM?` param on
+  `FieldPaintParams`: the active-task reveal bake (`main.ts`) passes the
+  task's real `path.swath`; the idle static repaint falls back to a
+  representative medium-implement default (same pattern `estimateTaskHours`
+  already uses for queued tasks).
+- Found a real geometry bug in review, not just in testing: the first attempt
+  placed ring centerlines exactly ON the true boundary (off by half a swath),
+  which put driven positions (and dropped bales, for the bale task) exactly
+  on the field edge — caught by the existing bale-scatter test
+  (`pointInPolygon` failing on an edge point), fixed by insetting the first
+  ring's centerline by `swath/2` like the plan specified.
+
+Tests: `offsetPolygonInward` (geometry.test.ts — shrink math, offset
+composition, both collapse-guard cases); headland lap tracing, graceful
+degradation on a too-small field, first/last ordering, area coverage, and the
+resume round-trip property (coverage.test.ts); an end-to-end plow-with-6-laps
+completion test (farming.test.ts); a `drawFieldTexture` smoke test against a
+hand-rolled no-op canvas context, since there's no canvas polyfill in this
+test environment (fieldRender.test.ts, new file). 239 green, typecheck clean.
+**Not visually verified** (Browser Preview off) — worth eyeballing a plow
+(6-lap) and a mow (3-lap, headlands-first) field in `npm run dev` for frame
+thickness and corner turns.
+
+## Latest changes (2026-07-20, interior texture tracks implement swath)
+
+- `src/field/fieldRender.ts`: the non-headland (interior) pass texture now
+  scales with implement size, mirroring the headland frame's logic. New local
+  `passPx = Math.max(6, swathM * pxPerM)` (same `swathM` the frame uses — real
+  task swath during the sweep-reveal, medium default on idle repaint). Wired
+  into every "machine pass" feature: `passStripes` in harvested-grain,
+  harvested-hay, and mulched, plus the two per-pass chaff-windrow `rows()` in
+  harvested-grain (spacing + phase now `passPx`/`passPx/2`). Crop/furrow rows
+  left at their fixed agronomic constants on purpose (planter width ≠ corn-row
+  spacing).
+- Effect: Large combine → wide passes/chaff; Small → tight. Like the frame,
+  it's most visible DURING the job; idle repaints fall back to medium swath
+  (persisting per-field swath would need it stored on the field — not done).
+- Typecheck + 239 tests green. **Not visually verified** (Browser Preview off).
+- Follow-up: rake windrow overlay (`p.windrowed`) was still spacing its rows at
+  a hardcoded `15` — the one forage feature not tracking the implement. Switched
+  the three windrow `rows()` to `passPx` so windrow spacing = rake swath, like
+  mow/bale. Mow (harvested-hay) + bale (mulched) already used `passPx`; no
+  change needed there. Caveat: during the rake reveal `passPx` = real rake
+  swath (correct); on an idle repaint it falls back to `defaultSwathM` which
+  keys off status "harvested" → returns MOWER-medium width, not rake width (the
+  windrowed overlay isn't a status, so the default can't tell it apart). Close
+  enough (rake 25 ft vs mower 20 ft); a precise fix would thread a rake default.
+- Follow-up 2: windrow overlay ignored the headland — it was drawn OUTSIDE the
+  headland-aware block, so its straight rows ran edge-to-edge through the frame
+  band instead of turning to follow the perimeter like mow/bale rows do (user
+  screenshot). Fixed: straight windrows now clip to `innerBoundary`, and a new
+  `windrowFrame()` traces one piled windrow per headland ring so the perimeter
+  laps curve with the boundary. Same treatment the status rows already got.
+
 ## Known gaps / unverified
 
 - **Economy is placeholder** — flat sell price. No buyers, capacity, or hauling yet.
@@ -1102,7 +1217,7 @@ verified** (Browser Preview off).
 - Routing uses public OSRM demo (not self-hosted).
 - **Browser Preview is OFF** (maintainer directive). New unseen: rotation planner UI,
   cellular-decomposition visuals (transits crossing notches), updated bale markers,
-  machine icon flip — logic tested, UX needs eyes.
+  machine icon flip, headland-lap frames + drive paths — logic tested, UX needs eyes.
 
 ## How to run
 

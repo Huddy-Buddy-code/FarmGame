@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
-  buildCoveragePath, sampleAt, workDoneAt, distanceAtWork, longestEdgeAngle,
+  buildCoveragePath, buildHeadlandLaps, buildHeadlandCoveragePath, sampleAt, workDoneAt, distanceAtWork, longestEdgeAngle,
 } from "../src/sim/coverage";
-import { areaMeters, pointInPolygon } from "../src/geo/geometry";
+import { areaMeters, pointInPolygon, boundsOf } from "../src/geo/geometry";
 import type { Meters } from "../src/geo/coords";
 
 // A 400 m × 200 m rectangle (longest edge horizontal → lanes run east-west).
@@ -102,5 +102,91 @@ describe("coverage path (serpentine fieldwork route)", () => {
     const path = buildCoveragePath(sliver, 10);
     expect(path.inField.filter(Boolean).length).toBe(1);
     expect(path.totalWork).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Headland laps (maintainer spec, 2026-07-20): several perimeter passes around
+ * the field boundary before/after the normal straight-lane interior fill. The
+ * interior fill is the untouched `buildCoveragePath` above running on whatever
+ * boundary the laps leave behind, so these tests focus on the NEW geometry:
+ * lap tracing, graceful degradation on a too-small field, and the first/last
+ * ordering — plus the resume-safety property the whole feature leans on (no
+ * new persisted save field; reload rebuilds the identical deterministic path
+ * and re-derives position from `doneAcres`, exactly like a plain path).
+ */
+describe("headland laps", () => {
+  it("traces the requested lap count, each inset a further swath in", () => {
+    const swath = 10;
+    const { rings, innerBoundary } = buildHeadlandLaps(rect, swath, 3);
+    expect(rings).toHaveLength(3);
+    // Ring 0's centerline is inset swath/2 from the true boundary (so its
+    // OUTER edge touches the boundary, not its centerline) — same convention
+    // the interior lane-fill already uses for its own first/last lane.
+    expect(boundsOf(rings[0]!)).toEqual([5, 5, 395, 195]);
+    expect(boundsOf(rings[1]!)).toEqual([15, 15, 385, 185]);
+    expect(boundsOf(rings[2]!)).toEqual([25, 25, 375, 175]);
+    // The interior fill picks up exactly where the last ring's band ends.
+    expect(boundsOf(innerBoundary)).toEqual([30, 30, 370, 170]);
+  });
+
+  it("degrades gracefully when a field is too small for the requested laps (e.g. plow's 6)", () => {
+    const tiny: Meters[] = [[0, 0], [60, 0], [60, 60], [0, 60]];
+    expect(() => buildHeadlandLaps(tiny, 10, 6)).not.toThrow();
+    const { rings, innerBoundary } = buildHeadlandLaps(tiny, 10, 6);
+    expect(rings.length).toBeGreaterThan(0);
+    expect(rings.length).toBeLessThan(6); // ran out of field before 6 fit
+    expect(innerBoundary.length).toBeGreaterThanOrEqual(3);
+    for (const p of innerBoundary) {
+      expect(Number.isFinite(p[0])).toBe(true);
+      expect(Number.isFinite(p[1])).toBe(true);
+    }
+  });
+
+  it("covers ≈ the full field area whether laps run first or last", () => {
+    const swath = 10;
+    for (const order of ["first", "last"] as const) {
+      const path = buildHeadlandCoveragePath(rect, swath, 3, order);
+      const swept = path.totalWork * swath;
+      const area = areaMeters(rect);
+      expect(swept).toBeGreaterThan(area * 0.9);
+      expect(swept).toBeLessThan(area * 1.1);
+    }
+  });
+
+  it('"first" starts on a lap (near the true boundary); "last" starts on the shrunken interior\'s own entry point', () => {
+    const swath = 10;
+
+    const first = buildHeadlandCoveragePath(rect, swath, 3, "first");
+    // The first point is a lap vertex, inset only swath/2 — well outside where
+    // the interior lane-fill's own first lane would start.
+    expect(first.pts[0]![0]).toBeCloseTo(5, 6);
+
+    const last = buildHeadlandCoveragePath(rect, swath, 3, "last");
+    // "last" works the interior FIRST — its own entry point, on the boundary
+    // the 3 laps left behind (inset 30 m), not the true field's edge.
+    const { innerBoundary } = buildHeadlandLaps(rect, swath, 3);
+    const interiorOnly = buildCoveragePath(innerBoundary, swath);
+    expect(last.pts[0]).toEqual(interiorOnly.pts[0]);
+  });
+
+  it("falls back to a plain path when not even one lap fits", () => {
+    const tiny: Meters[] = [[0, 0], [8, 0], [8, 8], [0, 8]];
+    const path = buildHeadlandCoveragePath(tiny, 10, 6, "first");
+    const plain = buildCoveragePath(tiny, 10);
+    expect(path.pts).toEqual(plain.pts);
+  });
+
+  it("resumes correctly from doneAcres alone, like a plain path (no new save state needed)", () => {
+    const swath = 10;
+    const path = buildHeadlandCoveragePath(rect, swath, 3, "first");
+    // Simulate "40% done, then reload": derive a distance from work-so-far,
+    // rebuild the (deterministic) path fresh, and re-derive the same distance.
+    const targetWork = path.totalWork * 0.4;
+    const dist = distanceAtWork(path, targetWork);
+    const rebuilt = buildHeadlandCoveragePath(rect, swath, 3, "first");
+    expect(rebuilt.pts).toEqual(path.pts);
+    const redistanced = distanceAtWork(rebuilt, workDoneAt(path, dist));
+    expect(redistanced).toBeCloseTo(dist, 6);
   });
 });
