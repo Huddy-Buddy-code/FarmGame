@@ -306,6 +306,7 @@ function tickWorld(prev: number) {
     refreshEquipTab();
     refreshStructuresTab();
     refreshFinanceTab();
+    refreshInventory();
     refreshQueuePanel();
   }
 }
@@ -795,6 +796,18 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     info = implementInfoLines(kind, size);
   }
 
+  // The relay's Bale Trailer gets its own row (its fill + what it's doing) so
+  // the whole two-machine job is visible, not just the collector's half.
+  const trailerExtra =
+    task.type === "haulBales" && task.trailerAgentId
+      ? implRowForBaleTrailer(task)
+      : "";
+  return implRow(iconSvg, info, fill) + trailerExtra;
+}
+
+/** Wrap one implement into a Work-Queue sub-row (icon + name/detail + optional
+ * fill bar). Shared by the collector row and the Bale Trailer row. */
+function implRow(iconSvg: string, info: { name: string; detail: string }, fill: { pct: number; current: string; total: string } | null): string {
   const fillHtml = fill
     ? `<div class="impl-fillrow">
         <span class="impl-fill">
@@ -812,6 +825,33 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
         ${fillHtml}
       </div>
     </div>`;
+}
+
+const TRAILER_PHASE_TEXT: Record<string, string> = {
+  toEntrance: "Heading to the field",
+  waiting: "Waiting to load",
+  toStorage: "Hauling to storage",
+  dumping: "Unloading at storage",
+};
+
+/** The Bale Trailer's own Work-Queue sub-row for a Haul Bales relay: its bale
+ * fill and current phase. */
+function implRowForBaleTrailer(task: FarmTask): string {
+  const tAgent = save.agents.find((a) => a.id === task.trailerAgentId);
+  if (!tAgent) return "";
+  const trailer = save.implements.find((i) => i.attachedTo === tAgent.id && i.kind === "baleTrailer");
+  if (!trailer) return "";
+  const cap = baleTrailerCapacityBales(trailer.size);
+  const onboard = trailer.cargoBales ?? 0;
+  const base = implementInfoLines("baleTrailer", trailer.size);
+  const phase = task.waitingForStorage ? "⚠️ Waiting for storage room" : (TRAILER_PHASE_TEXT[task.trailerPhase ?? "toEntrance"] ?? "");
+  const info = { name: `${base.name} · ${tAgent.name}`, detail: phase ? `${base.detail} · ${phase}` : base.detail };
+  const fill = {
+    pct: cap > 0 ? Math.min(100, (onboard / cap) * 100) : 0,
+    current: `${onboard} bale${onboard === 1 ? "" : "s"}`,
+    total: `${cap}`,
+  };
+  return implRow(baleTrailerIconSvg(IMPLEMENT_QUEUE_ICON_PX), info, fill);
 }
 
 /** One row in the Jobs list. Active jobs are locked in place (an agent is
@@ -1168,7 +1208,7 @@ function toggleToolbarPanel(id: string, onOpen?: () => void): void {
 // Inventory: grain storage + the v0 flat-price sale (real market comes later).
 // ---------------------------------------------------------------------------
 function wireInventory() {
-  $("btn-inventory").addEventListener("click", () => toggleToolbarPanel("inventory", refreshInventory));
+  $("btn-inventory").addEventListener("click", () => toggleToolbarPanel("inventory", () => refreshInventory(true)));
   $("inv-close").addEventListener("click", () => ($("inventory").style.display = "none"));
 }
 
@@ -1184,7 +1224,25 @@ function buildingIndex(building: Building): number {
  * (brief's "unlimited in this slice" note), so a silo's "stored" reading is
  * its share of that pool, proportional to its capacity among every silo
  * sharing the same crop — the shares always sum back to the true total. */
-function refreshInventory() {
+let lastInventoryKey = "";
+function refreshInventory(force = false) {
+  const el = $("inventory");
+  if (el.style.display !== "block") return;
+
+  // Live-refreshed from the game loop (~2×/s), so bail unless the shown data
+  // actually changed — otherwise every frame would rebuild the DOM and reset a
+  // half-open crop/product dropdown or the sell buttons under the cursor. Keyed
+  // on everything rendered below: pooled grain, each building's assignment +
+  // stored bales, and the in-field bale tallies.
+  const grainKey = (Object.keys(save.grain) as CropId[]).map((c) => `${c}:${save.grain[c].toFixed(1)}`).join(",");
+  const bldgKey = save.buildings
+    .map((b) => `${b.id}:${b.assignedCrop ?? ""}:${b.assignedProduct ?? ""}:${JSON.stringify(b.storedBales ?? {})}`)
+    .join("|");
+  const fieldBaleKey = baleInventory(save).map((s) => `${s.product}:${s.bales}`).join(",");
+  const key = `${grainKey}#${bldgKey}#${fieldBaleKey}`;
+  if (!force && key === lastInventoryKey) return;
+  lastInventoryKey = key;
+
   const rows = $("inv-rows");
   rows.innerHTML = "";
 

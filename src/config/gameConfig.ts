@@ -224,13 +224,15 @@ export interface GameConfig {
      * to feel like ~10 s at 1× (1× = 1 sim-min per real minute, so 10 s ≈ 0.17
      * sim-min). At higher time-compression it blurs past like everything else. */
     baleTieMinutes: number;
-    /** How far each bale is randomly scattered off its exact drop spot
-     * (maintainer report, 2026-07-17 — bales were landing in a rigid lattice
-     * along the coverage lanes), as a fraction of the average distance BETWEEN
-     * consecutive drops along the path — not the baler's working width, which
-     * is too narrow (a few meters) to read as scatter at map scale. 0.3 = each
-     * bale can land up to ±30% of a "drop interval" off its lane position. */
-    baleDropJitterFraction: number;
+    /** How much the forage-per-bale threshold varies, as a ± fraction of a
+     * nominal bale (maintainer request, 2026-07-20). The baler fills as it
+     * drives and ties a bale once its hopper hits the (randomized) threshold,
+     * so a bigger threshold means a longer drive before the drop — this
+     * staggers the ON-PATH spacing between bales naturally, replacing the old
+     * perpendicular jitter that flung bales onto un-baled ground. 0.3 = each
+     * bale takes 70–130% of a nominal bale's forage to fill, so the field's
+     * total bale COUNT (and thus revenue) varies a little run to run. */
+    baleFillVariance: number;
   };
 
   /** Bale products (2026-07-13) — what a field's dropped bales are worth and how
@@ -458,7 +460,7 @@ export const gameConfig: GameConfig = {
     baleTons: 1,
     balePricePerBale: 45,
     baleTieMinutes: 0.17, // ≈ 10 s at 1×
-    baleDropJitterFraction: 0.3,
+    baleFillVariance: 0.3, // each bale fills at 70–130% of a nominal bale
   },
   baleProducts: {
     // Corn residue — mirrors the legacy forage numbers so corn is unchanged.

@@ -389,6 +389,59 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     const trailer = save.implements.find((i) => i.kind === "grainTrailer")!;
     expect(trailer.attachedTo).toBe(tractorOf(save).id);
   });
+
+  it("a full silo + a Sell Point → the cart diverts and sells its load instead of stalling (2026-07-20)", () => {
+    const save = gameWithAgents();
+    const silo = buyBuildingAt(save, "silo", [-50, -50], "small"); // 200t cap
+    assignSiloCrop(save, silo.id, "corn");
+    save.grain.corn = 199; // 1t of room — fills mid-dump, forcing the divert
+    buyBuildingAt(save, "sellPoint", [-60, -60]);
+    buyImplement(save, "grainTrailer", "medium");
+    const field = readyField(8, 6); // 48t — one hopper load
+    save.fields.push(field);
+    enqueueTask(save, field, "harvest", APRIL_1);
+    const startMoney = save.money;
+
+    // The cart delivers what fits (fills the silo to 200), then diverts the rest
+    // to the Sell Point and completes — never gets stuck waitingForSilo.
+    runUntil(save, APRIL_1, () => !save.tasks.some((t) => t.type === "unloadHarvester") && field.status === "harvested", 300_000, 5);
+    expect(save.grain.corn).toBe(200); // silo topped off
+    expect(save.money).toBeGreaterThan(startMoney); // the rest was sold for cash
+    const sale = save.completedTasks?.find((t) => t.type === "sellGrain");
+    expect(sale?.crop).toBe("corn");
+    expect((sale?.tons ?? 0)).toBeGreaterThan(40); // ~47t diverted to the Sell Point
+    // Cart released, empty.
+    expect(save.implements.find((i) => i.kind === "grainTrailer")?.cargoTons ?? 0).toBe(0);
+  });
+
+  it("proactively pulls a free tractor onto a waiting combine ahead of queued field work (2026-07-20)", () => {
+    const save = gameWithAgents(); // 1 tractor (+plow) + combine
+    const silo = buyBuildingAt(save, "silo", [-50, -50], "large");
+    assignSiloCrop(save, silo.id, "corn");
+    buyImplement(save, "grainTrailer", "medium"); // a loose cart the tractor can hitch
+    const harvestField = readyField(10, 6);
+    save.fields.push(harvestField);
+    // A SEPARATE bare field with a plow queued FIRST — field work the lone
+    // tractor could otherwise wander off to do while the combine cuts.
+    const plowSide = Math.sqrt(10 * 4046.8564224);
+    const plowField: Field = { id: "field-2", parcelId: "p2", boundary: [[5000, 0], [5000 + plowSide, 0], [5000 + plowSide, plowSide], [5000, plowSide]], status: "mulched" };
+    save.fields.push(plowField);
+    enqueueTask(save, plowField, "plow", APRIL_1);
+    enqueueTask(save, harvestField, "harvest", APRIL_1);
+
+    // The tractor is reserved for / crewed onto the combine's unload the whole
+    // time it's cutting — the plow stays queued until the harvest's done.
+    let plowStartedDuringHarvest = false;
+    runUntil(save, APRIL_1, () => {
+      const harvesting = save.tasks.some((t) => t.type === "harvest");
+      const plow = save.tasks.find((t) => t.type === "plow");
+      if (harvesting && plow?.status === "active") plowStartedDuringHarvest = true;
+      return save.grain.corn > 0; // stop once the combine's grain has been delivered
+    }, 60_000, 5);
+
+    expect(save.grain.corn).toBeGreaterThan(0); // the combine got serviced
+    expect(plowStartedDuringHarvest).toBe(false); // …and the plow waited its turn
+  });
 });
 
 describe("self-healing: an idle harvester with leftover grain but no trip coming (maintainer request, 2026-07-13)", () => {

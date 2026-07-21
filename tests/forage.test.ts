@@ -182,13 +182,14 @@ describe("the baler drops bales as it works", () => {
     expect(field.baleLocations).toHaveLength(totalBales);
   });
 
-  it("keeps the exact bale count even with ±10% spacing jitter", () => {
+  it("varying the fill distance keeps the bale count NEAR nominal (it may vary a little)", () => {
     const save = gameWithForageGear();
     const field = harvestedCornField(save);
     enqueueTask(save, field, "rake", APRIL_1);
     enqueueTask(save, field, "bale", APRIL_1);
-    // A varying RNG (not the flat 0.5 that zeroes the jitter) so spacing actually
-    // wobbles — the total count must still land on the nominal grid.
+    // A varying RNG (not the flat 0.5 that pins every bale to baleTons) so each
+    // bale fills at 70–130% — the count now varies run to run (maintainer choice,
+    // 2026-07-20: "let count vary"), but must stay close to the nominal grid.
     let a = 1234567;
     const rng = () => ((a = (a * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
     let now = APRIL_1;
@@ -198,7 +199,11 @@ describe("the baler drops bales as it works", () => {
       tickTasks(save, now, 60, rng);
     }
     expect(field.status).toBe("mulched");
-    expect(field.baleLocations).toHaveLength(Math.round(ACRES * gameConfig.forage.balesPerAcre));
+    const nominal = Math.round(ACRES * gameConfig.forage.balesPerAcre);
+    const count = field.baleLocations?.length ?? 0;
+    // Symmetric ±30% fill variance averages out — the count lands within a few %
+    // of nominal, never a runaway drift.
+    expect(Math.abs(count - nominal)).toBeLessThanOrEqual(Math.ceil(nominal * 0.1));
   });
 
   it("never drops a bale off the field, even with a concave boundary (farmstead notch)", () => {

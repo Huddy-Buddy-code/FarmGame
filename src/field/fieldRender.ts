@@ -151,7 +151,7 @@ export function drawFieldTexture(
         }
         canopyMottle(ctx, w, h, seed + 7, dark, light, 0.9, areaScale);
         rows(ctx, w, h, angle, 1.6, dark, 0.6, 0.16);
-        rows(ctx, w, h, angle, 12, dark, 2.2, 0.1); // lodged/leaning bands
+        lodgingPatches(ctx, w, h, seed + 17, angle, dark, light, areaScale);
         tramlines(ctx, w, h, angle, dark, 0.25);
         break;
 
@@ -411,6 +411,39 @@ function clods(ctx: CanvasRenderingContext2D, w: number, h: number, seed: number
     ctx.stroke();
   }
   ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+/** Wind-lodged grain: a handful of irregular flattened patches, not a uniform
+ * band across the whole field — real lodging follows gusts, not planting rows,
+ * so each patch streaks at its own wind angle, independent of `angleRad`. */
+function lodgingPatches(
+  ctx: CanvasRenderingContext2D, w: number, h: number,
+  seed: number, angleRad: number, dark: string, light: string, areaScale: number,
+): void {
+  const rng = mulberry32(seed);
+  const count = Math.max(1, Math.floor((w * h * areaScale) / 16000));
+  for (let i = 0; i < count; i++) {
+    const cx = rng() * w, cy = rng() * h;
+    const rx = (16 + rng() * 34) * Math.sqrt(areaScale);
+    const ry = rx * (0.5 + rng() * 0.4);
+    const patchAngle = rng() * Math.PI;
+    const windAngle = angleRad + (rng() - 0.5) * 1.2;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, patchAngle, 0, Math.PI * 2);
+    ctx.clip();
+
+    ctx.fillStyle = light;
+    ctx.globalAlpha = 0.32;
+    ctx.fillRect(cx - rx, cy - ry, rx * 2, ry * 2);
+
+    rows(ctx, w, h, windAngle, 2.4, dark, 1.4, 0.22);
+    rows(ctx, w, h, windAngle, 2.4, light, 0.8, 0.28, 1.2);
+
+    ctx.restore();
+  }
   ctx.globalAlpha = 1;
 }
 

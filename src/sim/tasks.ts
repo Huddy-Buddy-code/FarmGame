@@ -699,15 +699,23 @@ const baleTieRemaining = new Map<string, number>();
 // The last on-field spot the baler occupied — bales are dropped HERE so they
 // never land in a concave notch the coverage path cuts across (farmstead, yard).
 const baleLastInside = new Map<string, Meters>();
+// The randomized forage threshold (tons) the baler is filling toward for its
+// CURRENT bale — baleTons × a ±baleFillVariance factor, re-rolled after each
+// drop (maintainer request, 2026-07-20). Varying it staggers the on-path drop
+// spacing so bales don't land in a rigid lattice, without any perpendicular
+// scatter. Cleared after each drop (re-rolls) and with the task.
+const baleTargetRuntime = new Map<string, number>();
 // The staging gate a grain cart committed to for an unload trip. Locked on
 // first choice — re-picking "nearest gate to the combine" every tick made the
 // cart bounce between gates as the combine swept back and forth (maintainer
 // report, 2026-07-13). Cleared with the task; a reload just re-picks once.
 const stageGateRuntime = new Map<string, Meters>();
-// The field-entrance gate a Bale Trailer committed to for a haul (same
-// oscillation-avoidance reasoning as the grain cart's staging gate). Keyed by
-// haulBales task id; cleared with the task.
-const haulEntranceRuntime = new Map<string, Meters>();
+// Where a Bale Trailer parks in the field to be loaded: the nearest remaining
+// bale, LOCKED so the collector has a fixed rendezvous (a moving target made it
+// oscillate). Re-chosen each time the trailer returns from a storage run (the
+// lock is cleared on the toStorage→toEntrance transition), so it follows the
+// work as bales clear (maintainer request, 2026-07-20). Keyed by haulBales task.
+const haulRendezvousRuntime = new Map<string, Meters>();
 // The specific bale a Hay-Spikes tractor is currently driving to, LOCKED for
 // the whole trip (maintainer report, 2026-07-17): re-picking "nearest bale"
 // every tick made the collector oscillate between storage and the field gate
@@ -749,8 +757,9 @@ function clearTaskRuntime(taskId: string): void {
   pathDistRuntime.delete(taskId);
   baleTieRemaining.delete(taskId);
   baleLastInside.delete(taskId);
+  baleTargetRuntime.delete(taskId);
   stageGateRuntime.delete(taskId);
-  haulEntranceRuntime.delete(taskId);
+  haulRendezvousRuntime.delete(taskId);
   haulTargetRuntime.delete(taskId);
 }
 
@@ -773,6 +782,16 @@ export interface TasksTickResult {
 export function tickTasks(save: SaveState, now: SimTime, dtMinutes: number, rand: () => number = Math.random): TasksTickResult {
   const changed: Field[] = [];
   const events: TaskEvent[] = [];
+  // Before anyone picks their next job: make sure every combine that's sitting
+  // with grain has an unload trip AND crew it with a free tractor — so a free
+  // tractor rescues the combine instead of starting queued field work
+  // (maintainer request, 2026-07-20). Running here, ahead of the agent loop,
+  // wins that race (ensureUnloadTask both creates the trip and recruits a cart).
+  for (const a of save.agents) {
+    if (a.kind === "harvester" && (a.grainOnboard ?? 0) > 1e-9 && a.lastCrop) {
+      ensureUnloadTask(save, a, a.lastFieldId ?? "", a.lastCrop, events);
+    }
+  }
   // Process machines SMALLEST-first, so the smallest capable tractor picks up a
   // queued task before any larger one does — keeping big tractors free for the
   // jobs only they can pull (maintainer request, 2026-07-11). Agents already
@@ -998,20 +1017,27 @@ function guessLeftoverCrop(save: SaveState): CropId | undefined {
  * `applyHarvestDone` clears the field's crop the moment the harvest task
  * itself completes — the trailer for the last, still-in-the-hopper load
  * would otherwise have no idea what it's hauling by the time it arrives. */
-function ensureUnloadTask(save: SaveState, harvester: Agent, fieldId: string, crop: CropId): void {
-  if (save.tasks.some((t) => t.type === "unloadHarvester" && t.harvesterAgentId === harvester.id)) return;
-  save.tasks.push({
-    id: `task-${++taskSeq}`,
-    type: "unloadHarvester",
-    fieldId,
-    crop,
-    totalAcres: 1,
-    doneAcres: 0,
-    status: "queued",
-    costPaid: 0,
-    harvesterAgentId: harvester.id,
-    unloadPhase: "toHarvester",
-  });
+function ensureUnloadTask(save: SaveState, harvester: Agent, fieldId: string, crop: CropId, events?: TaskEvent[]): void {
+  let task = save.tasks.find((t) => t.type === "unloadHarvester" && t.harvesterAgentId === harvester.id);
+  if (!task) {
+    task = {
+      id: `task-${++taskSeq}`,
+      type: "unloadHarvester",
+      fieldId,
+      crop,
+      totalAcres: 1,
+      doneAcres: 0,
+      status: "queued",
+      costPaid: 0,
+      harvesterAgentId: harvester.id,
+      unloadPhase: "toHarvester",
+    };
+    save.tasks.push(task);
+  }
+  // Proactively crew it the same tick it's created, so a free tractor is claimed
+  // for the combine before it can start queued field work (maintainer request,
+  // 2026-07-20). No-op if already crewed or nothing's free.
+  if (events) assignGrainCart(save, task, events);
 }
 
 /** Does `field` have loose bales worth hauling — bales on the ground and no
@@ -1063,29 +1089,22 @@ function nearestBaleIndex(locs: Meters[], p: Meters): number {
   return best;
 }
 
-/** Mean position of a field's loose bales (undefined if none). */
-function baleCentroid(field: Field): Meters | undefined {
+/** The Bale-Trailer's parking spot for a haul job: the remaining bale nearest
+ * `from` (the trailer's position as it enters/returns), LOCKED in
+ * `haulRendezvousRuntime` so the collector shuttles to a FIXED point — a moving
+ * target is what made it oscillate before. The lock is cleared whenever the
+ * trailer heads back after a storage run, so the next call re-picks the nearest
+ * bale and the trailer follows the work inward as the field clears (maintainer
+ * request, 2026-07-20). `undefined` when no bales remain. */
+function haulRendezvous(task: FarmTask, field: Field, from: Meters): Meters | undefined {
+  const locked = haulRendezvousRuntime.get(task.id);
+  if (locked) return locked;
   const locs = field.baleLocations;
   if (!locs || locs.length === 0) return undefined;
-  let x = 0, y = 0;
-  for (const [bx, by] of locs) { x += bx; y += by; }
-  return [x / locs.length, y / locs.length];
-}
-
-/** The Bale-Trailer's parking spot for a haul job: the field gate nearest the
- * BALES (maintainer request, 2026-07-17 — the Hay-Spikes tractor shuttles to
- * the trailer far more often than the trailer hauls to storage, so shortening
- * the shuttle matters most). Chosen once and LOCKED in `haulEntranceRuntime`
- * so both relay brains agree on a fixed rendezvous — a moving target is what
- * made the collector oscillate before. `undefined` for a gateless field. */
-function haulStagingGate(task: FarmTask, field: Field): Meters | undefined {
-  const locked = haulEntranceRuntime.get(task.id);
-  if (locked) return locked;
-  if (!field.accessPoints || field.accessPoints.length === 0) return undefined;
-  const ref = baleCentroid(field) ?? field.accessPoints[0]!;
-  const gate = nearestGate(field, ref);
-  haulEntranceRuntime.set(task.id, gate);
-  return gate;
+  const b = locs[nearestBaleIndex(locs, from)]!;
+  const rv: Meters = [b[0], b[1]];
+  haulRendezvousRuntime.set(task.id, rv);
+  return rv;
 }
 
 /** Pull an idle tractor+Bale-Trailer into a Haul Bales job as the hauler half
@@ -1093,13 +1112,13 @@ function haulStagingGate(task: FarmTask, field: Field): Meters | undefined {
  * No-op if there's no spare idle tractor / no trailer available — the
  * Hay-Spikes tractor then hauls direct.
  *
- * The trailer stages at a FIXED gate (nearest the bales, locked in
- * `haulEntranceRuntime`) and the Hay-Spikes tractor shuttles bales out to it;
+ * The trailer parks at a FIXED point (the nearest remaining bale, locked in
+ * `haulRendezvousRuntime`) and the Hay-Spikes tractor shuttles bales out to it;
  * when full (or the field's cleared) the trailer runs the load to storage and
  * the collector waits in-field for its return (maintainer request,
  * 2026-07-20 — re-enabled after the earlier oscillation was traced to the
  * collector chasing the trailer's *moving* position instead of its parked
- * gate). Selection is fully automatic: any idle tractor with (or able to
+ * spot). Selection is fully automatic: any idle tractor with (or able to
  * hitch) a Bale Trailer is used. */
 const TRAILER_RELAY_ENABLED = true;
 function assignTrailerHelper(save: SaveState, task: FarmTask, spikesAgent: Agent): void {
@@ -1127,10 +1146,8 @@ function assignTrailerHelper(save: SaveState, task: FarmTask, spikesAgent: Agent
   task.trailerPhase = "toEntrance";
   helper.taskId = task.id;
   helper.state = "traveling";
-  // Lock the staging gate now (nearest the bales) so both brains rendezvous at
-  // one fixed point from the very first tick.
-  const field = save.fields.find((f) => f.id === task.fieldId);
-  if (field) haulStagingGate(task, field);
+  // The rendezvous bale is locked lazily the first time the trailer stages
+  // (in its brain), so it's picked relative to where the trailer enters.
 }
 
 /** Where a bale hauler should head with its load: the nearest Bale Storage
@@ -1183,6 +1200,110 @@ function finishHaul(save: SaveState, task: FarmTask, agent: Agent, events: TaskE
   clearTaskRuntime(task.id);
 }
 
+/** Where a grain cart should take its load: the nearest silo for the crop IF the
+ * crop's pooled silo capacity still has room, else the nearest Sell Point to
+ * offload for cash (maintainer request, 2026-07-20 — so a cart doesn't stall at
+ * a full silo mid-harvest). `undefined` when neither is available (cart waits,
+ * ⚠️). Mirrors `chooseBaleDest`. */
+function chooseGrainDest(save: SaveState, crop: CropId, from: Meters): { pos: Meters; sell: boolean } | undefined {
+  const room = siloCapacityForCrop(save, crop) - save.grain[crop];
+  if (room > 1e-9) {
+    const silo = nearestSiloForCrop(save, crop, from);
+    if (silo) return { pos: silo.pos, sell: false };
+  }
+  const sellPt = nearestSellPointFor(save, from);
+  if (sellPt) return { pos: sellPt.pos, sell: true };
+  return undefined;
+}
+
+/** Sell a grain cart's load at a Sell Point on the spot — its fallback when the
+ * silos are full/absent (maintainer request, 2026-07-20). Flat crop price, same
+ * as selling from a silo; recorded so it shows in the Completed list + cashflow. */
+function sellHauledGrain(save: SaveState, crop: CropId, tons: number, now: SimTime): void {
+  if (tons <= 1e-9) return;
+  const revenue = Math.round(tons * gameConfig.crops[crop].sellPricePerTon);
+  save.money += revenue;
+  recordCash(save, "cropRevenue", gameConfig.crops[crop].name, revenue);
+  appendCompletedTask(save, {
+    id: `sale-${++taskSeq}`,
+    type: "sellGrain",
+    crop,
+    tons,
+    revenue,
+    completedAt: now,
+  });
+}
+
+/** An unload trip is done: release the cart and drop the task. */
+function finishUnload(save: SaveState, task: FarmTask, agent: Agent, events: TaskEvent[]): void {
+  events.push({ kind: "finished", task, agent });
+  save.tasks.splice(save.tasks.indexOf(task), 1);
+  agent.taskId = undefined;
+  clearAgentRoute(agent.id);
+  agent.state = "idle";
+  clearTaskRuntime(task.id);
+}
+
+/** Proactively pull an idle tractor + grain cart onto a combine that's sitting
+ * with grain but no cart yet, jumping ahead of queued field work (maintainer
+ * request, 2026-07-20 — "same join-mid-job idea as the baler"). Auto-hitches a
+ * loose Grain Trailer if the spare tractor has none. No-op when the task's
+ * already crewed, the combine's empty, or nothing's free. */
+function assignGrainCart(save: SaveState, task: FarmTask, events: TaskEvent[]): void {
+  if (task.status !== "queued") return;
+  const harvester = save.agents.find((a) => a.id === task.harvesterAgentId);
+  if (!harvester || (harvester.grainOnboard ?? 0) <= 1e-9) return;
+  const cart = save.agents.find(
+    (a) =>
+      a.kind === "tractor" &&
+      a.state === "idle" &&
+      !a.taskId &&
+      !!a.size &&
+      (!!attachedImplement(save, a.id, "grainTrailer") || !!availableImplementFor(save, a, "grainTrailer")),
+  );
+  if (!cart) return;
+  if (!attachedImplement(save, cart.id, "grainTrailer")) {
+    const trailer = availableImplementFor(save, cart, "grainTrailer");
+    if (!trailer) return;
+    for (const i of save.implements) if (i.attachedTo === cart.id) i.attachedTo = undefined;
+    trailer.attachedTo = cart.id;
+  }
+  task.status = "active";
+  task.agentId = cart.id;
+  cart.taskId = task.id;
+  cart.state = "traveling";
+  events.push({ kind: "started", task, agent: cart });
+}
+
+/** Should this idle tractor hold off on starting field work because a combine is
+ * harvesting and still needs a cart it could crew? Keeps a cart-capable tractor
+ * available for the unload instead of committing to a plow the combine would
+ * soon be waiting behind (maintainer request, 2026-07-20 — "jump ahead of
+ * queued field work"). Only reserves as many tractors as there are uncrewed
+ * harvests, so surplus tractors still get field work done. */
+function shouldReserveForHarvest(save: SaveState, tractor: Agent): boolean {
+  if (!tractorCanUse(save, tractor, "grainTrailer")) return false;
+  // No combine in the fleet → nothing will ever crew; never strand the tractor.
+  if (!save.agents.some((a) => a.kind === "harvester")) return false;
+  // A harvest that's running (or queued and about to run) whose unload isn't
+  // already crewed. Queued counts too, so a cart-capable tractor doesn't grab
+  // field work on the very tick a fresh harvest starts, before the combine has
+  // banked any grain for the pre-pass to react to.
+  const uncrewed = save.tasks.filter(
+    (h) =>
+      h.type === "harvest" &&
+      (h.status === "active" || h.status === "queued") &&
+      !save.tasks.some((u) => u.type === "unloadHarvester" && u.harvesterAgentId === h.agentId && u.status === "active"),
+  ).length;
+  if (uncrewed === 0) return false;
+  // Count OTHER idle cart-capable tractors already free to take those unloads —
+  // reserve only if there aren't already enough of them.
+  const freeCarts = save.agents.filter(
+    (a) => a.kind === "tractor" && a.id !== tractor.id && !a.taskId && tractorCanUse(save, a, "grainTrailer"),
+  ).length;
+  return freeCarts < uncrewed;
+}
+
 function tickAgent(
   save: SaveState,
   agent: Agent,
@@ -1207,7 +1328,7 @@ function tickAgent(
       // was tracked via a same-crop-silo guess.
       if (agent.kind === "harvester" && (agent.grainOnboard ?? 0) > 1e-9) {
         const crop = agent.lastCrop ?? guessLeftoverCrop(save);
-        if (crop) ensureUnloadTask(save, agent, agent.lastFieldId ?? "", crop);
+        if (crop) ensureUnloadTask(save, agent, agent.lastFieldId ?? "", crop, events);
       }
       // Pick the first queued task of this agent's kind that's startable now.
       // Plow/plant also need the tractor to have (or be able to hitch) the
@@ -1222,6 +1343,14 @@ function tickAgent(
           // field to actually exist, unlike every other task type.
           (t.type === "unloadHarvester" || save.fields.some((f) => f.id === t.fieldId && isStartable(t, f))),
       );
+      // Hold a cart-capable tractor back from starting FIELD work while a combine
+      // is harvesting and still needs a cart — so it stays free to crew the
+      // unload rather than committing to a plow the combine waits behind
+      // (maintainer request, 2026-07-20). Unloads themselves are never held.
+      if (next && next.type !== "unloadHarvester" && shouldReserveForHarvest(save, agent)) {
+        agent.state = "idle";
+        return;
+      }
       if (!next) {
         // No work queued — drive home (Tractor Barn with room, else Farm
         // Yard) if the farm's built somewhere for it to park; otherwise
@@ -1321,29 +1450,23 @@ function tickAgent(
 
       if (task.unloadPhase === "toSilo") {
         const crop = trailer.cargoCrop;
-        const silo = crop ? nearestSiloForCrop(save, crop, agent.pos) : undefined;
-        if (!silo) {
-          // No silo assigned to this crop yet — sit tight (⚠️ surfaced in the UI).
-          task.waitingForSilo = true;
-          agent.state = "working";
-          budget = 0;
-          continue;
-        }
-        if (!samePos(agent.pos, silo.pos)) {
-          task.waitingForSilo = false;
-          agent.state = "traveling";
-          budget = driveToward(save, agent, silo.pos, speed, budget);
-          continue;
-        }
-        // Arrived — dump only if the crop's pooled silo capacity has room.
-        const room = siloCapacityForCrop(save, crop!) - save.grain[crop!];
-        if (room <= 1e-9) {
+        // Prefer a silo with room; if the crop's silos are full/absent, divert
+        // to a Sell Point rather than stalling (maintainer request, 2026-07-20).
+        const dest = crop ? chooseGrainDest(save, crop, agent.pos) : undefined;
+        if (!dest) {
+          // No silo room AND no Sell Point — sit tight (⚠️ surfaced in the UI).
           task.waitingForSilo = true;
           agent.state = "working";
           budget = 0;
           continue;
         }
         task.waitingForSilo = false;
+        task.unloadDest = dest.sell ? "sell" : "silo";
+        if (!samePos(agent.pos, dest.pos)) {
+          agent.state = "traveling";
+          budget = driveToward(save, agent, dest.pos, speed, budget);
+          continue;
+        }
         task.unloadPhase = "dumping";
         task.phaseTimer = gameConfig.hauling.dumpMinutes;
         continue;
@@ -1360,12 +1483,22 @@ function tickAgent(
           continue;
         }
         const crop = trailer.cargoCrop!;
+        if (task.unloadDest === "sell") {
+          // Diverted to a Sell Point — offload the whole load for cash.
+          sellHauledGrain(save, crop, trailer.cargoTons ?? 0, now);
+          trailer.cargoTons = 0;
+          trailer.cargoCrop = undefined;
+          task.waitingForSilo = false;
+          finishUnload(save, task, agent, events);
+          continue;
+        }
         const room = Math.max(0, siloCapacityForCrop(save, crop) - save.grain[crop]);
         const amount = Math.min(room, trailer.cargoTons ?? 0);
         save.grain[crop] += amount;
         trailer.cargoTons = (trailer.cargoTons ?? 0) - amount;
         if ((trailer.cargoTons ?? 0) > 1e-9) {
-          // Silo filled up mid-dump — go back to waiting for more room.
+          // Silo filled up mid-dump — reroute the rest (another silo, or a Sell
+          // Point) instead of stalling here (maintainer request, 2026-07-20).
           task.unloadPhase = "toSilo";
           task.waitingForSilo = true;
           continue;
@@ -1373,11 +1506,7 @@ function tickAgent(
         trailer.cargoTons = 0;
         trailer.cargoCrop = undefined;
         task.waitingForSilo = false;
-        events.push({ kind: "finished", task, agent });
-        save.tasks.splice(save.tasks.indexOf(task), 1);
-        agent.taskId = undefined;
-      clearAgentRoute(agent.id);
-        agent.state = "idle";
+        finishUnload(save, task, agent, events);
         continue;
       }
 
@@ -1525,6 +1654,7 @@ function tickAgent(
             trailerImpl.cargoBaleProduct = undefined;
             task.waitingForStorage = false;
             task.trailerPhase = "toEntrance";
+            haulRendezvousRuntime.delete(task.id); // re-pick nearest bale on return
             continue;
           }
           const store = nearestBaleStorageFor(save, product, agent.pos);
@@ -1556,6 +1686,7 @@ function tickAgent(
           trailerImpl.cargoBaleProduct = undefined;
           task.waitingForStorage = false;
           task.trailerPhase = "toEntrance";
+          haulRendezvousRuntime.delete(task.id); // re-pick nearest bale on return
           continue;
         }
 
@@ -1589,13 +1720,13 @@ function tickAgent(
           continue;
         }
 
-        // Otherwise stage at the locked entrance gate (nearest the bales) and
-        // wait to be loaded.
-        const gate = haulStagingGate(task, haulField);
-        if (gate && !samePos(agent.pos, gate)) {
+        // Otherwise drive to the rendezvous (nearest remaining bale, locked) and
+        // wait there to be loaded.
+        const rv = haulRendezvous(task, haulField, agent.pos);
+        if (rv && !samePos(agent.pos, rv)) {
           task.trailerPhase = "toEntrance";
           agent.state = "traveling";
-          budget = driveToward(save, agent, gate, speed, budget);
+          budget = driveToward(save, agent, rv, speed, budget);
           continue;
         }
         task.trailerPhase = "waiting";
@@ -1709,6 +1840,18 @@ function tickAgent(
       const cargo = spikes.cargoBales ?? 0;
       const fieldEmpty = (haulField.baleLocations?.length ?? 0) === 0;
 
+      // Mid-job trailer join: if this haul started with no trailer free (direct
+      // haul) but an idle tractor+Bale-Trailer has since come available, pull it
+      // in now for the rest of the field. Only when the collector is EMPTY with
+      // bales still to grab — a safe decision point (never yanks it mid storage
+      // run, never leaves it holding a load while the trailer drives over). Re-
+      // enter the loop so the relay branch takes over with hasTrailer now true.
+      if (!hasTrailer && cargo <= 0 && !fieldEmpty) {
+        const before = task.trailerAgentId;
+        assignTrailerHelper(save, task, agent);
+        if (task.trailerAgentId !== before) continue;
+      }
+
       // Still room on the spikes and bales left to grab → go collect one.
       // LOCK onto a single target bale for the whole trip: re-choosing "nearest"
       // every tick made the collector oscillate near the gate (maintainer
@@ -1752,7 +1895,7 @@ function tickAgent(
       // Carrying bales (spikes full, or field cleared with a partial load).
       if (hasTrailer) {
         const trailerRoom = baleTrailerCapacityBales(trailerImpl!.size) - (trailerImpl!.cargoBales ?? 0);
-        // Only shuttle to the trailer once it's actually PARKED at its gate with
+        // Only shuttle to the trailer once it's actually PARKED at its spot with
         // room. While it's still arriving ("toEntrance") or off on a run
         // ("toStorage"/"dumping"), hold the load in-field and wait — chasing the
         // trailer's moving position is exactly what made this oscillate before.
@@ -1763,12 +1906,13 @@ function tickAgent(
           budget = 0;
           continue;
         }
-        // Rendezvous at the trailer's LOCKED parked gate, never its live pos.
-        const gate = haulStagingGate(task, haulField) ?? trailerAgent!.pos;
-        if (!samePos(agent.pos, gate)) {
+        // Rendezvous at the trailer's LOCKED parked spot, never its live pos.
+        // Read-only (the trailer owns the lock); fall back to its pos if unset.
+        const rv = haulRendezvousRuntime.get(task.id) ?? trailerAgent!.pos;
+        if (!samePos(agent.pos, rv)) {
           task.haulPhase = "toTrailer";
           agent.state = "traveling";
-          budget = driveToward(save, agent, gate, speed, budget);
+          budget = driveToward(save, agent, rv, speed, budget);
           continue;
         }
         task.haulPhase = "unloadToTrailer";
@@ -1850,6 +1994,19 @@ function tickAgent(
       }
       baler.cargoTons ??= 0;
 
+      // Forage this particular bale fills to: a nominal bale ± baleFillVariance,
+      // re-rolled after each drop (deleted below). A bigger threshold means a
+      // longer drive before the tie, so drop SPACING along the path varies
+      // naturally — no perpendicular scatter, so every bale lands on baled
+      // ground (maintainer request, 2026-07-20). rand()=0.5 (test default) →
+      // exactly baleTons, so deterministic tests keep their exact bale counts.
+      let baleTarget = baleTargetRuntime.get(task.id);
+      if (baleTarget === undefined) {
+        const v = gameConfig.forage.baleFillVariance;
+        baleTarget = baleTons * (1 + (rand() - 0.5) * 2 * v);
+        baleTargetRuntime.set(task.id, baleTarget);
+      }
+
       let dist = pathDistRuntime.get(task.id);
       if (dist === undefined) dist = distanceAtWork(path, (task.doneAcres * ACRE_M2) / path.swath);
 
@@ -1865,53 +2022,31 @@ function tickAgent(
           continue; // still tying (out of budget) — resume next tick
         }
         baleTieRemaining.delete(task.id);
-        // Drop ON the field: current spot if inside, else the last on-field
-        // position (the baler may have stopped over a concave notch the path
-        // cut across — a bale must never land off the field).
+        // Drop ON the field at the tie spot: current position if inside, else the
+        // last on-field position (the baler may have stopped over a concave notch
+        // the path cut across — a bale must never land off the field). No
+        // perpendicular scatter — the ±variance in fill distance (baleTarget)
+        // already staggers the spacing, so drops stay on the driven lane.
         const inside = pointInPolygon(agent.pos, field.boundary);
         const drop = inside ? agent.pos : (baleLastInside.get(task.id) ?? agent.pos);
-        // Scatter each bale off the exact coverage lane so they don't land in a
-        // rigid lattice (restores the pre-hopper-model jitter lost in 60b002b,
-        // maintainer report 2026-07-17). Sized off the SPACING BETWEEN DROPS
-        // along the path (avg meters per bale), not the working width — the
-        // width is only a few meters (a 25 ft baler ≈ 7.6 m), too narrow to
-        // read as scatter at map scale; drop spacing is the actual gap between
-        // dots the eye sees, so a fraction of IT reads as real scatter
-        // (maintainer follow-up, 2026-07-17: raised the fraction to 30% — the
-        // width-based version was visually imperceptible). If the jittered
-        // point lands off-field, retry at half magnitude a few times before
-        // falling back to the exact on-field spot — a straight reject-on-miss
-        // was silently collapsing most drops back onto the lattice near field
-        // edges. `rand` is deterministic in tests (0.5 → zero offset), so bale
-        // COUNTS/positions in tests are unaffected. Only NEW drops jitter —
-        // bales already on the ground keep their recorded positions.
-        const dropSpacing = totalBales > 0 ? path.total / totalBales : 0;
-        let j = dropSpacing * gameConfig.forage.baleDropJitterFraction;
-        let finalDrop = drop;
-        for (let attempt = 0; attempt < 4 && j > 1e-6; attempt++, j /= 2) {
-          const candidate: Meters = [drop[0] + (rand() - 0.5) * 2 * j, drop[1] + (rand() - 0.5) * 2 * j];
-          if (pointInPolygon(candidate, field.boundary)) {
-            finalDrop = candidate;
-            break;
-          }
-        }
-        (field.baleLocations ??= []).push([finalDrop[0], finalDrop[1]]);
-        baler.cargoTons = Math.max(0, baler.cargoTons - baleTons);
+        (field.baleLocations ??= []).push([drop[0], drop[1]]);
+        baler.cargoTons = Math.max(0, baler.cargoTons - baleTarget);
+        baleTargetRuntime.delete(task.id); // re-roll the next bale's fill distance
         continue;
       }
 
-      // Hopper full → stop and tie a bale (empties on the tie above).
-      if (baler.cargoTons >= baleTons - 1e-9) {
+      // Hopper hit this bale's (randomized) threshold → stop and tie a bale.
+      if (baler.cargoTons >= baleTarget - 1e-9) {
         baleTieRemaining.set(task.id, gameConfig.forage.baleTieMinutes);
         continue;
       }
 
       // Not full: drive on, gathering forage. Clamp the drive so it stops EXACTLY
-      // when the hopper fills — so the bale drops where a bale's worth was
-      // gathered — mirroring the combine's hopper-capacity clamp. Working in
-      // WORK-metres (in-field only) keeps drops evenly spread across a concave
+      // when the hopper hits this bale's threshold — so the bale drops where that
+      // much forage was gathered — mirroring the combine's hopper-capacity clamp.
+      // Working in WORK-metres (in-field only) keeps drops spread across a concave
       // field the coverage path over-sweeps.
-      const roomAcres = (baleTons - baler.cargoTons) / tonsPerAcre;
+      const roomAcres = (baleTarget - baler.cargoTons) / tonsPerAcre;
       const roomWork = workDoneAt(path, dist) + (roomAcres * ACRE_M2) / path.swath;
       const target = Math.min(path.total, distanceAtWork(path, roomWork));
       const timeNeeded = Math.max(0, (target - dist) / speed);
@@ -1927,13 +2062,16 @@ function tickAgent(
       agent.heading = s.heading;
       if (pointInPolygon(agent.pos, field.boundary)) baleLastInside.set(task.id, agent.pos);
 
-      if (dist >= path.total - 1e-6 && baler.cargoTons < baleTons - 1e-9) {
-        // Field finished with less than a full bale left — discard the partial
-        // hopper and settle up.
+      if (dist >= path.total - 1e-6 && baler.cargoTons < baleTarget - 1e-9) {
+        // Field finished with less than this bale's threshold left — discard the
+        // partial hopper and settle up. Record the ACTUAL bales dropped (the
+        // count varies run to run now that fill distance is randomized), not the
+        // nominal target — the field started empty, so baleLocations is this run.
         task.doneAcres = task.totalAcres;
         baler.cargoTons = 0;
+        const baledCount = field.baleLocations?.length ?? totalBales;
         completeTask(task, field, now, rand);
-        recordCompletion(save, task, field, agent, now, { tons: totalBales * baleTons, bales: totalBales });
+        recordCompletion(save, task, field, agent, now, { tons: baledCount * baleTons, bales: baledCount });
         changed.push(field);
         events.push({ kind: "finished", task, agent });
         clearTaskRuntime(task.id);
@@ -1958,7 +2096,7 @@ function tickAgent(
     if (task.type === "harvest" && field.crop) {
       const capacity = harvesterCapacityTons(agent.size ?? "medium");
       agent.grainOnboard ??= 0;
-      if (agent.grainOnboard > 1e-9) ensureUnloadTask(save, agent, field.id, field.crop);
+      if (agent.grainOnboard > 1e-9) ensureUnloadTask(save, agent, field.id, field.crop, events);
       if (agent.grainOnboard >= capacity - 1e-9) {
         budget = 0;
         continue;
@@ -2025,7 +2163,7 @@ function tickAgent(
       // A trip's wanted the moment there's any grain at all (see the
       // pre-check above) — this catches the case where a tick banks the
       // FIRST grain of the job (pre-check ran before this tick had any).
-      if (agent.grainOnboard > 1e-9) ensureUnloadTask(save, agent, field.id, field.crop);
+      if (agent.grainOnboard > 1e-9) ensureUnloadTask(save, agent, field.id, field.crop, events);
     }
 
     if (dist >= path.total - 1e-6) {
@@ -2054,7 +2192,7 @@ function tickAgent(
       // agent.lastFieldId/lastCrop were captured by that same banking code
       // (applyHarvestDone, just above, already cleared field.crop).
       if (task.type === "harvest" && agent.lastCrop && (agent.grainOnboard ?? 0) > 1e-9) {
-        ensureUnloadTask(save, agent, agent.lastFieldId ?? field.id, agent.lastCrop);
+        ensureUnloadTask(save, agent, agent.lastFieldId ?? field.id, agent.lastCrop, events);
       }
     }
   }

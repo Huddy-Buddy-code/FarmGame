@@ -279,6 +279,10 @@ export interface FarmTask {
    * than re-deciding mid-drive. */
   haulDest?: "storage" | "sell";
   trailerDest?: "storage" | "sell";
+  /** Grain cart: where this unload trip is headed — a silo, or a Sell Point when
+   * silos are full/absent (so a partial dump into a filling silo diverts to
+   * selling instead of stalling). Same lock-per-trip idea as haulDest. */
+  unloadDest?: "silo" | "sell";
   /** What was paid when the task was queued (plow cost / seed inputs) —
    * refunded in full if a still-queued task is canceled. */
   costPaid: number;

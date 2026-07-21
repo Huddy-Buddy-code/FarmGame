@@ -976,6 +976,108 @@ once per maintainer; modeled closely on the grain-cart `unloadHarvester` relay.
   typecheck clean. **Not visually verified** (Browser Preview off) — worth
   watching a real relay run in `npm run dev` to confirm no residual jitter.
 
+## Latest changes (2026-07-20, bale hauling polish — 3 updates)
+
+1. **Trailer + tractor both in the Work Queue.** The Haul Bales job now renders
+   a SECOND implement sub-row for the Bale Trailer (its bales-loaded fill bar +
+   phase: "Waiting to load" / "Hauling to storage" / "Unloading"), alongside the
+   collector's Hay-Spikes row. Refactored `implementRowHtml` in `main.ts`: the
+   row-wrapping is now a shared `implRow(...)` helper, and `implRowForBaleTrailer`
+   builds the trailer's row (new `TRAILER_PHASE_TEXT` map).
+2. **Trailer waits AT the nearest bale, not the field gate.** `haulStagingGate`
+   (nearest gate to the bale centroid) → `haulRendezvous` (nearest *remaining
+   bale* to the trailer, locked in `haulRendezvousRuntime`). The lock is cleared
+   whenever the trailer heads back from a storage run, so it re-picks the nearest
+   bale and follows the work inward as the field clears (maintainer choice:
+   "reposition on return"). Collector reads the lock read-only. Pre-lock removed
+   from `assignTrailerHelper` (the trailer locks lazily on its first staging).
+3. **Bale drops: ±30% fill-distance variance instead of perpendicular jitter.**
+   The old jitter offset each drop sideways off the coverage lane by a fraction
+   of the drop spacing — big enough (±~64m) to fling bales onto un-baled ground.
+   Removed entirely. Instead each bale now fills to a randomized threshold
+   (`baleTons × (1 ± baleFillVariance)`, new config, 0.3; re-rolled per bale via
+   `baleTargetRuntime`), so the *drive distance* before each tie varies and the
+   ON-PATH spacing staggers naturally — every bale lands on baled ground. Config
+   `forage.baleDropJitterFraction` → `forage.baleFillVariance`. Bale COUNT now
+   varies a little run to run (maintainer choice: "let count vary");
+   `recordCompletion` records the ACTUAL dropped count. `rand()=0.5` (test
+   default) still fills to exactly `baleTons`, so deterministic tests keep exact
+   counts.
+
+Tests: rewrote the old "jittered off the lattice" test (now: spacing varies with
+rand, count stays near nominal, **all bales inside the field**), the forage
+"exact count" test (now: count near nominal, may vary), and added a test that the
+trailer parks INSIDE the field (at a bale) while waiting. 223 green, typecheck
+clean. **Not visually verified** (Browser Preview off) — worth eyeballing the
+bale scatter and the two-row queue entry in `npm run dev`.
+
+## Latest changes (2026-07-20, patchy wind-lodging texture)
+
+- **`ready`-status grain no longer lodges in uniform parallel bands.** New
+  `lodgingPatches` (`field/fieldRender.ts`) scatters a handful of irregular
+  flattened patches instead — each its own size/orientation, streaked at its
+  own wind angle independent of the crop-row angle, matching how real lodging
+  follows gusts rather than the planter's rows. Replaces the old single
+  `rows(..., 12, dark, 2.2, 0.1)` "lodged/leaning bands" line.
+- Prompted by reviewing real aerial farmland photos (maintainer-supplied) against
+  a demo artifact porting the game's actual texture-drawing functions — confirmed
+  the field painter is fully procedural (no bitmap textures, nothing to license)
+  and identified uniform lodging bands as the one visible gap vs. real photos.
+
+Typecheck clean, 223 tests green (no test changes needed — no existing test
+pinned the old uniform-band behavior). **Not visually verified** (Browser
+Preview off) — worth checking a `ready` grain field in `npm run dev` for patch
+size/frequency.
+
+## Latest changes (2026-07-20, grain cart: join-mid-job + Sell Point divert)
+
+1. **Proactive cart recruitment (the baler's "join mid-job", for grain).** A
+   combine sitting with grain now pulls in a free tractor+Grain Trailer ahead of
+   queued field work, instead of the cart only arriving via the generic
+   task-order loop:
+   - `assignGrainCart(save, task, events)` (mirrors `assignTrailerHelper`) grabs
+     an idle cart-capable tractor, auto-hitching a loose Grain Trailer, and sets
+     the unload active.
+   - A pre-pass at the top of `tickTasks` runs `ensureUnloadTask` for every
+     combine with grain (creates the trip AND recruits) BEFORE the agent loop, so
+     a free tractor is claimed for the combine before it can start a plow.
+   - `shouldReserveForHarvest` holds a cart-capable tractor back from STARTING
+     field work while a harvest (active or queued) still needs a cart — capped so
+     surplus tractors still get field work, and no-ops if the fleet has no
+     combine. Fixes the tick-1 race (tractor grabbing a plow the instant before
+     the combine banks its first grain). No agent-ordering change (that perturbed
+     timing-sensitive tests); reserving on queued-too covers the cold start.
+2. **Full-silo divert to Sell Point (mirrors the bale-storage fix).** When a
+   crop's silos are full/absent, the cart now offloads at a Sell Point instead of
+   stalling `waitingForSilo` — including a PARTIAL dump where the silo fills
+   mid-unload (the leftover reroutes). New `chooseGrainDest` (nearest silo with
+   room → else nearest Sell Point), `sellHauledGrain` (flat crop price, recorded
+   as a `sellGrain` completed task), `finishUnload` helper, and a
+   `task.unloadDest` per-trip lock. The `toSilo`/`dumping` phases route through
+   these. A full silo with NO Sell Point still waits, as before.
+
+Tests: +2 in `harvestUnload.test.ts` (full-silo→Sell-Point divert; proactive
+recruit beats a queued plow). 225 green, typecheck clean. **Not visually
+verified** (Browser Preview off).
+
+## Latest changes (2026-07-20, Inventory tab now live-refreshes)
+
+- Bug: the Inventory tab went stale while open — it wasn't in the game loop's
+  ~2×/s refresh block (unlike Fields/Equipment/Structures/Finance), so e.g.
+  delivered grain / hauled bales didn't show until you reopened it.
+- Fix: brought `refreshInventory` up to the same pattern as the other tabs —
+  (1) added it to the `tickWorld` refresh block; (2) early-return when the panel
+  is hidden; (3) a content-key diff (pooled grain, each building's
+  assignment + stored bales, in-field bale tallies) so it only rebuilds the DOM
+  when that data changes, not every frame — which would reset a half-open
+  crop/product dropdown or the sell buttons. Opening the tab forces a rebuild
+  (`refreshInventory(true)`). Panel id is `inventory` (not `inventorytab`).
+- Confirmed no other data tab was missing: the crop calendar's moving "now"
+  marker is already updated in `updateHud` (live), Settings has no live data.
+- UI-only; typecheck + 225 tests green. **Not visually verified** (Browser
+  Preview off) — worth watching Inventory update during a harvest/haul in
+  `npm run dev`.
+
 ## Known gaps / unverified
 
 - **Economy is placeholder** — flat sell price. No buyers, capacity, or hauling yet.

@@ -9,6 +9,7 @@ import {
   queueHaulBales, fieldHasLooseBales,
 } from "../src/sim/tasks";
 import { tickFarming } from "../src/sim/farming";
+import { pointInPolygon } from "../src/geo/geometry";
 import { buyBuildingAt, storedBalesTotal, assignBaleStorageProduct } from "../src/sim/buildings";
 import { gameConfig } from "../src/config/gameConfig";
 import { minutesPerMonth } from "../src/sim/calendar";
@@ -107,6 +108,62 @@ describe("Bale hauling relay (maintainer request, 2026-07-17)", () => {
     expect(save.agents.every((a) => a.taskId === undefined)).toBe(true); // both released
     expect(save.implements.find((i) => i.kind === "baleTrailer")?.cargoBales ?? 0).toBe(0);
     expect(save.implements.find((i) => i.kind === "haySpikes")?.cargoBales ?? 0).toBe(0);
+  });
+
+  it("the trailer parks at a bale INSIDE the field (not the edge gate) while waiting to load", () => {
+    const save = gameForHaul();
+    buyImplement(save, "haySpikes", "small");
+    buyImplement(save, "baleTrailer", "medium"); // 20 cap — one trip, so it waits in-field a while
+    buyAgent(save, "tractor", "medium", [0, 0]);
+    buyBuildingAt(save, "baleArea", [-500, -500]);
+    const field = baledField(save, 8, "hay");
+    const task = queueHaulBales(save, field.id)!;
+
+    // Sample finely; whenever the trailer is parked ("waiting"), it should be
+    // INSIDE the field boundary — i.e. sitting at a bale — not out on an edge
+    // gate (baledField's gates are on the boundary at [s/2,0] and [s/2,s]).
+    let sawWaitingInField = false;
+    runTasks(save, APRIL_1, () => {
+      if (task.trailerPhase === "waiting" && task.trailerAgentId) {
+        const t = save.agents.find((a) => a.id === task.trailerAgentId)!;
+        if (pointInPolygon(t.pos, field.boundary)) sawWaitingInField = true;
+      }
+      return noHaulLeft(save, field)();
+    }, 400_000, 0.1);
+
+    expect(sawWaitingInField).toBe(true);
+  });
+
+  it("a trailer that frees up mid-job is pulled in for the rest of the haul", () => {
+    const save = gameForHaul();
+    buyImplement(save, "haySpikes", "small");
+    const area = buyBuildingAt(save, "baleArea", [-500, -500]);
+    const field = baledField(save, 12, "hay");
+    const task = queueHaulBales(save, field.id)!;
+
+    // Run with NO trailer available — the collector hauls direct for a while.
+    const t1 = runTasks(save, APRIL_1, () => (field.baleLocations?.length ?? 0) <= 8, 200_000);
+    expect(task.trailerAgentId).toBeUndefined(); // nothing to recruit yet
+    expect(storedBalesTotal(area)).toBeGreaterThan(0); // some delivered direct
+
+    // A tractor + Bale Trailer now become available mid-job.
+    buyAgent(save, "tractor", "medium", [0, 0]);
+    buyImplement(save, "baleTrailer", "small");
+
+    // Step finely here: load/dump are ~10 s each, so a whole relay run would
+    // otherwise complete inside a single coarse 30-min tick and we'd never
+    // sample the trailer mid-haul.
+    let trailerCarried = false;
+    runTasks(save, t1, () => {
+      const tr = save.implements.find((i) => i.kind === "baleTrailer");
+      if ((tr?.cargoBales ?? 0) > 0) trailerCarried = true;
+      return noHaulLeft(save, field)();
+    }, 400_000, 0.1);
+
+    expect(task.trailerAgentId).toBeDefined(); // joined the job mid-way
+    expect(trailerCarried).toBe(true); // and actually hauled the rest itself
+    expect(storedBalesTotal(area)).toBe(12); // whole field delivered
+    expect(save.agents.every((a) => a.taskId === undefined)).toBe(true);
   });
 
   it("no spare tractor → the relay never engages and the Hay-Spikes tractor hauls direct", () => {
@@ -261,8 +318,8 @@ describe("Bale hauling relay (maintainer request, 2026-07-17)", () => {
     expect(queueHaulBales(save, bare.id)).toBeUndefined(); // no bales → nothing to do
   });
 
-  it("bale drops are jittered off the coverage lattice (varying rand moves them)", () => {
-    // A tiny deterministic PRNG so the jittered run is reproducible.
+  it("bale drop spacing varies with rand and every bale lands on the field (no off-field scatter)", () => {
+    // A tiny deterministic PRNG so the varied run is reproducible.
     const makeRand = (seed: number) => {
       let a = seed >>> 0;
       return () => {
@@ -295,16 +352,25 @@ describe("Bale hauling relay (maintainer request, 2026-07-17)", () => {
       return field.baleLocations ?? [];
     };
 
-    const noJitter = runBaling(() => 0.5); // rand 0.5 → exactly zero offset
-    const jittered = runBaling(makeRand(12345));
-    expect(jittered.length).toBe(noJitter.length); // count is rand-independent
-    expect(jittered.length).toBeGreaterThan(3);
-    // Most bales landed off their un-jittered lattice positions.
-    let moved = 0;
-    for (let i = 0; i < jittered.length; i++) {
-      if (Math.hypot(jittered[i]![0] - noJitter[i]![0], jittered[i]![1] - noJitter[i]![1]) > 0.5) moved++;
-    }
-    expect(moved).toBeGreaterThan(jittered.length * 0.5);
+    const even = runBaling(() => 0.5); // rand 0.5 → every bale fills to baleTons: even spacing
+    const varied = runBaling(makeRand(12345)); // ±30% fill distance: staggered spacing
+    expect(even.length).toBeGreaterThan(3);
+    expect(varied.length).toBeGreaterThan(3);
+
+    // The variance is wired to rand: the two layouts differ (staggered spacing,
+    // and possibly a slightly different count — the count is allowed to vary now).
+    const sameLayout =
+      varied.length === even.length &&
+      varied.every((b, i) => Math.hypot(b[0] - even[i]![0], b[1] - even[i]![1]) < 0.5);
+    expect(sameLayout).toBe(false);
+    // …but it stays near the nominal count (no runaway drift).
+    expect(Math.abs(varied.length - even.length)).toBeLessThanOrEqual(Math.ceil(even.length * 0.15));
+
+    // Every bale — in BOTH runs — lands inside the field (on baled ground). The
+    // old perpendicular jitter is gone, so nothing is flung off the field.
+    const s = Math.sqrt(10 * 4046.8564224);
+    const boundary: Meters[] = [[0, 0], [s, 0], [s, s], [0, s]];
+    for (const b of [...even, ...varied]) expect(pointInPolygon(b, boundary)).toBe(true);
   });
 
   it("baling a field auto-dispatches a Haul Bales job (no player click needed)", () => {
