@@ -42,6 +42,8 @@ import type { Building } from "../state/saveState";
 import { planRoute } from "./roadNet";
 import type { RoadNetwork } from "./roadNet";
 import { recordCash } from "./ledger";
+import { recordFieldCash, recordFieldCrop } from "./fieldLedger";
+import { addProduce, attributeSale, grainUnitPrice, baleUnitPrice, monthOf } from "./market";
 
 const ACRE_M2 = 4046.8564224;
 
@@ -51,6 +53,7 @@ export const TASK_AGENT_KIND: Record<TaskType, Agent["kind"]> = {
   plant: "tractor",
   harvest: "harvester",
   mow: "tractor", // perennial forage "harvest" — tractor + Mower, no combine
+  mulch: "tractor", // optional post-harvest residue pass — tractor + Mulcher
   weed: "tractor",
   fertilize: "tractor",
   rake: "tractor",
@@ -74,19 +77,19 @@ export type EquipmentKind = "tractor" | "harvester";
 /** Buyable implements: a plow (tills), a planter (seeds), a sprayer (weeds or
  * fertilizes), a Grain Trailer (hauls a full combine to a silo) — same widths/
  * requirements, a tractor hitches one at a time. */
-export type ImplementKind = "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower" | "haySpikes" | "baleTrailer";
+export type ImplementKind = "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower" | "mulcher" | "haySpikes" | "baleTrailer";
 
 const EQUIPMENT_NAME: Record<EquipmentKind, string> = { tractor: "Tractor", harvester: "Combine" };
 const IMPLEMENT_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake", bailer: "Baler",
-  grainTrailer: "Grain Trailer", mower: "Mower", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
+  grainTrailer: "Grain Trailer", mower: "Mower", mulcher: "Mulcher", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
 };
 const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
 
 /** Ledger item label for each field-expense task type (hover breakdown in the
  * Finance tab's cashflow table). */
 const FIELD_EXPENSE_ITEM: Partial<Record<TaskType, string>> = {
-  plow: "Plowing", plant: "Planting", mow: "Mowing", weed: "Weeding", fertilize: "Fertilizing",
+  plow: "Plowing", plant: "Planting", mow: "Mowing", mulch: "Mulching", weed: "Weeding", fertilize: "Fertilizing",
   rake: "Raking", bale: "Baling",
 };
 
@@ -95,7 +98,7 @@ const FIELD_EXPENSE_ITEM: Partial<Record<TaskType, string>> = {
  * uses a Mower; unloadHarvester needs a Grain Trailer. Exported for the Work
  * Queue panel's per-task implement icon (main.ts). */
 export const TASK_IMPLEMENT: Partial<Record<TaskType, ImplementKind>> = {
-  plow: "plow", plant: "planter", mow: "mower", weed: "sprayer", fertilize: "sprayer",
+  plow: "plow", plant: "planter", mow: "mower", mulch: "mulcher", weed: "sprayer", fertilize: "sprayer",
   rake: "rake", bale: "bailer", unloadHarvester: "grainTrailer", haulBales: "haySpikes",
 };
 
@@ -145,6 +148,7 @@ const IMPLEMENT_CONFIG: Record<ImplementKind, Record<EquipmentSize, { price: num
   bailer: gameConfig.equipment.bailer,
   grainTrailer: gameConfig.equipment.grainTrailer,
   mower: gameConfig.equipment.mower,
+  mulcher: gameConfig.equipment.mulcher,
   haySpikes: gameConfig.equipment.haySpikes,
   baleTrailer: gameConfig.equipment.baleTrailer,
 };
@@ -417,6 +421,24 @@ export function forageDue(save: SaveState, field: Field): boolean {
 }
 
 /**
+ * Can this field take an (optional) mulch pass right now? Annual residue only,
+ * while the field is freshly harvested and NOT being baled — a mulcher shreds
+ * the residue back in as an alternative to baling it off. Excludes perennials
+ * (grass/alfalfa keep their stand — `field.crop` stays set), already-mulched
+ * fields, and any field with a rake/bale lined up (it's headed for baling).
+ */
+export function canMulch(save: SaveState, field: Field): boolean {
+  return (
+    field.status === "harvested" &&
+    !isPerennial(field.crop) &&
+    !isPerennial(field.lastCrop) &&
+    !field.residueMulched &&
+    tasksFor(save, field.id, "rake").length === 0 &&
+    tasksFor(save, field.id, "bale").length === 0
+  );
+}
+
+/**
  * The status a field WILL have once its pending tasks finish — what queueing
  * validates against, so a player can queue plow + plant back-to-back.
  */
@@ -428,6 +450,7 @@ export function effectiveStatus(save: SaveState, field: Field): FieldStatus {
     else if (t.type === "plant") status = "planted";
     else if (t.type === "harvest" || t.type === "mow") status = "harvested";
     else if (t.type === "bale") status = isPerennial(field.crop) ? "growing" : "mulched";
+    else if (t.type === "mulch") status = "stubble"; // residue shredded → bare stubble
     // weed/fertilize/rake don't change the field's lifecycle status.
   }
   return status;
@@ -439,6 +462,7 @@ export function taskCost(field: Field, type: TaskType, crop?: CropId): number {
   if (type === "plow") return Math.round(acres * gameConfig.plowCostPerAcre);
   if (type === "plant") return Math.round(acres * gameConfig.crops[crop!].inputCostPerAcre);
   if (type === "mow") return Math.round(acres * gameConfig.mowCostPerAcre);
+  if (type === "mulch") return Math.round(acres * gameConfig.mulchCostPerAcre);
   if (type === "weed") return Math.round(acres * gameConfig.weedCostPerAcre);
   if (type === "fertilize") return Math.round(acres * gameConfig.crops[crop ?? field.crop!].fertilizeCostPerAcre);
   if (type === "rake") return Math.round(acres * gameConfig.forage.rakeCostPerAcre);
@@ -490,6 +514,14 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
     if (!isPerennial(field.crop)) throw new Error(`${field.id} has no perennial forage to mow`);
     if (field.status !== "ready") throw new Error(`${field.id} isn't ready to cut yet`);
   }
+  if (type === "mulch" && !canMulch(save, field)) {
+    if (isPerennial(field.crop) || isPerennial(field.lastCrop)) {
+      throw new Error(`${field.id} is a perennial stand — mulching is for annual residue`);
+    }
+    if (field.status !== "harvested") throw new Error(`${field.id} has no residue to mulch (status: ${field.status})`);
+    if (field.residueMulched) throw new Error(`${field.id} is already mulched`);
+    throw new Error(`${field.id} is being baled — mulch is for residue you aren't baling`);
+  }
   if (type === "weed") {
     if (!hasStandingCrop(field.status)) throw new Error(`${field.id} has nothing to weed (status: ${field.status})`);
     if (!inWeedingWindow(field, now)) throw new Error(`Weeding opens once the crop is growing, 2 months after planting`);
@@ -519,6 +551,10 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
   }
   save.money -= cost;
   recordCash(save, "fieldExpenses", FIELD_EXPENSE_ITEM[type] ?? "Other", -cost);
+  recordFieldCash(save, field.id, "expenses", FIELD_EXPENSE_ITEM[type] ?? "Other", -cost);
+  // Stamp the year's crop for the Finances tab as soon as it's planted (before
+  // any revenue exists), so the row shows the crop for the whole season.
+  if (type === "plant" && crop) recordFieldCrop(save, field.id, crop);
   const task: FarmTask = {
     id: `task-${++taskSeq}`,
     type,
@@ -546,6 +582,7 @@ export function cancelTask(save: SaveState, taskId: string): FarmTask {
   clearTaskRuntime(taskId);
   save.money += task.costPaid;
   recordCash(save, "fieldExpenses", FIELD_EXPENSE_ITEM[task.type] ?? "Other", task.costPaid);
+  recordFieldCash(save, task.fieldId, "expenses", FIELD_EXPENSE_ITEM[task.type] ?? "Other", task.costPaid);
   return task;
 }
 
@@ -665,6 +702,7 @@ function isStartable(task: FarmTask, field: Field): boolean {
     return perennial ? canSeedPerennial(field.status) : field.status === "tilled";
   }
   if (task.type === "mow") return field.status === "ready"; // perennial cut
+  if (task.type === "mulch") return field.status === "harvested"; // post-harvest residue
   // Both only ever queue once the crop is already growing (see enqueueTask's
   // window checks) — require it still be growing when picked up too, rather
   // than the looser hasStandingCrop (which also allows "planted").
@@ -1170,13 +1208,21 @@ function chooseBaleDest(save: SaveState, product: BaleProduct, from: Meters): { 
  * no Bale Storage exists or all of it's full (maintainer request,
  * 2026-07-17). Records the sale like any other bale sale so it shows up in
  * the Work Queue's Completed section + cashflow, even though no player click
- * triggered it. */
-function sellHauledBales(save: SaveState, product: BaleProduct, n: number, now: SimTime): void {
+ * triggered it.
+ *
+ * `fieldId` is the ONE field this specific load came from — always pass it.
+ * Omitting it (bug fixed 2026-07-21) made `attributeSale` fall through to its
+ * pooled/pro-rata path, splitting revenue across every OTHER field that
+ * happened to have any unsold stock of this product, even though this
+ * particular haul's provenance was completely unambiguous. */
+function sellHauledBales(save: SaveState, product: BaleProduct, n: number, now: SimTime, fieldId: string): void {
   if (n <= 0) return;
   const cfg = gameConfig.baleProducts[product];
-  const revenue = Math.round(n * cfg.pricePerBale);
+  const unit = baleUnitPrice(product, monthOf(now));
+  const revenue = Math.round(n * unit);
   save.money += revenue;
   recordCash(save, "cropRevenue", `${cfg.name} bales`, revenue);
+  attributeSale(save, product, n, unit, { label: `${cfg.name} bales`, fieldId });
   appendCompletedTask(save, {
     id: `sale-${++taskSeq}`,
     type: "sellBales",
@@ -1222,12 +1268,17 @@ function chooseGrainDest(save: SaveState, crop: CropId, from: Meters): { pos: Me
 
 /** Sell a grain cart's load at a Sell Point on the spot — its fallback when the
  * silos are full/absent (maintainer request, 2026-07-20). Flat crop price, same
- * as selling from a silo; recorded so it shows in the Completed list + cashflow. */
-function sellHauledGrain(save: SaveState, crop: CropId, tons: number, now: SimTime): void {
+ * as selling from a silo; recorded so it shows in the Completed list + cashflow.
+ *
+ * `fieldId` is the ONE field this specific load came from — see the matching
+ * note on `sellHauledBales` for why this must never be omitted. */
+function sellHauledGrain(save: SaveState, crop: CropId, tons: number, now: SimTime, fieldId: string): void {
   if (tons <= 1e-9) return;
-  const revenue = Math.round(tons * gameConfig.crops[crop].sellPricePerTon);
+  const unit = grainUnitPrice(crop, monthOf(now));
+  const revenue = Math.round(tons * unit);
   save.money += revenue;
   recordCash(save, "cropRevenue", gameConfig.crops[crop].name, revenue);
+  attributeSale(save, crop, tons, unit, { label: gameConfig.crops[crop].name, fieldId });
   appendCompletedTask(save, {
     id: `sale-${++taskSeq}`,
     type: "sellGrain",
@@ -1489,7 +1540,7 @@ function tickAgent(
         const crop = trailer.cargoCrop!;
         if (task.unloadDest === "sell") {
           // Diverted to a Sell Point — offload the whole load for cash.
-          sellHauledGrain(save, crop, trailer.cargoTons ?? 0, now);
+          sellHauledGrain(save, crop, trailer.cargoTons ?? 0, now, task.fieldId);
           trailer.cargoTons = 0;
           trailer.cargoCrop = undefined;
           task.waitingForSilo = false;
@@ -1653,7 +1704,7 @@ function tickAgent(
           }
           task.trailerTimer = undefined;
           if (task.trailerDest === "sell") {
-            sellHauledBales(save, product, tCargo, now);
+            sellHauledBales(save, product, tCargo, now, task.fieldId);
             trailerImpl.cargoBales = 0;
             trailerImpl.cargoBaleProduct = undefined;
             task.waitingForStorage = false;
@@ -1801,7 +1852,7 @@ function tickAgent(
         }
         task.phaseTimer = undefined;
         if (task.haulDest === "sell") {
-          sellHauledBales(save, product, spikes.cargoBales ?? 0, now);
+          sellHauledBales(save, product, spikes.cargoBales ?? 0, now, task.fieldId);
           spikes.cargoBales = 0;
           spikes.cargoBaleProduct = undefined;
           task.waitingForStorage = false;
@@ -2076,6 +2127,11 @@ function tickAgent(
         const baledCount = field.baleLocations?.length ?? totalBales;
         completeTask(task, field, now, rand);
         recordCompletion(save, task, field, agent, now, { tons: baledCount * baleTons, bales: baledCount });
+        // Revenue is booked at SALE time now (seasonal prices) — record this
+        // field's produce so its eventual sale credits back here. applyBaleDone
+        // (inside completeTask) already stamped field.baleProduct while the
+        // crop was still readable, so it's authoritative here.
+        addProduce(save, field.baleProduct ?? "cornStover", field.id, baledCount);
         changed.push(field);
         events.push({ kind: "finished", task, agent });
         clearTaskRuntime(task.id);
@@ -2172,13 +2228,25 @@ function tickAgent(
 
     if (dist >= path.total - 1e-6) {
       task.doneAcres = task.totalAcres;
-      // Capture the tons harvested BEFORE completeTask (applyHarvestDone clears
-      // field.trueYieldTonsPerAcre once the crop comes off).
+      // Capture the tons harvested AND the crop BEFORE completeTask
+      // (applyHarvestDone clears both field.trueYieldTonsPerAcre and
+      // field.crop once the crop comes off).
+      const cropAtHarvest = field.crop;
       const harvestTons = task.type === "harvest" && effectiveYield !== undefined
         ? task.totalAcres * effectiveYield
         : undefined;
       completeTask(task, field, now, rand);
       recordCompletion(save, task, field, agent, now, harvestTons !== undefined ? { tons: harvestTons } : {});
+      // Field Finances tab (2026-07-21): modeled revenue at production time —
+      // tons x the flat config sell price. Under this game's static-price
+      // economy that's exactly what it'll sell for, whenever it's actually
+      // sold from the shared grain bin (which has no per-field trace).
+      if (harvestTons !== undefined && cropAtHarvest) {
+        // Revenue is booked at SALE time now (seasonal prices) — record this
+        // field's produce so its eventual sale credits back here.
+        addProduce(save, cropAtHarvest, field.id, harvestTons);
+        recordFieldCrop(save, field.id, cropAtHarvest);
+      }
       // A finished rake changes no field STATUS, and its windrows are already on
       // the surface (revealed strip-by-strip as it drove). Forcing a full repaint
       // here would wipe any mulch a concurrent baler has already revealed — so
@@ -2224,6 +2292,16 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
       // Perennial "harvest": the field is cut and left with forage to rake +
       // bale; the stand itself (crop/plantedAt) is untouched so it regrows.
       applyMowDone(field, now);
+      break;
+    case "mulch":
+      // Residue shredded + worked back in: the surface returns to bare stubble,
+      // and the field carries a +7% boost into its NEXT crop (residueMulched,
+      // consumed by that harvest — productivityMultiplier, farming.ts). Mulching
+      // is the alternative to baling, so any un-baled residue is now spent.
+      field.status = "stubble";
+      field.residueMulched = true;
+      field.forageReady = undefined;
+      field.windrowed = undefined;
       break;
     case "rake":
       // Windrowing has no separate field-status effect — the field.windrowed
@@ -2276,6 +2354,11 @@ function recordCompletion(
   now: SimTime,
   extra: { tons?: number; bales?: number } = {},
 ): void {
+  // Stamp the year's crop for the Finances tab. Covers perennial mow/bale
+  // years that never re-plant (field.crop stays set for grass/alfalfa); for
+  // an annual harvest field.crop is already cleared by completeTask, but the
+  // plant/harvest sites already stamped it.
+  if (field.crop) recordFieldCrop(save, field.id, field.crop);
   appendCompletedTask(save, {
     id: task.id,
     type: task.type,
@@ -2294,7 +2377,7 @@ function recordCompletion(
  * NOT here — they're independent side-tasks (brief request, 2026-07-11) and
  * must never block the lifecycle from advancing, including while stuck queued
  * for lack of a sprayer. */
-const LIFECYCLE_TASKS: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "mow", "rake", "bale"]);
+const LIFECYCLE_TASKS: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "mow", "mulch", "rake", "bale"]);
 
 /** The config's first crop — the fallback when an auto-managed field has no plans. */
 function defaultCrop(): CropId {
@@ -2314,6 +2397,16 @@ export function activePlan(field: Field, now: SimTime): FieldPlan {
   return plans[(dateOf(now).year - 1) % plans.length]!;
 }
 
+/** Field Schedule tab (2026-07-21): does the current month satisfy this
+ * task's schedule override, if any? Undefined = no override set = today's
+ * behavior (fire the moment the underlying gate opens). A set override
+ * narrows an otherwise-open gate down to firing only in that one chosen
+ * month — the gate itself (inWeedingWindow, canFertilizeNow, inPlowWindow,
+ * "ready") stays the real floor, checked separately at each call site. */
+function monthMatches(now: SimTime, override: number | undefined): boolean {
+  return override === undefined || dateOf(now).month === override;
+}
+
 /**
  * Idle-game auto-management (player-requested, brief §7-adjacent): drive the
  * field's lifecycle against its active rotation plan (`activePlan`) — plow →
@@ -2325,7 +2418,12 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
   const plan = activePlan(field, now);
 
   // Optional side-tasks first — independent of the lifecycle, once per crop.
-  if (plan.weed && !field.autoWeedDone && inWeedingWindow(field, now)) {
+  // A schedule override just narrows WHICH month within the open window
+  // counts as "on" — if the chosen month is missed (e.g. unaffordable that
+  // tick), the window itself is still open on later ticks, so this keeps
+  // retrying every tick same as the un-overridden case (soft-retry, per
+  // maintainer request — never worse than today's behavior).
+  if (plan.weed && !field.autoWeedDone && inWeedingWindow(field, now) && monthMatches(now, plan.schedule?.weed)) {
     try {
       enqueueTask(save, field, "weed", now);
       field.autoWeedDone = true;
@@ -2333,7 +2431,7 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       /* no sprayer / cash yet — retry next tick */
     }
   }
-  if (plan.fertilize && !field.autoFertDone && canFertilizeNow(field, now)) {
+  if (plan.fertilize && !field.autoFertDone && canFertilizeNow(field, now) && monthMatches(now, plan.schedule?.fertilize)) {
     try {
       enqueueTask(save, field, "fertilize", now);
       field.autoFertDone = true;
@@ -2353,14 +2451,14 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       // Ground needs plowing first, same as an annual crop (maintainer
       // request, 2026-07-16) — still waits for the winter plow window.
       if (canPlow(field.status)) {
-        if (inPlowWindow(now)) {
+        if (inPlowWindow(now) && monthMatches(now, plan.schedule?.plow)) {
           try {
             enqueueTask(save, field, "plow", now);
           } catch {
             /* unaffordable — retry next tick */
           }
         }
-      } else {
+      } else if (monthMatches(now, plan.schedule?.plant)) {
         // Tilled — establish the stand in its (March) planting window.
         try {
           enqueueTask(save, field, "plant", now, plan.crop);
@@ -2405,7 +2503,7 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
     case "mulched":
       // Auto-manage (unlike the manual Queue Plow button) still waits for
       // winter — enqueueTask itself no longer season-gates plowing.
-      if (inPlowWindow(now)) {
+      if (inPlowWindow(now) && monthMatches(now, plan.schedule?.plow)) {
         try {
           enqueueTask(save, field, "plow", now);
         } catch {
@@ -2428,7 +2526,25 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
         } catch {
           /* rake not queued yet / unaffordable — retry next tick */
         }
-      } else if (inPlowWindow(now)) {
+      } else if (
+        plan.mulch &&
+        !field.autoMulchDone &&
+        canMulch(save, field) &&
+        !inPlowWindow(now) &&
+        monthMatches(now, plan.schedule?.mulch)
+      ) {
+        // Optional residue pass (annuals we aren't baling): shred the residue
+        // back in the month(s) after harvest, before the winter plow window
+        // opens. `!inPlowWindow` means a late harvest that lands in plow season
+        // just skips straight to plowing. Completing it flips the field to
+        // stubble, so next tick falls through to the plow branch.
+        try {
+          enqueueTask(save, field, "mulch", now);
+          field.autoMulchDone = true;
+        } catch {
+          /* no mulcher / unaffordable — retry next tick */
+        }
+      } else if (inPlowWindow(now) && monthMatches(now, plan.schedule?.plow)) {
         // Plow under — discard any un-baled forage so the plow isn't gated on it
         // (the plan opted out of baling, or there's no gear for it). Still
         // waits for winter, same as the stubble/mulched case above.
@@ -2441,17 +2557,25 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       }
       break;
     case "tilled":
-      try {
-        enqueueTask(save, field, "plant", now, plan.crop);
-      } catch {
-        /* window closed or unaffordable — retry next tick */
+      if (monthMatches(now, plan.schedule?.plant)) {
+        try {
+          enqueueTask(save, field, "plant", now, plan.crop);
+        } catch {
+          /* window closed or unaffordable — retry next tick */
+        }
       }
       break;
     case "ready":
-      try {
-        enqueueTask(save, field, "harvest", now);
-      } catch {
-        /* a harvest task already exists or similar — wait */
+      // Harvest's override is DELAY-ONLY (a ready field never un-readies —
+      // no spoilage modeled — so waiting is always safe, and this keeps
+      // retrying every tick until the chosen month arrives, same pattern as
+      // everything else here).
+      if (monthMatches(now, plan.schedule?.harvest)) {
+        try {
+          enqueueTask(save, field, "harvest", now);
+        } catch {
+          /* a harvest task already exists or similar — wait */
+        }
       }
       break;
   }

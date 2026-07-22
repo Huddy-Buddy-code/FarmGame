@@ -4,7 +4,7 @@ import type { Meters } from "../src/geo/coords";
 import { newGame } from "../src/state/saveState";
 import type { Field, SaveState } from "../src/state/saveState";
 import { ensureAgents, enqueueTask, tickTasks, buyImplement } from "../src/sim/tasks";
-import { tickFarming, applyPlant, productivityMultiplier, growthProgress, deriveStatus } from "../src/sim/farming";
+import { tickFarming, applyPlant, applyHarvestDone, productivityMultiplier, growthProgress, deriveStatus } from "../src/sim/farming";
 import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
 import { areaAcres } from "../src/geo/geometry";
 import { minutesPerMonth, setDaysPerMonth } from "../src/sim/calendar";
@@ -112,6 +112,44 @@ describe("productivityMultiplier (maintainer request, 2026-07-16)", () => {
     field.cutsThisYear = 0;
     expect(productivityMultiplier(field, 0)).toBeCloseTo(1, 6);
   });
+
+  it("crop rotation adds +10% when the current crop differs from last year's", () => {
+    const field = freshField(boundary100, "growing");
+    field.crop = "soybeans";
+    field.lastCrop = "corn";
+    expect(productivityMultiplier(field, 0)).toBeCloseTo(1.1, 6);
+  });
+
+  it("no rotation bonus for replanting the same crop as last year", () => {
+    const field = freshField(boundary100, "growing");
+    field.crop = "corn";
+    field.lastCrop = "corn";
+    expect(productivityMultiplier(field, 0)).toBeCloseTo(1, 6);
+  });
+
+  it("no rotation bonus on a field's first-ever crop (no lastCrop recorded)", () => {
+    const field = freshField(boundary100, "growing");
+    field.crop = "corn";
+    expect(field.lastCrop).toBeUndefined();
+    expect(productivityMultiplier(field, 0)).toBeCloseTo(1, 6);
+  });
+
+  it("rotation bonus stacks with weeds and fertilizing", () => {
+    const field = freshField(boundary100, "growing");
+    field.crop = "soybeans";
+    field.lastCrop = "corn";
+    field.fertilized = true;
+    field.weedy = true;
+    expect(productivityMultiplier(field, 0)).toBeCloseTo(1.3, 6); // 100 - 10 + 30 + 10
+  });
+
+  it("applyHarvestDone records the outgoing crop as lastCrop", () => {
+    const field = freshField(boundary100, "growing");
+    field.crop = "corn";
+    applyHarvestDone(field);
+    expect(field.lastCrop).toBe("corn");
+    expect(field.crop).toBeUndefined();
+  });
 });
 
 describe("productivity affects real output (integration)", () => {
@@ -145,6 +183,36 @@ describe("productivity affects real output (integration)", () => {
 
     expect(plain.grain.corn).toBeCloseTo(100 * gameConfig.crops.corn.baseYieldTonsPerAcre, 0);
     expect(fert.grain.corn).toBeCloseTo(plain.grain.corn * 1.3, 0);
+  });
+
+  it("a rotated field (different crop than last year) harvests 10% more than a repeat-cropped one", () => {
+    const rotated = gameWithAgents();
+    giveHaulingGear(rotated);
+    const rotatedField = freshField(boundary100);
+    rotatedField.lastCrop = "soybeans";
+    rotated.fields.push(rotatedField);
+    applyPlant(rotatedField, "corn", APRIL_1, () => 0.5); // fixes trueYield == base exactly
+
+    const repeat = gameWithAgents();
+    giveHaulingGear(repeat);
+    const repeatField = freshField(boundary100);
+    repeatField.lastCrop = "corn";
+    repeat.fields.push(repeatField);
+    applyPlant(repeatField, "corn", APRIL_1, () => 0.5);
+
+    const ready = APRIL_1 + gameConfig.crops.corn.growMonths * minutesPerMonth();
+    tickFarming(rotated, ready);
+    enqueueTask(rotated, rotatedField, "harvest", ready);
+    tickFarming(repeat, ready);
+    enqueueTask(repeat, repeatField, "harvest", ready);
+
+    runUntil(repeat, ready, () => repeatField.status === "harvested");
+    runUntil(repeat, ready, () => repeat.grain.corn >= 100 * gameConfig.crops.corn.baseYieldTonsPerAcre - 0.5);
+    runUntil(rotated, ready, () => rotatedField.status === "harvested");
+    runUntil(rotated, ready, () => rotated.grain.corn >= 110 * gameConfig.crops.corn.baseYieldTonsPerAcre - 0.5);
+
+    expect(repeat.grain.corn).toBeCloseTo(100 * gameConfig.crops.corn.baseYieldTonsPerAcre, 0);
+    expect(rotated.grain.corn).toBeCloseTo(repeat.grain.corn * 1.1, 0);
   });
 
   it("weeds cost 10% of the harvest", () => {

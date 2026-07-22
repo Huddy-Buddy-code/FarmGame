@@ -257,6 +257,27 @@ export function mowerIconSvg(size = 22): string {
   `);
 }
 
+/** Mulcher (2026-07-21): a trailed flail mulcher — a wide hooded rotor housing
+ * with a row of hanging flail hammers underneath that shred crop residue back
+ * into the surface. Hitch bar at the rear (east), transport wheel below. */
+export function mulcherIconSvg(size = 22): string {
+  const flails: string[] = [];
+  for (let i = 0; i < 7; i++) {
+    const x = 6.5 + i * 2.6;
+    flails.push(`<line x1="${x.toFixed(1)}" y1="18.4" x2="${x.toFixed(1)}" y2="21.6" stroke="${STEEL_D}" stroke-width="1.1"/>` +
+      `<circle cx="${x.toFixed(1)}" cy="21.9" r="0.9" fill="${STEEL_D}"/>`);
+  }
+  return svg(size, `
+    <rect x="25.8" y="12.5" width="2.4" height="7" rx="0.6" fill="${STEEL_D}"/>
+    <path d="M26 16 h-3" stroke="${STEEL}" stroke-width="1.4"/>
+    <rect x="4" y="10.5" width="20" height="8" rx="1.6" fill="${RED}" stroke="${RED_D}" stroke-width="0.8"/>
+    <rect x="4" y="10.5" width="20" height="2.6" rx="1.2" fill="${RED_D}" opacity="0.55"/>
+    <rect x="5.5" y="17.3" width="17" height="1.8" rx="0.7" fill="${STEEL}" stroke="${STEEL_D}" stroke-width="0.5"/>
+    ${flails.join("")}
+    ${wheel(6, 21.5, 2.4)}
+  `);
+}
+
 /** Hay Spikes (2026-07-17): a rear 3-point frame carrying two forward
  * (west-pointing) spears that skewer a round bale — the in-field bale
  * collector. Shows one speared bale for readability. */
@@ -302,6 +323,7 @@ export const IMPLEMENT_ICON_SVG: Record<string, (size?: number) => string> = {
   bailer: balerIconSvg,
   grainTrailer: grainTrailerIconSvg,
   mower: mowerIconSvg,
+  mulcher: mulcherIconSvg,
   haySpikes: haySpikesIconSvg,
   baleTrailer: baleTrailerIconSvg,
 };

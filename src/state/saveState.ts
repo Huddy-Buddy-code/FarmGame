@@ -47,9 +47,27 @@ export interface FieldPlan {
   weed?: boolean;
   /** Fold a fertilizing pass in (once, the month after planting). */
   fertilize?: boolean;
+  /** Fold a mulching pass in (once, the month after harvest, before plowing).
+   * Annual crops whose residue wasn't baled only — shreds the residue back in
+   * and boosts the next crop's yield. Ignored on perennials / baled fields. */
+  mulch?: boolean;
   /** Rake + bale the residue after harvest (forage crops only) instead of plowing
    * it under. */
   bale?: boolean;
+  /** Field Schedule tab (maintainer request, 2026-07-21): player-chosen month
+   * (0-11) overriding when auto-manage queues this step, for tasks that have
+   * more than one legal month. plow/plant/weed/fertilize: a full override —
+   * can be moved to any of the task's real legal months. harvest: DELAY-ONLY
+   * — auto-manage still never harvests before growth completes; an override
+   * here just makes it wait for the chosen month instead of harvesting the
+   * instant it's ready. Undefined = today's behavior (earliest legal month /
+   * instant-on-ready). Mow/rake/bale have no entry here — see
+   * `sim/schedule.ts`'s `legalMonthsFor` doc comment for why. Only ever
+   * consulted by `autoManageField`; manual View-tab queue buttons are never
+   * restricted by it. Always re-validated against the live legal-month set
+   * before being honored, so a stale override from an edited crop can never
+   * silently misfire. */
+  schedule?: Partial<Record<"plow" | "plant" | "weed" | "fertilize" | "mulch" | "harvest", number>>;
 }
 
 export interface Field {
@@ -79,6 +97,9 @@ export interface Field {
    * crop (reset when a new crop is planted). */
   autoWeedDone?: boolean;
   autoFertDone?: boolean;
+  /** Per-cycle guard so an auto-managed mulching pass runs ONCE after harvest
+   * (reset when a new crop is planted). */
+  autoMulchDone?: boolean;
   /** What was actually paid for this land — refunded in full if it's sold back
    * (maintainer request: sell-back price = purchase price, not a market rate). */
   purchaseCost?: number;
@@ -130,6 +151,17 @@ export interface Field {
    * un-cut. */
   cutsThisYear?: number;
   cutYear?: number;
+  /** The crop this field grew immediately before its current one (set when the
+   * previous crop comes off at harvest — `applyHarvestDone`). Compared against
+   * `crop` for the rotation yield bonus (`productivityMultiplier`, farming.ts).
+   * Undefined on a field's first-ever crop — no bonus, nothing to rotate from. */
+  lastCrop?: CropId;
+  /** A mulching pass has shredded this field's residue back in — adds +7% to
+   * the NEXT crop's yield (`productivityMultiplier`, farming.ts). Set when the
+   * mulch task completes (after the current harvest); consumed/cleared by the
+   * next harvest (`applyHarvestDone`). Independent of the "mulched" FieldStatus,
+   * which means a clean baled surface — a name collision, not the same thing. */
+  residueMulched?: boolean;
 }
 
 /** On-farm grain bin, tons per crop. Unlimited in this slice; storage limits and
@@ -204,7 +236,7 @@ export interface Agent {
  * tractor is a power unit; an implement gives it a job it can do. */
 export interface Implement {
   id: string;
-  kind: "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower" | "haySpikes" | "baleTrailer";
+  kind: "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower" | "mulcher" | "haySpikes" | "baleTrailer";
   size: EquipmentSize;
   /** Id of the tractor this is hitched to, or undefined if parked in the yard. */
   attachedTo?: string;
@@ -227,7 +259,7 @@ export interface Implement {
  * gated by plow/plant/harvest, they just need a standing crop in the field.
  * `unloadHarvester` is system-generated (never player-queued) — a tractor+
  * Grain Trailer hauling a full combine's hopper to a silo. */
-export type TaskType = "plow" | "plant" | "harvest" | "mow" | "weed" | "fertilize" | "rake" | "bale" | "unloadHarvester" | "haulBales";
+export type TaskType = "plow" | "plant" | "harvest" | "mow" | "mulch" | "weed" | "fertilize" | "rake" | "bale" | "unloadHarvester" | "haulBales";
 
 export interface FarmTask {
   id: string;
@@ -374,6 +406,29 @@ export interface SaveState {
   /** Cashflow ledger: campaign year -> category -> item -> net dollars (see
    * `sim/ledger.ts`). Only the most recent 5 years are kept. */
   ledger?: Record<number, import("../sim/ledger").LedgerYear>;
+  /** Per-field cashflow, mirroring `ledger` but keyed by field id too — feeds
+   * the Field Finances tab's multi-year profit & loss table (maintainer
+   * request, 2026-07-21). Additive: every dollar booked here ALSO goes
+   * through the existing global `recordCash` call at the same site, so the
+   * whole-farm Finance tab is unaffected. Last 5 years per field, pruned in
+   * `sim/fieldLedger.ts`. */
+  fieldLedger?: Record<string, Record<number, import("../sim/fieldLedger").FieldLedgerYear>>;
+  /** Produce provenance (maintainer request, 2026-07-21): product -> fieldId ->
+   * amount produced-but-not-yet-sold (tons for grain, bales for bale products).
+   * Lets a pooled sale (grain bin / shared bale storage) credit its real
+   * revenue back to the source field(s) at sale time. Seeded from existing
+   * inventory on migration; "" keys are unattributed legacy stock. See
+   * `sim/market.ts`. */
+  produceStock?: Record<string, Record<string, number>>;
+  /** Auto-sell schedule (maintainer request, 2026-07-21): product -> chosen
+   * sell month (0-11) + whether auto-sell is on. When on, all stored inventory
+   * of that product is sold the moment the clock reaches that month
+   * (`tickAutoSell`, sim/economy.ts). */
+  sellSchedule?: Record<string, { month: number; auto: boolean }>;
+  /** Highest months-since-epoch already processed by `tickAutoSell` — the
+   * month-turn cursor (same idea as loan payments), so auto-sells fire once
+   * per crossed month and survive time-compression / skip-month. */
+  sellLastMonthAbs?: number;
   contracts: unknown[]; // shape defined when the contract slice lands (brief §6)
   /** Finished field-work tasks, newest last — feeds the Work Queue's
    * "Completed" section. Pruned to a bounded length in `sim/tasks.ts`. */

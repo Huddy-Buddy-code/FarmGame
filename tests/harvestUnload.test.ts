@@ -347,7 +347,7 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     expect(unloadTaskFor(save, combineOf(save).id)?.waitingForSilo).toBe(true);
     expect(save.grain.corn).toBe(200); // untouched while waiting
 
-    sellGrain(save, "corn", 200); // free up room
+    sellGrain(save, "corn", 200, 4 * minutesPerMonth()); // free up room
     runUntil(save, now, () => save.grain.corn > 0, 5000);
     expect(save.grain.corn).toBeGreaterThan(0);
     expect(unloadTaskFor(save, combineOf(save).id)).toBeUndefined(); // trip completed

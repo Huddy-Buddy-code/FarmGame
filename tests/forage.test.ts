@@ -134,13 +134,13 @@ describe("selling bales from the field", () => {
     const field: Field = { id: "f", parcelId: "p", boundary, status: "mulched", baleLocations: locs };
     save.fields.push(field);
     const before = save.money;
-    const { bales, revenue } = sellBales(save, field);
+    const { bales, revenue } = sellBales(save, field, 4 * minutesPerMonth());
     expect(bales).toBe(10);
     expect(revenue).toBe(10 * gameConfig.forage.balePricePerBale);
     expect(save.money).toBe(before + revenue);
     expect(field.baleLocations).toHaveLength(0);
     // Nothing to sell the second time.
-    expect(sellBales(save, field).bales).toBe(0);
+    expect(sellBales(save, field, 4 * minutesPerMonth()).bales).toBe(0);
   });
 });
 

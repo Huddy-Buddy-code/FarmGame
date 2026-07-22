@@ -30,7 +30,7 @@ describe("cashflow ledger (maintainer request, 2026-07-12)", () => {
     const silo = buyBuildingAt(save, "silo", [0, 0], "small");
     sellBuilding(save, silo.id);
     save.grain.corn = 100;
-    sellGrain(save, "corn", 50);
+    sellGrain(save, "corn", 50, 4 * minutesPerMonth());
 
     borrowOpen(save, 100_000);
     // Turn the year + let one monthly payment fall due.

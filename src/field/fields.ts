@@ -24,6 +24,7 @@ import { paintField, fieldEdgeColor } from "./fieldRender";
 import { growthProgress, isPerennialDormant } from "../sim/farming";
 import { releaseFieldTasks } from "../sim/tasks";
 import { recordCash } from "../sim/ledger";
+import { recordFieldCash } from "../sim/fieldLedger";
 import type { SimTime } from "../sim/clock";
 
 const seq: Record<string, number> = {};
@@ -70,6 +71,9 @@ export function buyFieldFromBoundary(
   save.fields.push(field);
   save.money -= cost;
   recordCash(save, "landEquipment", "Land", -cost);
+  // Field Finances tab (2026-07-21): the one-time land cost, in the purchase
+  // year, alongside the field's ongoing operating expenses/revenue.
+  recordFieldCash(save, field.id, "expenses", "Land Purchase", -cost);
 
   renderField(map, overlay, field, 0); // fresh stubble; growth time is irrelevant
   return { field, acres, cost };

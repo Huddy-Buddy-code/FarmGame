@@ -167,7 +167,7 @@ describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-0
     const grass = establish(g, "grass");
     grass.baleLocations = [[1, 1], [2, 2], [3, 3]];
     grass.baleProduct = "hay";
-    const grassSale = sellBales(g, grass);
+    const grassSale = sellBales(g, grass, 4 * minutesPerMonth());
     expect(grassSale.revenue).toBe(3 * gameConfig.baleProducts.hay.pricePerBale);
 
     // Alfalfa bales — same crop machinery, higher value + its own product.
@@ -176,7 +176,7 @@ describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-0
     expect(balesPerAcreForField(alfalfa)).toBe(gameConfig.baleProducts.alfalfaHay.balesPerAcre);
     alfalfa.baleLocations = [[1, 1], [2, 2], [3, 3]];
     alfalfa.baleProduct = "alfalfaHay";
-    const alfalfaSale = sellBales(a, alfalfa);
+    const alfalfaSale = sellBales(a, alfalfa, 4 * minutesPerMonth());
     expect(alfalfaSale.revenue).toBe(3 * gameConfig.baleProducts.alfalfaHay.pricePerBale);
     expect(gameConfig.baleProducts.alfalfaHay.pricePerBale).toBeGreaterThan(gameConfig.baleProducts.hay.pricePerBale);
   });

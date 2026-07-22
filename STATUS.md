@@ -1216,8 +1216,292 @@ thickness and corner turns.
   fall back to `defaultSwathM` (planter width for growing). Rake still passes
   its swath (windrows want it).
 
+## Latest changes (2026-07-21, Haul Bales queue row: pair each tractor with its own implement)
+
+- Bug: the Work Queue's Haul Bales card only ever rendered the collector
+  tractor's icon at the top, even though the subtitle text already named both
+  machines once the Bale Trailer auto-recruits (`task.trailerAgentId`) — the
+  second tractor was invisible despite visibly being at work.
+- First pass stacked both tractor icons at the card's top (`icon-dual`); maintainer
+  asked to instead pair each tractor with its OWN implement row, which reads
+  better than a separate icon block disconnected from the machine names. Final:
+  `implementRowHtml`'s haulBales branch and `implRowForBaleTrailer` (`main.ts`)
+  now prefix each implement's icon with `machineIconHtml(agent.kind, agent.size,
+  IMPLEMENT_QUEUE_ICON_PX)` — Hay Spikes row shows the Small tractor, Bale
+  Trailer row shows its own tractor. Card's top-level icon dropped entirely for
+  haulBales rows (redundant now). New `gap: 4px` on `.qr-impl .impl-icon`
+  (index.html) so the paired icons don't touch.
+- No logic changes, display-only. 239/239 passing, typecheck clean.
+- **UX needs eyes** (no Browser Preview): confirm the tractor+implement icon
+  pairs read clearly at the 280px panel width.
+
+## Latest changes (2026-07-21, crop-rotation yield bonus)
+
+- New mechanic (maintainer request): +10% yield when a field's current crop
+  differs from the one it grew immediately before; +0% for replanting the same
+  crop; no bonus on a field's first-ever crop (nothing to rotate away from).
+- `Field.lastCrop` (`state/saveState.ts`) — set in `applyHarvestDone`
+  (`sim/farming.ts`) right before `field.crop` is cleared, so it survives past
+  harvest for the next planting to compare against. `applyPlant` doesn't touch
+  it, so it stays stable as "last year's crop" for the whole new crop's cycle.
+- `productivityMultiplier` (`sim/farming.ts`) now adds
+  `gameConfig.rotationBonusPct` (0.1, new config field) whenever
+  `field.crop !== field.lastCrop` and both are defined — stacks with the
+  existing weed/fertilize modifiers, and flows automatically into every reader
+  (yieldRange estimate, actual harvest/bale tonnage, the map-hover boost badge)
+  since they all already read this one function.
+- 7 new tests in `tests/productivity.test.ts`: unit cases (rotated/same/first-
+  crop/stacking) plus `applyHarvestDone` sets `lastCrop`, plus an integration
+  test confirming a rotated corn field actually harvests 10% more tons than an
+  identical repeat-cropped one. 245/245 passing, typecheck clean.
+- Perennials: `lastCrop` only ever changes via `applyHarvestDone`, which
+  perennial mowing/baling never calls — so establishing a stand can earn the
+  bonus once (if it followed a different annual crop) but it then persists for
+  the stand's whole life rather than re-evaluating yearly. Not addressed;
+  out of scope for this request (framed around annual rotation).
+
+## Latest changes (2026-07-21, Field panel: 4 side tabs — View/Schedule/Finances/Settings)
+
+Big structural rework (maintainer request), built in 3 phases per the approved plan (`~/.claude/plans/linked-sprouting-pebble.md`):
+
+- **Phase 1 — tab-strip scaffold**: `#fieldpanel` split into a left vertical
+  icon strip (🌾 View / 📅 Schedule / 💵 Finances / ⚙️ Settings, `.fp-tabstrip`)
+  + a right content pane (`#fp-main`, `.fp-wide` toggled for Schedule/
+  Finances only — View/Settings stay narrow). New `fieldPanelTab` state +
+  `switchFieldPanelTab()` in `main.ts`; the old monolithic `refreshFieldPanel`
+  split into a thin dispatcher (`refreshFieldPanelHeader` + per-tab functions),
+  each with its OWN change-detection cache (mirroring `refreshPlanEditor`'s
+  existing `lastPlansKey` pattern) instead of one shared key. Auto-manage
+  toggle + the rotation-plan editor moved onto Schedule; access-points editor
+  moved onto Settings (`startAccessEdit`/`stopAccessEdit` needed zero logic
+  changes — driven by module state, not DOM location).
+- **Phase 2 — Field Finances tab**: new `src/sim/fieldLedger.ts`
+  (`recordFieldCash`/`fieldCategoryTotal`/`fieldNetCashflow`/
+  `fieldLedgerYears`), mirroring `sim/ledger.ts`'s shape but keyed by field id
+  too — additive, booked ALONGSIDE the existing global ledger calls, never
+  replacing them. New `save.fieldLedger` (optional, migrated `??= {}`).
+  Booking sites: land purchase (`field/fields.ts`, one-time "Land Purchase"
+  expense line, maintainer-confirmed to appear in the P&L per the purchase
+  year), `enqueueTask`/`cancelTask` (task cost + refund, `sim/tasks.ts`), and
+  harvest/bale completion (modeled REVENUE = tons/bales × the flat config
+  sell price — under this game's static-price economy that's not an
+  approximation, it's exactly what it'll sell for whenever actually sold,
+  which sidesteps grain/bales pooling farm-wide with no per-field trace once
+  physically moved). New `refreshFieldFinancesTab` reuses the global Finance
+  tab's `.cf-table` styling verbatim, with a new 2-category `.fp-cf-row`
+  modifier (Expenses/Revenue, vs. the global table's 4 categories). 8 new
+  tests (`tests/fieldLedger.test.ts`): field-separation (two fields, same
+  crop, correctly-separated totals — the core problem this exists to solve),
+  modeled-revenue exactness, 5-year-per-field pruning.
+- **Phase 3 — Field Schedule tab (calendar + drag-drop overrides)**: new
+  `FieldPlan.schedule?: Partial<Record<"plow"|"plant"|"weed"|"fertilize"|
+  "harvest", number>>` (optional, fully backward-compatible) and new
+  `src/sim/schedule.ts` (`legalMonthsFor`/`effectiveMonthFor`/
+  `setScheduleOverride`) computing which calendar months are legal per task —
+  Plow/Plant/Weed/Fertilize get a full override (any real legal month);
+  Harvest is DELAY-ONLY (can push later than the natural ready month, never
+  earlier — a ready crop never spoils in this game, so waiting is always
+  safe without breaking the yield mechanic). Mow (perennial)/Rake/Bale have
+  no override — perennial cutting is a fixed 3-times-a-year mechanic, and
+  rake/bale have never had a calendar gate at all (fire immediately after
+  harvest, whatever month that lands in). `autoManageField` (`sim/tasks.ts`)
+  now consults a new `monthMatches(now, plan.schedule?.X)` helper at every
+  relevant dispatch site — a missed scheduled month (e.g. unaffordable that
+  tick) keeps retrying every tick for the rest of the legal window, same as
+  today's un-overridden behavior (maintainer-confirmed soft-retry, never
+  worse than the status quo). Manual View-tab queue buttons are NOT
+  restricted by overrides (auto-manage-only, consistent with the existing
+  weed/fertilize/bale toggles). Calendar UI: 12-column grid (6 rows: Plow/
+  Plant/Weed/Fertilize/Harvest-or-Mow/Rake-Bale), drag-and-drop mirroring the
+  Work Queue's existing `draggingTaskId` pattern (separate `draggingScheduleCell`
+  state), click-to-set as a lower-friction alternative, a Yr-N-of-the-plan
+  year switcher (rotation-plan-relative, distinct from Finances' campaign-year
+  labels — two different "year" concepts in two different tabs). 15 new
+  tests (`tests/fieldSchedule.test.ts` — legal-month math including a
+  cross-check against the real `inWeedingWindow`/`canFertilizeNow` gates) + 6
+  new integration tests in `tests/plans.test.ts` (override skip/fire
+  behavior for plow/plant/harvest/weed, plus an explicit regression guard:
+  `schedule: undefined` behaves byte-identical to before).
+- 273/273 passing (was 245 at session start), typecheck clean throughout all
+  3 phases.
+- **UX needs eyes** (no Browser Preview — maintainer directive): the vertical
+  tab strip, the `.fp-wide` panel-width toggle, and especially the calendar's
+  drag-and-drop feel/legibility at the panel's width — none of this has been
+  visually verified, only logic-tested.
+
+### Follow-up (2026-07-21): Schedule calendar was "cryptic" — legibility pass
+
+- **Root-cause bug**: the calendar's container `#fp-schedule-grid` was styled
+  by class `.fp-cal-grid` (`display:grid`), but that class was never actually
+  put on the element — so `display:grid` never applied and every label/cell
+  div flowed as a jumbled stack of tiny inline-flex boxes instead of a
+  12-column table. Fixed by building a real inner `<div class="fp-cal-grid">`
+  (plus a legend) INTO the host container, rather than appending cells to the
+  unstyled host directly.
+- **Legibility overhaul** (`main.ts` `refreshScheduleCalendar` +
+  `renderScheduleTaskRow`/`renderScheduleAutoRow`, CSS in `index.html`):
+  every cell now has a faint background track so the grid reads AS a grid;
+  three clear cell states — gold-filled `.scheduled` (drag/click to move),
+  dashed `.legal` "available month", muted `.auto` (non-schedulable); a
+  toggled-off optional task (weed/fert/bale) shows one dim hollow `.off`
+  marker (click to re-enable) instead of cluttering the row. Added a legend
+  (Scheduled / Available / Automatic), per-row emoji icons (🚜🌱💦🌿🌾📦),
+  and switched the 12 columns to the game's Mar→Feb season order (matching the
+  Crop Calendar tab) so the lifecycle reads left-to-right — plant near the
+  left, harvest through fall, plow at the far right — instead of Jan-Dec
+  splitting the winter plow window across both edges.
+- When Auto-manage is OFF the tab now shows an explanatory hint (the schedule
+  only drives the auto-manager) instead of rendering blank.
+- No logic changes — pure UI. 273/273 still passing, typecheck clean.
+- **Still UX-needs-eyes** (no Browser Preview): confirm the grid now reads
+  clearly and the three cell states are visually distinct at the panel width.
+
+### Follow-up (2026-07-21): vertical calendar + polish batch
+
+Six maintainer-requested changes in one pass:
+
+- **Calendar rotated to VERTICAL** (`main.ts` `refreshScheduleCalendar` +
+  new `scheduleCell` helper, replacing the old per-row renderers): months run
+  DOWN the rows (Mar→Feb season order), tasks ACROSS the columns — much
+  narrower than the old 13-column horizontal grid. Each month label is
+  season-tinted with the year bar's exact pastel colors (`.fp-vmonth.spring/
+  summer/fall/winter`) and shows the season icon (🌱☀️🍂❄️) on that season's
+  first month. Task columns are dynamic (6 for annuals, 5 for perennials);
+  `grid-template-columns` set inline. Same 3-state cell language (scheduled/
+  legal/auto/off) + drag-drop, unchanged logic.
+- **"Reset to automatic timing" (Defaults) button** below the calendar —
+  clears `plan.schedule` (all month overrides) for the viewed year; disabled
+  when there are none.
+- **Plan-editor task toggles removed** (`refreshPlanEditor`): the weed/
+  fertilize/bale 💦🌿📦 buttons are gone — those toggle on the calendar now
+  (click a task's cell). Crop dropdown + rotation-year management stay.
+- **Field hover badge behind panels** (`index.html` `#field-badge` z-index
+  45→14): it now tucks behind the top/side/bottom panels instead of floating
+  over them, still above the map.
+- **Parked machines hidden** (`main.ts` `isAgentInStorage` + `updateAgentMarkers`):
+  a machine idle AND at a Tractor Barn / Farm Yard has its map marker (and its
+  nested implement glyph) hidden, to declutter the farmstead. Idle-in-a-field
+  or no-barn-built machines still show.
+- **Field Finances rows show the crop + icon** (`FieldLedgerYear.crop` in
+  `sim/fieldLedger.ts` + new `recordFieldCrop`, stamped at plant enqueue /
+  harvest / mow-bale completion in `sim/tasks.ts`; rendered as a small line
+  under the year in `refreshFieldFinancesTab`). Covers perennial mow years
+  that never re-plant (field.crop stays set).
+- **Uniform compact panel width**: all four tabs now share one 320px `.fp-main`
+  width (dropped the `.fp-wide` toggle) — the vertical calendar + 4-column
+  finance table both fit.
+- 2 new fieldLedger tests (recordFieldCrop unit + plant-task-stamps-crop).
+  275/275 passing, typecheck clean.
+- **UX-needs-eyes** (no Browser Preview): the vertical calendar's season
+  colors/icons + drag feel, the parked-machine hiding, and that all four tabs
+  look right at the shared 320px width.
+
+## Latest changes (2026-07-21, Seasonal prices + auto-scheduled sell task)
+
+Turned the flat economy into a timing game (approved plan
+`~/.claude/plans/linked-sprouting-pebble.md`), in 4 stages:
+
+- **Stage 1 — seasonal pricing** (`sim/market.ts` new, `gameConfig.market`):
+  a product's price = base × a seasonal multiplier anchored to its last-
+  possible-harvest month (config-derived, fixed annual pattern) — `+25%` four
+  months out, `+15%`/`+10%` at ±1/±2, base elsewhere (no discounts). Corn
+  peaks Jan, soybeans Feb; bale products (from Sep cuttings) peak Jan. All six
+  sale paths (`economy.ts` ×4, `tasks.ts` sell-point dumps ×2) now take `now`
+  and price at the current month; Inventory + field-panel labels show the live
+  price with a `+N%` badge (`priceBadge`).
+- **Stage 2 — sale-time field revenue** (decision: book at actual sale time &
+  price). Harvested grain / hauled bales pool with no field tag, so added
+  `save.produceStock` (product→fieldId→amount) via `addProduce` at harvest/bale
+  completion (REPLACING the old production-time revenue booking), consumed by
+  `attributeSale` at every sale — pooled sales split pro-rata across
+  contributing fields, a field's own loose-bale sale credits it directly. Field
+  Finances revenue now lands in the SALE year at the real price (disclaimer
+  updated). Migration seeds provenance from existing inventory (grain bin +
+  storage unattributed `""`, field loose bales per field).
+- **Stage 3 — auto-sell** (`save.sellSchedule` product→{month,auto} +
+  `sellLastMonthAbs` cursor; `tickAutoSell` in `economy.ts`, wired into
+  `tickWorld` after `tickLoans`). Mirrors the loan-payment elapsed-months loop
+  so it fires once per crossed month, survives time-compression/skip-month, and
+  never retro-fires on load. `sellAllOfProduct` sweeps grain bin + every bale
+  store + field loose bales, logging to the Completed feed.
+- **Stage 4 — Inventory "Auto-Sell Schedule" UI** (`buildSellScheduleSection`):
+  one row per sellable product with a live price + badge, an auto-sell toggle,
+  and a compact horizontal 12-month price strip (season order) shaded by premium
+  so the curve is visible; click / drag the 💰 marker to set the sell month.
+- Economy is now genuinely non-flat, so **STATUS's "Economy is placeholder"
+  gap below is partly addressed** — seasonal prices exist, though there are
+  still no buyers/capacity/local-demand.
+- Tests: new `tests/market.test.ts` (price math + `tickAutoSell` firing/
+  time-compression/retro-fire-guard); `tests/fieldLedger.test.ts` reworked to
+  sale-time booking + pro-rata attribution; ~8 existing sale-call sites updated
+  to pass a base-price `now`. 289/289 passing, typecheck clean.
+- **UX-needs-eyes** (no Browser Preview): the Inventory price-strip legibility +
+  drag feel + toggle, the price badges across Inventory/field panel, and an
+  auto-sell actually firing at the scheduled month in `npm run dev`.
+
+## Latest changes (2026-07-21, Mulch task — optional post-harvest residue pass)
+
+New optional task like fertilizing: shred annual crop residue back into the
+surface (returns the field to stubble) for a flat **+7%** on the NEXT crop's
+yield. Annuals only; only on residue that wasn't baled.
+
+- **New `mulcher` implement** (`gameConfig`): Small 15′/$20k, Medium 25′/$40k,
+  Large 35′/$75k — all three sold. `mulchCostPerAcre: 8`. Added to
+  `ImplementKind`/`Implement.kind`, `IMPLEMENT_CONFIG`, `IMPLEMENT_NAME`,
+  `IMPLEMENT_KIND_NAME`, shop line, and a new `mulcherIconSvg` (flail shredder)
+  in `icons.ts` + `IMPLEMENT_ICON_SVG`.
+- **New `mulch` TaskType** (tractor + mulcher): `$8/ac`, headland pattern
+  `{laps:3, order:"first"}` like the mower. `TASK_AGENT_KIND`/`TASK_IMPLEMENT`/
+  `FIELD_EXPENSE_ITEM`/`TASK_PAST_VERB`/`LIFECYCLE_TASKS`/`REVEALS_TEXTURE`
+  arms added. Completion → `status="stubble"`, `residueMulched=true`, clears
+  `forageReady`/`windrowed` (mulch is the alternative to baling).
+- **Yield**: `productivityMultiplier` adds a flat +0.07 when
+  `field.residueMulched` (additive, per maintainer); `applyHarvestDone` consumes
+  it (the boost lifts exactly the next harvest). `applyPlant` re-arms the
+  once-per-cycle `autoMulchDone` guard.
+- **Eligibility** (`canMulch`): `harvested` + annual (`!isPerennial(crop|lastCrop)`)
+  + not already mulched + no rake/bale queued. Enforced in `enqueueTask`,
+  `isStartable`, `effectiveStatus` (queued mulch → `stubble`).
+- **Auto-manage**: fires in the `harvested` case between baling and plowing —
+  `plan.mulch && !autoMulchDone && canMulch && !inPlowWindow && monthMatches`.
+  A late harvest that lands in plow season just skips straight to plowing.
+- **Schedule tab**: `legalMonthsFor("mulch")` = months after the natural
+  harvest up to Nov (before the Dec plow window); new Mulch column (🍂,
+  `toggleProp:"mulch"`, off by default) between Harvest and Rake/Bale; covered
+  by "Reset to automatic timing". **View tab**: 🍂 Queue Mulch button when
+  `canMulch`. `FieldPlan.mulch` + `schedule.mulch` added.
+- Tests: new `tests/mulch.test.ts` (14) — `canMulch` gates, +7% additive stack,
+  harvest-consumes-flag, `legalMonthsFor` window, cost, and two auto-manage
+  integration runs (fires when on / no-op when off). **303/303 passing,
+  typecheck clean.**
+- **UX-needs-eyes** (no Browser Preview): the mulcher shop icon, the 🍂 Mulch
+  column + toggle on the Schedule calendar, the Queue Mulch button, and the
+  in-field stubble reveal as the mulcher drives — check in `npm run dev`. Drop a
+  `Mulcher_<Size>_sideleft.png` into `src/assets/Equipment/` for photo art
+  (falls back to the SVG until then).
+
+## Latest changes (2026-07-21, seasonal price re-anchored to a fixed December peak)
+
+The seasonal curve was per-product (peaked 4 months after each product's last
+harvest — corn Jan, soy Feb). Maintainer request: **every product now peaks in
+December**, tapering the same way around it.
+
+- `gameConfig.market`: replaced `seasonalBonusByOffset` (offset-from-harvest)
+  with `peakMonth: 11` + `seasonalBonusByDistance: {0:0.25, 1:0.15, 2:0.1}`
+  (|months from Dec|). So **Dec +25%, Nov/Jan +15%, Oct/Feb +10%, else base.**
+- `market.ts`: dropped `lastHarvestMonth` / `BALE_SOURCE_CROP` / `isGrain`;
+  `seasonalMultiplier` now keys off distance-from-`peakMonth` (product-independent
+  — `_product` kept in the signature for a possible future per-product curve).
+  New `peakSaleMonth()` (= config `peakMonth`) replaces `peakSellMonth`; the
+  auto-sell default month + the Inventory price strips now center on December.
+- Tests: `market.test.ts` rewritten for the Dec peak + "identical across
+  products"; `fieldLedger.test.ts` sale-at-peak moved Jan→Dec. **302/302,
+  typecheck clean.**
+
 ## Known gaps / unverified
 
+- **Field panel Schedule calendar drag-and-drop is logic-tested only** — no
+  visual/interactive verification (no Browser Preview in this project).
 - **Economy is placeholder** — flat sell price. No buyers, capacity, or hauling yet.
 - Rotation planner unplayed in real sessions (unit-tested only).
 - Drag-reorder in Work Queue unmanually verified.

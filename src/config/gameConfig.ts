@@ -118,6 +118,10 @@ export interface GameConfig {
   weedCostPerAcre: number;
   /** Cost to mow (cut) a perennial forage field, per acre (2026-07-13). */
   mowCostPerAcre: number;
+  /** Cost to mulch (shred + incorporate crop residue) an annual field, per
+   * acre (2026-07-21). Optional post-harvest pass — see the mulcher implement
+   * and the `mulch` task (sim/tasks.ts). */
+  mulchCostPerAcre: number;
 
   /** Fieldwork pacing (brief §9–§10). PHYSICAL model (design decision 2026-07-10):
    * a machine drives a back-and-forth coverage path at `fieldSpeedKmh`, so a
@@ -164,6 +168,11 @@ export interface GameConfig {
      * alfalfa) — the "harvest" for those crops, in place of the combine. Leaves
      * cut material to rake + bale. Sold Small (10 ft) & Medium (20 ft). */
     mower: Record<EquipmentSize, { price: number; widthFt: number }>;
+    /** Mulcher implement (2026-07-21): a flail/stalk shredder that chops annual
+     * crop residue and works it back into the surface — an OPTIONAL post-harvest
+     * pass that returns the field to stubble and boosts the next crop's yield.
+     * Sold in three real sizes: Small 15 ft, Medium 25 ft, Large 35 ft. */
+    mulcher: Record<EquipmentSize, { price: number; widthFt: number }>;
     /** The combine is self-contained (integral grain header) but now SIZED
      * like a tractor (maintainer request, 2026-07-12): each tier has its own
      * hopper capacity — the combine fills as it cuts, stops when full, and
@@ -250,6 +259,25 @@ export interface GameConfig {
   /** How much the visible yield range has narrowed by harvest-ready (0..1).
    * 0.85 = the band is 15% of its planting width when the crop is ready. */
   yieldRangeNarrowing: number;
+
+  /** Crop-rotation yield bonus (0..1) applied when a field's current crop
+   * differs from the one it grew the year before — 0.1 = +10%. No bonus for
+   * planting the same crop again, and none on a field's first-ever crop
+   * (nothing to rotate away from yet). See `productivityMultiplier`. */
+  rotationBonusPct: number;
+
+  /** Seasonal sell-price curve (maintainer request, 2026-07-21; re-anchored to
+   * a fixed peak month 2026-07-21). A product's price = its base price ×
+   * (1 + bonus), where bonus is keyed by how many months the CURRENT month is
+   * from `peakMonth` (wrapping either way — see `sim/market.ts`). The SAME curve
+   * applies to every product. Base price is the floor (no discounts); any
+   * distance not listed = +0%. */
+  market: {
+    /** The single top-of-market month (0-11), shared by all products. */
+    peakMonth: number;
+    /** Bonus fraction on base price by |months from `peakMonth`| (0, 1, 2, …). */
+    seasonalBonusByDistance: Record<number, number>;
+  };
 
   /** Loans (brief §8, "loan interest, the difficulty dial"). v1 is simple: one
    * fixed-rate, fixed-term amortized loan per campaign YEAR the player
@@ -372,6 +400,7 @@ export const gameConfig: GameConfig = {
   plowMonths: [11, 0, 1], // Dec–Feb (winter only)
   weedCostPerAcre: 15,
   mowCostPerAcre: 12,
+  mulchCostPerAcre: 8,
   work: {
     // Slower than road travel: a working pass is deliberate. Tuned so a medium
     // (10 ft) plow on a ~30-acre field takes a few sim-hours — in the ballpark
@@ -419,6 +448,12 @@ export const gameConfig: GameConfig = {
       small: { price: 45_000, widthFt: 10 },
       medium: { price: 85_000, widthFt: 20 },
       large: { price: 85_000, widthFt: 20 },
+    },
+    // Mulcher — three real sizes, all sold (maintainer pricing, 2026-07-21).
+    mulcher: {
+      small: { price: 20_000, widthFt: 15 },
+      medium: { price: 40_000, widthFt: 25 },
+      large: { price: 75_000, widthFt: 35 },
     },
     harvester: {
       small: { price: 350_000, widthFt: 20, capacityTons: 30 },
@@ -488,6 +523,13 @@ export const gameConfig: GameConfig = {
     sellPoint: { price: 10_000 },
   },
   yieldRangeNarrowing: 0.85,
+  rotationBonusPct: 0.1,
+  market: {
+    // Every product tops out in December, tapering to base ±2 months away:
+    // Dec +25%, Nov/Jan +15%, Oct/Feb +10%, everything else base.
+    peakMonth: 11, // December
+    seasonalBonusByDistance: { 0: 0.25, 1: 0.15, 2: 0.1 },
+  },
   loan: {
     ratePercent: 5,
     termMonths: 180, // 15 years

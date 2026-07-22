@@ -168,10 +168,30 @@
       }
 
       /* ---------- Field panel ---------- */
-      #fieldpanel {
+      /* Vertical side-tab layout (maintainer request, 2026-07-21): a left icon
+         column (View/Schedule/Finances/Settings) + the active tab's content on
+         the right, inside one floating panel. display is toggled "flex"/"none"
+         from JS (openFieldPanel/closeFieldPanel), so `display: none` here is
+         just the closed-state default — the row layout below only applies once
+         JS sets it to "flex". */
+      #fieldpanel.fp-layout {
         position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
-        z-index: 25; width: 250px; padding: 14px 16px; display: none;
+        z-index: 25; padding: 0; display: none; flex-direction: row; align-items: stretch;
+        max-height: calc(100vh - 60px); box-sizing: border-box;
       }
+      .fp-tabstrip {
+        display: flex; flex-direction: column; gap: 4px;
+        padding: 14px 6px; border-right: 1.5px solid var(--cream-2); flex-shrink: 0;
+      }
+      .fp-tab { font-size: 18px; line-height: 1; padding: 8px 6px; border-radius: 8px; opacity: 0.55; }
+      .fp-tab.active { opacity: 1; background: var(--green); border-color: var(--green-dark); }
+      /* One uniform, compact width for ALL four tabs (maintainer request,
+         2026-07-21) — the vertical calendar + the 4-column finance table both
+         fit here, so no per-tab width toggle. */
+      .fp-main {
+        padding: 14px 16px; overflow-y: auto; width: 320px; box-sizing: border-box;
+      }
+      .fp-tabpanel { min-width: 0; }
 
       /* ---------- New-field draw panel (shown only while placing corners) ---------- */
       #drawfieldpanel {
@@ -192,8 +212,11 @@
       .fp-rename-btn:hover { opacity: 1; }
 
       /* ---------- Field hover badge (maintainer request, 2026-07-16) ---------- */
+      /* z-index below every panel (queuepanel is the lowest at z:18) so the
+         badge tucks BEHIND the top/side/bottom panels instead of floating over
+         them (maintainer request, 2026-07-21) — still above the map. */
       #field-badge {
-        position: fixed; z-index: 45; display: none; pointer-events: none;
+        position: fixed; z-index: 14; display: none; pointer-events: none;
         transform: translate(-50%, -50%); /* pinned to the field's centroid */
         align-items: center; gap: 7px; padding: 5px 10px 5px 5px;
         border-radius: 999px; box-shadow: 0 2px 8px rgba(60, 40, 15, 0.4);
@@ -226,6 +249,20 @@
       .small { font-size: 12px; color: #8a7658; }
       .progress { height: 10px; background: var(--cream-2); border: 1.5px solid var(--wood); border-radius: 999px; overflow: hidden; margin: 6px 0; }
       .progress .fill { height: 100%; background: var(--gold); width: 0%; transition: width 0.3s; }
+      /* Yield breakdown waterfall (Field View tab, maintainer request,
+         2026-07-21): Base bar, one small delta bar per active modifier, Final
+         bar — see yieldWaterfallHtml in main.ts. Bars sit on a shared
+         baseline so the deltas read as "added/removed from Base". */
+      .yield-waterfall { display: flex; align-items: flex-end; gap: 6px; height: 84px; margin: 6px 0 2px; border-bottom: 2px solid var(--cream-2); padding-bottom: 2px; }
+      .yw-step { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 3px; flex: 1; min-width: 0; }
+      .yw-val { font-size: 10px; color: var(--wood-dark); white-space: nowrap; }
+      .yw-bar { width: 100%; border-radius: 4px 4px 0 0; }
+      .yw-bar.base { background: var(--cream-2); border: 1.5px solid var(--wood); }
+      .yw-bar.bonus { background: var(--green); }
+      .yw-bar.penalty { background: var(--red); }
+      .yw-bar.final { background: var(--gold); }
+      .yw-name { font-size: 10px; color: var(--wood-dark); text-align: center; white-space: nowrap; }
+      .yw-name.bold { font-weight: 700; }
       #fp-actions { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
       #fp-msg { font-size: 12px; color: var(--red); min-height: 15px; margin-top: 4px; }
       #fp-msg:empty { min-height: 0; margin-top: 0; }
@@ -288,6 +325,77 @@
       }
       .plan-add:disabled { opacity: 0.4; cursor: default; }
 
+      /* ---------- Field Schedule calendar (maintainer request, 2026-07-21) ---------- */
+      .fp-sched-yearbar {
+        display: flex; align-items: center; justify-content: center; gap: 10px;
+        margin: 10px 0 4px;
+      }
+      .fp-sched-yearbar button { padding: 2px 10px; font-size: 14px; }
+      .fp-sched-yearbar button:disabled { opacity: 0.3; cursor: default; }
+      .fp-sched-yearbar span { font-size: 13px; font-weight: 700; min-width: 46px; text-align: center; }
+
+      /* Shown when Auto-manage is off (the schedule only drives auto-manage). */
+      .fp-sched-hint { font-size: 12px; color: #8a7658; margin: 10px 2px; line-height: 1.45; }
+
+      .fp-cal-legend {
+        display: flex; flex-wrap: wrap; gap: 3px 12px; font-size: 11px;
+        color: #8a7658; margin: 4px 2px 8px;
+      }
+      .fp-cal-legend span { display: inline-flex; align-items: center; gap: 4px; }
+      .fp-cal-legend i { width: 16px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+      .fp-cal-legend i.lg-sched { background: var(--gold); border: 1.5px solid var(--wood-dark); box-sizing: border-box; }
+      .fp-cal-legend i.lg-legal { background: var(--cream-2); border: 1.5px dashed var(--wood); box-sizing: border-box; }
+      .fp-cal-legend i.lg-auto { background: var(--wood); opacity: 0.4; }
+
+      /* Vertical layout (maintainer request, 2026-07-21): months down the rows
+         (season-tinted), tasks across the columns — narrower than the old
+         horizontal 13-column grid. grid-template-columns is set inline from JS
+         (task count varies: 6 for annuals, 5 for perennials). */
+      .fp-vcal-grid { display: grid; gap: 2px; align-items: stretch; }
+      .fp-vcal-grid .fp-vcal-corner { /* blank top-left cell */ }
+      .fp-vcal-grid .fp-vcal-head {
+        font-size: 14px; text-align: center; align-self: end; padding-bottom: 3px;
+        cursor: help; line-height: 1;
+      }
+      /* Season-tinted month label, colors + icons matching the year bar. */
+      .fp-vmonth {
+        font-size: 10px; font-weight: 700; color: var(--wood-dark);
+        display: flex; align-items: center; gap: 2px; padding: 0 4px;
+        border-radius: 4px; min-height: 20px; white-space: nowrap; overflow: hidden;
+      }
+      .fp-vmonth .fp-vmonth-ico { width: 14px; text-align: center; flex-shrink: 0; }
+      .fp-vmonth.spring { background: #a8d178; }
+      .fp-vmonth.summer { background: #f5c95d; }
+      .fp-vmonth.fall   { background: #d98e4a; }
+      .fp-vmonth.winter { background: #bcd8e8; }
+      /* Every cell gets a faint track so the grid reads as a grid (a task's own
+         months then stand out against it). */
+      .fp-cal-cell {
+        min-height: 20px; border-radius: 4px; border: 1.5px solid transparent; box-sizing: border-box;
+        background: rgba(138, 90, 51, 0.07);
+        display: flex; align-items: center; justify-content: center;
+        font-size: 10px; color: transparent;
+      }
+      .fp-cal-cell.legal { background: var(--cream-2); border: 1.5px dashed var(--wood); cursor: pointer; }
+      .fp-cal-cell.legal:hover { background: #e8d4a8; }
+      .fp-cal-cell.scheduled {
+        background: var(--gold); border: 1.5px solid var(--wood-dark); cursor: grab;
+        color: var(--wood-dark); font-weight: 700;
+      }
+      .fp-cal-cell.scheduled:active { cursor: grabbing; }
+      .fp-cal-cell.auto { background: var(--wood); border-color: var(--wood-dark); opacity: 0.4; color: #fff; }
+      .fp-cal-cell.off { background: transparent; border: 1.5px dashed var(--wood); opacity: 0.5; color: var(--wood); cursor: pointer; }
+      .fp-cal-cell.drag-over { border: 1.5px solid var(--green-dark); background: var(--green); color: #fff; }
+
+      .fp-sched-defaults {
+        width: 100%; font-size: 11px; padding: 5px; margin-top: 8px; cursor: pointer;
+        border: 1.5px dashed var(--wood); border-radius: 6px; background: var(--cream);
+        color: var(--wood); font-family: inherit;
+      }
+      .fp-sched-defaults:disabled { opacity: 0.4; cursor: default; }
+      #fp-schedule-msg { font-size: 12px; color: var(--red); min-height: 15px; margin-top: 8px; }
+      #fp-schedule-msg:empty { min-height: 0; margin-top: 0; }
+
       /* ---------- Crop calendar ---------- */
       #cropcal h2 { margin: 0 0 2px; font-size: 18px; }
       #cropcal .legend { font-size: 12px; color: #8a7658; margin-bottom: 10px; display: flex; gap: 14px; }
@@ -326,6 +434,12 @@
       .inv-row .name { font-weight: 700; }
       .inv-row .qty { font-size: 12px; color: #8a7658; }
       .inv-row .price { font-size: 12px; color: #8a7658; text-align: right; margin-right: 4px; }
+      /* Seasonal price premium badge (2026-07-21). */
+      .price-badge {
+        display: inline-block; font-size: 10px; font-weight: 700; color: #fff;
+        background: var(--green-dark); border-radius: 999px; padding: 0 5px; margin-left: 2px;
+        vertical-align: middle;
+      }
       .inv-row .icon svg { display: block; }
       .inv-row button:disabled { opacity: 0.45; cursor: default; }
       .inv-heading {
@@ -345,6 +459,32 @@
         background: none; border: none; margin: -6px 0 10px; padding: 0 4px;
       }
       .inv-sell-row .price { flex: 1; text-align: left; margin-right: 0; }
+
+      /* ---------- Auto-sell schedule: per-product price strip (2026-07-21) ---------- */
+      .sell-cal { margin: 4px 2px 12px; }
+      .sell-cal-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+      .sell-cal-head .sc-icon { display: inline-flex; align-items: center; font-size: 16px; }
+      .sell-cal-head .name { font-weight: 700; font-size: 13px; }
+      .sell-cal-head .price { flex: 1; font-size: 11px; color: #8a7658; }
+      .sell-cal-head .sc-switch { flex-shrink: 0; }
+      .sell-cal-strip { display: grid; grid-template-columns: repeat(12, 1fr); gap: 2px; }
+      .sell-cal-cell {
+        position: relative; border-radius: 4px; border: 1.5px solid transparent; cursor: pointer;
+        min-height: 30px; display: flex; flex-direction: column; align-items: center;
+        justify-content: center; gap: 1px; padding: 2px 0; line-height: 1.1;
+      }
+      .sell-cal-cell .mo { font-size: 8px; font-weight: 700; color: var(--wood-dark); white-space: nowrap; }
+      .sell-cal-cell .pct { font-size: 8.5px; font-weight: 700; color: var(--wood-dark); }
+      .sell-cal-cell .mk { position: absolute; top: -7px; right: -3px; font-size: 11px; }
+      /* Shaded by seasonal premium so the price curve is visible at a glance. */
+      .sell-cal-cell.p0 { background: rgba(138, 90, 51, 0.08); }
+      .sell-cal-cell.p0 .pct { color: #a89678; }
+      .sell-cal-cell.p10 { background: #ecdcae; }
+      .sell-cal-cell.p15 { background: #f0c874; }
+      .sell-cal-cell.p25 { background: var(--gold); }
+      .sell-cal-cell.scheduled { border-color: var(--green-dark); box-shadow: 0 0 0 1.5px var(--green-dark) inset; cursor: grab; }
+      .sell-cal-cell.scheduled:active { cursor: grabbing; }
+      .sell-cal-cell.drag-over { border-color: var(--green-dark); background: var(--green); }
 
       /* Silo capacity bar — sits under each crop's inv-row, fills left→right. */
       .silo-bar { margin: -2px 0 10px; }
@@ -416,14 +556,27 @@
       .cf-cell.pos, .cf-tip-row .pos { color: var(--green-dark); }
       .cf-net { font-weight: 700; }
       .cf-tip {
+        /* Global finance tab: absolute, anchored up-and-left of the cell (its
+           panel has room). The FIELD-panel finances use a body-portaled clone
+           of this (#fp-cf-tip-float, position:fixed in JS) so it escapes the
+           panel's overflow clip + transform — see refreshFieldFinancesTab. */
         display: none; position: absolute; right: 0; bottom: calc(100% + 4px);
         z-index: 60; min-width: 190px; padding: 8px 10px; text-align: left;
         background: var(--cream); border: 2px solid var(--wood); border-radius: 10px;
         box-shadow: var(--shadow); font-size: 11px; color: var(--ink);
       }
       .cf-cell:hover .cf-tip { display: block; }
+      /* The portaled field-panel tip lives in <body>, so the :hover rule above
+         can't reach it — JS toggles its display. Keep it above every panel. */
+      #fp-cf-tip-float { z-index: 200; }
       .cf-tip-title { font-weight: 700; margin-bottom: 4px; color: #8a7658; }
       .cf-tip-row { display: flex; justify-content: space-between; gap: 12px; padding: 1px 0; }
+
+      /* Field Finances tab (2026-07-21): same .cf-table look as the global
+         Finance tab, but only 2 categories (Expenses/Revenue) instead of 4 —
+         narrower grid than the global .cf-row's hardcoded 5-column layout. */
+      .fp-cf-row { grid-template-columns: 58px repeat(2, 1fr) 1fr; }
+      .fp-cf-row .cf-crop { font-size: 10px; font-weight: 600; color: #8a7658; white-space: nowrap; line-height: 1.2; margin-top: 1px; }
 
       /* ---------- Settings tab (multi-farm create/load/delete) ---------- */
       #settingstab h2 { margin: 0 0 2px; font-size: 18px; }
@@ -662,7 +815,7 @@
         padding-top: 4px; border-top: 1.5px dashed var(--cream-2);
       }
       .qr-impl .impl-icon {
-        display: inline-flex; align-items: center; flex-shrink: 0; line-height: 1;
+        display: inline-flex; align-items: center; flex-shrink: 0; line-height: 1; gap: 4px;
       }
       .qr-impl .impl-body { flex: 1; min-width: 0; }
       .qr-impl .impl-name { font-size: 12px; font-weight: 700; color: var(--ink); line-height: 1.2; }
@@ -683,24 +836,55 @@
       }
       .impl-total { flex-shrink: 0; font-size: 11px; font-weight: 700; color: #8a7658; }
 
-      /* Agent dots on the map (brief §9 "GPS dots", emoji edition). */
-      .agent-dot {
-        font-size: 20px; line-height: 1; cursor: default;
-        background: var(--cream); border: 2px solid var(--wood);
-        border-radius: 999px; padding: 3px 4px; box-shadow: var(--shadow);
+      /* Agent dots on the map (brief §9 "GPS dots", emoji edition). Root is a
+         plain positioning box ONLY — MapLibre writes `transform` on it to place
+         the marker, so no visual styling (background/border/etc.) can live here
+         or it'll be static while the rotating content below swings around inside
+         it and pokes out. */
+      .agent-dot { font-size: 20px; line-height: 1; cursor: default; }
+      /* Bounce lives on this child — never the root (see above). */
+      .agent-dot .agent-bob { display: inline-flex; align-items: center; }
+      /* The pill (background/border/shadow/padding) lives HERE, on the element
+         that also gets the heading ROTATE transform, so the pill rotates as one
+         rigid piece WITH its content — including a hitched implement nested
+         inside it below — and always hugs it exactly, at any angle. (Previously
+         the pill lived on the static root while only this content rotated, so
+         turning swung the implement clean outside the background.)
+         It does NOT get the mirror (scaleX) — a rounded pill inverting would be
+         a visible flip of its own border/shadow every time a machine turns
+         around, which looks wrong for a background shape. Only the art inside
+         (.agent-icons) actually faces one way and needs to flip. */
+      .agent-dot .agent-glyph {
+        display: inline-flex; align-items: center; transition: transform 0.12s linear;
+        /* PILL HIDDEN — quick visual trial (2026-07-21). Restore the four lines
+           below to bring the badge back. */
+        /* background: var(--cream); border: 2px solid var(--wood);
+        border-radius: 999px; padding: 3px 4px; box-shadow: var(--shadow); */
       }
-      /* Bounce + heading rotation live on CHILDREN — never the root, whose
-         transform MapLibre owns for positioning (touching it hides the marker). */
-      .agent-dot .agent-bob { display: inline-flex; }
-      .agent-dot .agent-glyph { display: inline-flex; transition: transform 0.12s linear; }
+      /* Mirror-only wrapper for the art (tractor + implement), nested inside the
+         rotate-only pill above. */
+      .agent-dot .agent-icons { display: inline-flex; align-items: center; transition: transform 0.12s linear; }
+      /* Flex items respect z-index without needing position:relative — stack
+         the tractor above the implement at their overlap so it reads as the
+         implement riding behind the tractor, not on top of it (maintainer
+         request, 2026-07-21). */
+      .agent-dot .agent-machine { z-index: 1; }
+      /* A hitched implement nests inside .agent-icons so it turns fully with the
+         tractor (and the pill around both of them) — a trailed implement really
+         does swing wide through a turn, that's correct. Overlap it toward the
+         tractor for a hitched look, and sit it a little lower/bigger than the
+         tractor (maintainer request, 2026-07-21) — flex centering was reading
+         as floating level with the tractor's cab instead of riding behind it. */
+      .agent-dot .agent-implement { display: inline-flex; align-items: center; margin-left: -10px; transform: translateY(6px); z-index: 0; }
+      .agent-dot .agent-implement:empty { display: none; }
       /* Photographic machine sprites (machineImages.ts) drop in where a matching
          PNG exists; sized square like the SVGs they replace, never distorted. */
       .machine-img { display: block; object-fit: contain; }
-      .agent-dot.working { border-color: var(--green-dark); }
+      .agent-dot.working .agent-glyph { border-color: var(--green-dark); }
       .agent-dot.working .agent-bob { animation: chug 0.9s infinite; }
       /* ⚠️ a tractor/harvester stuck on a silo with no room (maintainer
          request, 2026-07-12) — red ring, no bounce (they're stopped). */
-      .agent-dot.warn { border-color: var(--red); box-shadow: 0 0 0 2px rgba(199, 81, 70, 0.35), var(--shadow); }
+      .agent-dot.warn .agent-glyph { border-color: var(--red); box-shadow: 0 0 0 2px rgba(199, 81, 70, 0.35), var(--shadow); }
       /* Field access gates — visible ONLY in the field panel's edit mode. */
       .access-dot {
         font-size: 18px; line-height: 1; cursor: grab;
@@ -904,24 +1088,49 @@
       <button id="df-cancel" style="width: 100%; margin-top: 6px;">✕ Cancel</button>
     </div>
 
-    <div id="fieldpanel" class="panel">
+    <div id="fieldpanel" class="panel fp-layout">
       <button class="close" id="fp-close">✕</button>
-      <h2><span id="fp-title">Field</span><button id="fp-rename" class="fp-rename-btn" title="Rename field">✏️</button></h2>
-      <div class="sub" id="fp-sub">— acres</div>
-      <div><span class="badge" id="fp-status">stubble</span></div>
-      <div id="fp-body"></div>
-      <div class="auto-row">
-        <span class="label">🤖 Auto-manage</span>
-        <label class="switch">
-          <input type="checkbox" id="fp-auto" />
-          <span class="slider"></span>
-        </label>
+      <div class="fp-tabstrip">
+        <button class="fp-tab active" id="fp-tab-view" data-tab="view" title="Field View">🌾</button>
+        <button class="fp-tab" id="fp-tab-schedule" data-tab="schedule" title="Field Schedule">📅</button>
+        <button class="fp-tab" id="fp-tab-finances" data-tab="finances" title="Field Finances">💵</button>
+        <button class="fp-tab" id="fp-tab-settings" data-tab="settings" title="Field Settings">⚙️</button>
       </div>
-      <div id="fp-plans"></div>
-      <div id="fp-actions"></div>
-      <div id="fp-msg"></div>
-      <div class="sell-row">
-        <button id="fp-sell" style="width: 100%">💰 Sell Field</button>
+      <div id="fp-main" class="fp-main">
+        <h2><span id="fp-title">Field</span><button id="fp-rename" class="fp-rename-btn" title="Rename field">✏️</button></h2>
+        <div class="sub" id="fp-sub">— acres</div>
+        <div><span class="badge" id="fp-status">stubble</span></div>
+
+        <div id="fp-view-tab" class="fp-tabpanel">
+          <div id="fp-body"></div>
+          <div id="fp-actions"></div>
+          <div id="fp-msg"></div>
+          <div class="sell-row">
+            <button id="fp-sell" style="width: 100%">💰 Sell Field</button>
+          </div>
+        </div>
+
+        <div id="fp-schedule-tab" class="fp-tabpanel" style="display: none">
+          <div class="auto-row">
+            <span class="label">🤖 Auto-manage</span>
+            <label class="switch">
+              <input type="checkbox" id="fp-auto" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div id="fp-plans"></div>
+          <div id="fp-schedule-year"></div>
+          <div id="fp-schedule-grid"></div>
+          <div id="fp-schedule-msg"></div>
+        </div>
+
+        <div id="fp-finances-tab" class="fp-tabpanel" style="display: none">
+          <div id="fp-finances-body"></div>
+        </div>
+
+        <div id="fp-settings-tab" class="fp-tabpanel" style="display: none">
+          <div id="fp-settings-body"></div>
+        </div>
       </div>
     </div>
 

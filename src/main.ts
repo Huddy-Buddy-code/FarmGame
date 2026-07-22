@@ -40,7 +40,12 @@ import {
   switchFarm, deleteFarm, getActiveFarmId, loadGameFor,
 } from "./state/persistence";
 import type { PersistedGame } from "./state/persistence";
-import { sellGrain, sellBales, netWorth, baleInventory, sellBalesOfProduct, sellStoredBalesFrom } from "./sim/economy";
+import { sellGrain, sellBales, netWorth, baleInventory, sellBalesOfProduct, sellStoredBalesFrom, tickAutoSell } from "./sim/economy";
+import {
+  grainUnitPrice, baleUnitPrice, seasonalBonus, monthOf, peakSaleMonth,
+  SELLABLE_GRAINS, SELLABLE_BALES,
+} from "./sim/market";
+import type { MarketProduct } from "./sim/market";
 import { SimClock } from "./sim/clock";
 import {
   formatDate, dateOf, MONTH_NAMES, MONTH_SHORT,
@@ -48,7 +53,7 @@ import {
   getDaysPerMonth, setDaysPerMonth, minutesPerMonth, nextMonthStart,
 } from "./sim/calendar";
 import {
-  tickFarming, growthProgress, yieldRange, productivityMultiplier, inPlantingWindow, canPlow,
+  tickFarming, growthProgress, yieldRange, productivityMultiplier, yieldModifierSteps, inPlantingWindow, canPlow,
   hasStandingCrop, inWeedingWindow, canFertilizeNow, isPerennial, canSeedPerennial,
   isPerennialDormant,
 } from "./sim/farming";
@@ -57,7 +62,7 @@ import {
   isFieldHarvesting, effectiveStatus, tickTasks, autoManageAll, autoManageField,
   buyAgent, sellAgent, buyImplement, sellImplement, attachImplement, detachImplement,
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
-  reorderTask, estimateTaskHours, forageDue, defaultPlan, forcePlow,
+  reorderTask, estimateTaskHours, forageDue, canMulch, defaultPlan, forcePlow,
   harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
   appendCompletedTask, haySpikesCapacityBales, baleTrailerCapacityBales, queueHaulBales, fieldHasLooseBales,
 } from "./sim/tasks";
@@ -66,10 +71,10 @@ import type { RoadNetwork } from "./sim/roadNet";
 import { defaultAccessPoints } from "./sim/access";
 import {
   MACHINE_ICON, IMPLEMENT_ICON_SVG, tractorIconSvg, baleIconSvg,
-  plowIconSvg, planterIconSvg, sprayerIconSvg, rakeIconSvg, balerIconSvg, grainTrailerIconSvg,
-  grainHeaderIconSvg, mowerIconSvg, haySpikesIconSvg, baleTrailerIconSvg,
+  plowIconSvg, planterIconSvg, sprayerIconSvg, rakeIconSvg, grainTrailerIconSvg,
+  grainHeaderIconSvg, mowerIconSvg, mulcherIconSvg, haySpikesIconSvg, baleTrailerIconSvg,
 } from "./ui/icons";
-import { machineImageUrl, machineImgTag } from "./ui/machineImages";
+import { machineImageUrl, machineImgTag, trailerFillImageUrl, machineVariantImageUrl } from "./ui/machineImages";
 import type { EquipmentKind, ImplementKind } from "./sim/tasks";
 import {
   tickLoans, borrowOpen, paydownOpen, paydownLoan, refinanceLoan,
@@ -77,7 +82,14 @@ import {
 import {
   CASHFLOW_CATEGORIES, CASHFLOW_LABEL, categoryTotal, netCashflow, ledgerYears,
 } from "./sim/ledger";
-import type { FarmTask, Agent, Implement, FieldStatus, TaskType, CompletedTask } from "./state/saveState";
+import {
+  fieldCategoryTotal, fieldNetCashflow, fieldLedgerYears,
+} from "./sim/fieldLedger";
+import {
+  legalMonthsFor, effectiveMonthFor, setScheduleOverride,
+} from "./sim/schedule";
+import type { ScheduleTaskType } from "./sim/schedule";
+import type { FarmTask, Agent, Implement, FieldStatus, TaskType, CompletedTask, FieldPlan } from "./state/saveState";
 import { gameConfig } from "./config/gameConfig";
 import type { CropId, EquipmentSize, BaleProduct } from "./config/gameConfig";
 
@@ -110,6 +122,27 @@ if (loaded) {
   save.grain.grass ??= 0;
   save.grain.alfalfa ??= 0;
   save.completedTasks ??= [];
+  save.fieldLedger ??= {};
+  // Produce provenance (2026-07-21): seed from existing inventory so pre-feature
+  // saves still attribute sales — grain bin + building-stored bales as
+  // unattributed (""), each field's loose bales under its own id. (sellSchedule
+  // / sellLastMonthAbs are lazy-initialized in tickAutoSell.)
+  if (save.produceStock === undefined) {
+    const ps: Record<string, Record<string, number>> = {};
+    for (const c of Object.keys(save.grain) as CropId[]) {
+      if (save.grain[c] > 0) (ps[c] ??= {})[""] = save.grain[c];
+    }
+    for (const b of save.buildings) {
+      for (const [p, n] of Object.entries(b.storedBales ?? {})) {
+        if (n && n > 0) { const s = (ps[p] ??= {}); s[""] = (s[""] ?? 0) + n; }
+      }
+    }
+    for (const f of save.fields) {
+      const n = f.baleLocations?.length ?? 0;
+      if (n > 0) { const p = f.baleProduct ?? "cornStover"; const s = (ps[p] ??= {}); s[f.id] = (s[f.id] ?? 0) + n; }
+    }
+    save.produceStock = ps;
+  }
   initBuildingIdCounters(save);
   // Pre-finance saves: start the open borrowing year at whatever campaign
   // year the save was loaded at (tickLoans self-corrects instantly either
@@ -139,6 +172,12 @@ let overlay: OverlayEngine;
 let mapRef: maplibregl.Map;
 let roadNetRef: RoadNetwork | null = null;
 let selectedFieldId: string | null = null;
+/** Which side-tab of the Field panel is showing (maintainer request,
+ * 2026-07-21): View / Schedule / Finances / Settings. Reset to "view" every
+ * time a different field is selected — see openFieldPanel. */
+type FieldPanelTab = "view" | "schedule" | "finances" | "settings";
+const FIELD_PANEL_TABS: FieldPanelTab[] = ["view", "schedule", "finances", "settings"];
+let fieldPanelTab: FieldPanelTab = "view";
 /** Where new machines park (county center / farmstead-to-be), in UTM meters. */
 let homePos: Meters = [0, 0];
 
@@ -291,6 +330,7 @@ function tickWorld(prev: number) {
   autoManageAll(save, now);
   const work = tickTasks(save, now, dt);
   tickLoans(save, now); // lock in a turned-over year, charge due monthly payments
+  tickAutoSell(save, now); // fire any scheduled auto-sells for months just crossed
   const allChanged = [...changed, ...work.changed];
   for (const f of allChanged) renderField(mapRef, overlay, f, now);
   repaintGrowthStages(now, allChanged);
@@ -354,6 +394,12 @@ function repaintGrowthStages(now: number, alreadyPainted: { id: string }[]) {
 // game's own cozy palette, not a real manufacturer's colors/logo.
 const AGENT_EMOJI: Record<string, string> = { tractor: "🚜", harvester: "🌾" };
 
+/** "Minor" implements (maintainer request, 2026-07-21): small enough
+ * (hay spikes bolt straight to the loader, no separate silhouette worth
+ * drawing) that they skip the map marker's implement badge entirely —
+ * the tractor's dot stays its normal single-icon size, as if bare. */
+const MINOR_IMPLEMENT_KINDS = new Set<string>(["haySpikes"]);
+
 // Realistic side-profile machinery SVGs live in ui/icons.ts (maintainer
 // request, 2026-07-12) — one shared set for map dots, panels, and the shop.
 const AGENT_ICON = MACHINE_ICON;
@@ -365,6 +411,60 @@ function machineIconHtml(kind: string, size: EquipmentSize | undefined, px: numb
   const url = machineImageUrl(kind, size);
   if (url) return machineImgTag(url, px);
   return (AGENT_ICON[kind] ?? tractorIconSvg)(px);
+}
+
+/** Combines run 30% bigger than the base 60px map icon (maintainer request,
+ * 2026-07-21) — they're the biggest machine on the farm and were reading too
+ * close in size to a tractor at the shared size. */
+function agentIconPx(kind: string): number {
+  return kind === "harvester" ? 78 : 60;
+}
+
+/** A tractor's own map icon: the composite "Hay Spikes" sprite (empty or
+ * carrying a bale) if this agent has that minor implement attached and
+ * matching art exists for its size, otherwise the plain machine icon. */
+function agentMachineIconHtml(agent: Agent, px: number): string {
+  const hay = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "haySpikes");
+  if (hay) {
+    const variant = (hay.cargoBales ?? 0) > 0 ? "hayspikebale" : "hayspike";
+    const url = machineVariantImageUrl(agent.kind, agent.size, variant);
+    if (url) return machineImgTag(url, px);
+  }
+  return machineIconHtml(agent.kind, agent.size, px);
+}
+
+/** Same sprite-or-SVG fallback as machineIconHtml, but for a hitched implement
+ * (falls back to the plow SVG shape family, not the tractor). */
+function implementIconHtml(kind: string, size: EquipmentSize | undefined, px: number): string {
+  const url = machineImageUrl(kind, size);
+  if (url) return machineImgTag(url, px);
+  return (IMPLEMENT_ICON_SVG[kind] ?? plowIconSvg)(px);
+}
+
+/** How full a cargo-hauling implement is (0-100), or `undefined` for kinds
+ * that don't carry cargo — the input to `trailerFillImageUrl`. */
+function implementFillPct(impl: Implement): number | undefined {
+  if (impl.kind === "baleTrailer") {
+    const cap = baleTrailerCapacityBales(impl.size);
+    return cap > 0 ? Math.min(100, ((impl.cargoBales ?? 0) / cap) * 100) : 0;
+  }
+  if (impl.kind === "grainTrailer") {
+    const cap = grainTrailerCapacityTons(impl.size);
+    return cap > 0 ? Math.min(100, ((impl.cargoTons ?? 0) / cap) * 100) : 0;
+  }
+  return undefined;
+}
+
+/** Icon for an owned implement: prefers a fill-state sprite (how full it is
+ * right now) over the plain size sprite, over the SVG — each a graceful
+ * fallback for kinds without that art yet. */
+function trailerIconHtml(impl: Implement, px: number): string {
+  const fillPct = implementFillPct(impl);
+  if (fillPct !== undefined) {
+    const url = trailerFillImageUrl(impl.kind, fillPct);
+    if (url) return machineImgTag(url, px);
+  }
+  return implementIconHtml(impl.kind, impl.size, px);
 }
 
 /** Human verb for a task, present participle ("plowing Field 1"). */
@@ -407,6 +507,19 @@ function isAgentWaitingForSilo(agent: Agent): boolean {
   return false;
 }
 
+/** A machine counts as "in storage" when it's idle AND parked at a Tractor
+ * Barn or Farm Yard (maintainer request, 2026-07-21) — its map marker (and,
+ * since the implement rides nested inside its glyph, any hitched implement) is
+ * hidden while this holds, to declutter the farmstead. A machine idle out in a
+ * field, or with no barn/yard built yet, still shows. */
+function isAgentInStorage(agent: Agent): boolean {
+  if (agent.state !== "idle") return false;
+  return save.buildings.some(
+    (b) => (b.kind === "tractorBarn" || b.kind === "farmYard") &&
+      Math.hypot(b.pos[0] - agent.pos[0], b.pos[1] - agent.pos[1]) < 2,
+  );
+}
+
 function updateAgentMarkers(): void {
   if (!mapRef) return;
   for (const agent of save.agents) {
@@ -423,7 +536,22 @@ function updateAgentMarkers(): void {
       bob.className = "agent-bob";
       const glyph = document.createElement("span");
       glyph.className = "agent-glyph";
-      glyph.innerHTML = machineIconHtml(agent.kind, agent.size, 60);
+      // The implement nests INSIDE the glyph (not a sibling), so the pill
+      // background (living on .agent-glyph, see CSS) rotates together with the
+      // icons as one rigid piece — the pill always hugs its content exactly, at
+      // any heading, instead of staying static while the content swings.
+      // The mirror (scaleX, for driving east) is a SEPARATE inner wrapper: the
+      // pill itself must only rotate, never flip, or its rounded corners/border
+      // would visibly invert every time a machine turns around. Only the art
+      // (which genuinely faces one way) needs to flip.
+      const icons = document.createElement("span");
+      icons.className = "agent-icons";
+      // The machine's own icon is a dedicated dynamic span too (not baked into
+      // innerHTML once here) — a Small Tractor with Hay Spikes attached swaps
+      // to a composite sprite showing the loader, so it needs the same
+      // attach/detach-driven resync as the implement badge below.
+      icons.innerHTML = `<span class="agent-machine"></span><span class="agent-implement"></span>`;
+      glyph.appendChild(icons);
       bob.appendChild(glyph);
       el.appendChild(bob);
       marker = new maplibregl.Marker({ element: el }).setLngLat(toLngLat(agent.pos)).addTo(mapRef);
@@ -432,8 +560,36 @@ function updateAgentMarkers(): void {
       marker.setLngLat(toLngLat(agent.pos));
     }
     const el = marker.getElement();
+    // Hide parked-in-storage machines (and their nested implement glyph).
+    el.style.display = isAgentInStorage(agent) ? "none" : "";
     el.classList.toggle("working", agent.state === "working");
     el.classList.toggle("warn", isAgentWaitingForSilo(agent));
+    // Sync the machine's own icon. Same cheap dataset-key pattern as the
+    // implement badge below — only a Small Tractor with Hay Spikes attached
+    // ever actually changes here (empty loader vs. carrying a bale).
+    const machineSpan = el.querySelector<HTMLElement>(".agent-machine");
+    if (machineSpan) {
+      const hay = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "haySpikes");
+      const key = `${agent.kind}:${agent.size ?? ""}:${hay ? ((hay.cargoBales ?? 0) > 0 ? "bale" : "empty") : ""}`;
+      if (machineSpan.dataset.machine !== key) {
+        machineSpan.dataset.machine = key;
+        machineSpan.innerHTML = agentMachineIconHtml(agent, agentIconPx(agent.kind));
+      }
+    }
+    // Sync the hitched-implement glyph. Cheap dataset-key check so we only touch
+    // innerHTML on attach/detach/size-change, not every frame.
+    const implSpan = el.querySelector<HTMLElement>(".agent-implement");
+    if (implSpan) {
+      const impl = save.implements.find((i) => i.attachedTo === agent.id && !MINOR_IMPLEMENT_KINDS.has(i.kind));
+      // Fill % rounded into the key so the fill-state sprite (see
+      // trailerIconHtml) redraws when its bucket changes, without a full
+      // string-diff on every fractional-ton update.
+      const key = impl ? `${impl.kind}:${impl.size ?? ""}:${Math.round(implementFillPct(impl) ?? -1)}` : "";
+      if (implSpan.dataset.impl !== key) {
+        implSpan.dataset.impl = key;
+        implSpan.innerHTML = impl ? trailerIconHtml(impl, 55) : "";
+      }
+    }
     // Point the glyph along the driving heading. The SVGs are drawn facing WEST,
     // and screen-y points down while meters-north points up, so aligning to travel
     // is a rotation of (π − heading). But that rolls the icon 180° upside-down when
@@ -441,14 +597,18 @@ function updateAgentMarkers(): void {
     // (scaleX) and keep it upright. Machines mostly run east↔west, so this reads as
     // "the tractor turned around," not "flipped over."
     const glyph = el.querySelector<HTMLElement>(".agent-glyph");
-    if (glyph && agent.heading !== undefined) {
+    const icons = el.querySelector<HTMLElement>(".agent-icons");
+    if (glyph && icons && agent.heading !== undefined) {
       let a = Math.atan2(Math.sin(Math.PI - agent.heading), Math.cos(Math.PI - agent.heading)); // (−π, π]
       let sx = 1;
       if (Math.abs(a) > Math.PI / 2) {
         a -= Math.sign(a) * Math.PI; // bring rotation back within ±90°…
         sx = -1; // …and mirror instead, so the icon stays upright
       }
-      glyph.style.transform = `rotate(${a}rad) scaleX(${sx})`;
+      // Rotation on the pill (glyph), mirror on the art only (icons) — see the
+      // creation-time comment above for why these can't share one transform.
+      glyph.style.transform = `rotate(${a}rad)`;
+      icons.style.transform = `scaleX(${sx})`;
     }
   }
   // Tear down markers for machines that were sold.
@@ -561,6 +721,7 @@ function revealTargetStatus(task: FarmTask, field: Field): FieldStatus {
   // reveal that so there's no pop when the field repaints on completion.
   if (task.type === "bale") return isPerennial(field.crop) ? "growing" : "mulched";
   if (task.type === "weed" || task.type === "fertilize") return field.status; // same status, different overlay
+  if (task.type === "mulch") return "stubble"; // residue shredded back to bare stubble
   return "harvested"; // harvest + mow both cut to bare/cut ground
 }
 
@@ -568,7 +729,7 @@ function revealTargetStatus(task: FarmTask, field: Field): FieldStatus {
  * ones worth the reveal-stamping treatment. Weeding bakes the SAME status with
  * the weed overlay off (sprayer cleans strip-by-strip); fertilizing bakes it
  * ~20% darker (wet liquid spray, dries off next month); mowing cuts the sward. */
-const REVEALS_TEXTURE: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "mow", "rake", "bale", "weed", "fertilize"]);
+const REVEALS_TEXTURE: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "mow", "mulch", "rake", "bale", "weed", "fertilize"]);
 
 function updateReveals(): void {
   if (!overlay) return;
@@ -721,7 +882,7 @@ function sectionDivider(label: string): HTMLElement {
 const IMPLEMENT_KIND_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake",
   bailer: "Baler", grainTrailer: "Grain Trailer", mower: "Mower",
-  haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
+  mulcher: "Mulcher", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
 };
 function implementInfoLines(kind: ImplementKind, size: EquipmentSize): { name: string; detail: string } {
   const name = `${IMPLEMENT_KIND_NAME[kind]} - ${SIZE_LABEL[size]}`;
@@ -783,7 +944,9 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
   } else if (task.type === "haulBales") {
     const spikes = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "haySpikes");
     if (!spikes) return "";
-    iconSvg = (IMPLEMENT_ICON_SVG.haySpikes ?? plowIconSvg)(IMPLEMENT_QUEUE_ICON_PX);
+    // Pair the implement with its own tractor's icon — this task always runs
+    // two machines, so each line needs to show which tractor pulls it.
+    iconSvg = machineIconHtml(agent.kind, agent.size, IMPLEMENT_QUEUE_ICON_PX) + (IMPLEMENT_ICON_SVG.haySpikes ?? plowIconSvg)(IMPLEMENT_QUEUE_ICON_PX);
     info = implementInfoLines("haySpikes", spikes.size);
     const capB = haySpikesCapacityBales(spikes.size);
     const onboard = spikes.cargoBales ?? 0;
@@ -795,7 +958,7 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
   } else if (task.type === "bale") {
     const impl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
     const size = impl?.size ?? "medium";
-    iconSvg = balerIconSvg(IMPLEMENT_QUEUE_ICON_PX);
+    iconSvg = implementIconHtml("bailer", size, IMPLEMENT_QUEUE_ICON_PX);
     info = implementInfoLines("bailer", size);
     // The baler's real hopper (like the combine): tons gathered toward the next
     // bale, resetting to 0 each time one ejects. Total = one bale's worth.
@@ -811,7 +974,7 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     if (!kind) return "";
     const impl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === kind);
     const size = impl?.size ?? "medium";
-    iconSvg = (IMPLEMENT_ICON_SVG[kind] ?? plowIconSvg)(IMPLEMENT_QUEUE_ICON_PX);
+    iconSvg = implementIconHtml(kind, size, IMPLEMENT_QUEUE_ICON_PX);
     info = implementInfoLines(kind, size);
   }
 
@@ -870,7 +1033,8 @@ function implRowForBaleTrailer(task: FarmTask): string {
     current: `${onboard} bale${onboard === 1 ? "" : "s"}`,
     total: `${cap}`,
   };
-  return implRow(baleTrailerIconSvg(IMPLEMENT_QUEUE_ICON_PX), info, fill);
+  const iconSvg = machineIconHtml(tAgent.kind, tAgent.size, IMPLEMENT_QUEUE_ICON_PX) + trailerIconHtml(trailer, IMPLEMENT_QUEUE_ICON_PX);
+  return implRow(iconSvg, info, fill);
 }
 
 /** One row in the Jobs list. Active jobs are locked in place (an agent is
@@ -899,14 +1063,15 @@ function buildQueueRow(task: FarmTask): HTMLElement {
   }
 
   if (task.type === "haulBales") {
-    // Two-tractor relay, not acres-based — show the collector's leg + how many
-    // bales remain in the field. The trailer half (if any) shows its own name.
+    // Two-tractor relay, not acres-based — show how many bales remain in the
+    // field. No top-level icon: each implement row below pairs its own
+    // tractor with its own implement, which disambiguates the two machines
+    // better than one shared icon at the card's top ever could.
     const trailerAgent = task.trailerAgentId ? save.agents.find((a) => a.id === task.trailerAgentId) : undefined;
     const remaining = save.fields.find((f) => f.id === task.fieldId)?.baleLocations?.length ?? 0;
     const row = document.createElement("div");
     row.className = "queue-row" + (isActive ? " active" : " queued") + (task.waitingForStorage ? " warn" : "");
     row.innerHTML = `
-      ${iconHtml}
       <span class="qr-info">
         <div class="qr-name">Haul Bales · ${prettyId(task.fieldId)}</div>
         ${agent ? `<div class="qr-machine">${agent.name}${trailerAgent ? ` + ${trailerAgent.name}` : ""}</div>` : ""}
@@ -1066,7 +1231,7 @@ function refreshQueuePanel(): void {
 
 const TASK_PAST_VERB: Record<TaskType, string> = {
   plow: "Plowed", plant: "Planted", harvest: "Harvested", mow: "Mowed",
-  weed: "Weeded", fertilize: "Fertilized", rake: "Raked", bale: "Baled",
+  mulch: "Mulched", weed: "Weeded", fertilize: "Fertilized", rake: "Raked", bale: "Baled",
   unloadHarvester: "Hauled", haulBales: "Hauled bales",
 };
 
@@ -1103,6 +1268,14 @@ function buildCompletedRow(ct: CompletedTask): HTMLElement {
       <div class="qr-sub">${stats.join(" · ")}</div>
     </span>`;
   return row;
+}
+
+/** A small "+N%" seasonal-premium badge for a product at the current month
+ * (empty string at base price). */
+function priceBadge(product: MarketProduct): string {
+  const bonus = seasonalBonus(product, monthOf(clock.time()));
+  if (bonus <= 0.001) return "";
+  return `<span class="price-badge">+${Math.round(bonus * 100)}%</span>`;
 }
 
 /** Log a grain/bale sale into the same Completed log as finished field-work
@@ -1237,6 +1410,99 @@ function buildingIndex(building: Building): number {
   return save.buildings.filter((b) => b.kind === building.kind).indexOf(building) + 1;
 }
 
+/** The Inventory tab's per-product auto-sell scheduler (maintainer request,
+ * 2026-07-21). Drag state, kept separate from the other calendars' drag. */
+let draggingSellCell: { product: string } | null = null;
+
+/** A compact horizontal 12-month price strip per sellable product: visualizes
+ * the seasonal price curve (cells shaded by premium) AND lets the player pick
+ * the auto-sell month (click / drag the 💰 marker) + toggle auto-sell on. */
+function buildSellScheduleSection(rows: HTMLElement): void {
+  rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">📅 Auto-Sell Schedule</div>`);
+  const month = monthOf(clock.time());
+  const products: { id: MarketProduct; name: string; iconHtml: string; unit: string; price: number }[] = [];
+  for (const c of SELLABLE_GRAINS) {
+    products.push({ id: c, name: gameConfig.crops[c].name, iconHtml: gameConfig.crops[c].emoji, unit: "/t", price: grainUnitPrice(c, month) });
+  }
+  for (const p of SELLABLE_BALES) {
+    products.push({ id: p, name: gameConfig.baleProducts[p].name, iconHtml: baleIconSvg(18, gameConfig.baleProducts[p].color), unit: "/bale", price: baleUnitPrice(p, month) });
+  }
+
+  for (const prod of products) {
+    const sched = save.sellSchedule?.[prod.id];
+    const wrap = document.createElement("div");
+    wrap.className = "sell-cal";
+
+    const head = document.createElement("div");
+    head.className = "sell-cal-head";
+    head.innerHTML = `
+      <span class="sc-icon">${prod.iconHtml}</span>
+      <span class="name">${prod.name}</span>
+      <span class="price">$${Math.round(prod.price).toLocaleString()}${prod.unit} ${priceBadge(prod.id)}</span>`;
+    const toggle = document.createElement("label");
+    toggle.className = "switch sc-switch";
+    toggle.title = "Auto-sell all of this product when the highlighted month arrives";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!sched?.auto;
+    cb.addEventListener("change", () => {
+      const s = (save.sellSchedule ??= {});
+      const cur = s[prod.id] ?? { month: peakSaleMonth(), auto: false };
+      cur.auto = cb.checked;
+      s[prod.id] = cur;
+      refreshInventory(true);
+    });
+    toggle.appendChild(cb);
+    toggle.insertAdjacentHTML("beforeend", `<span class="slider"></span>`);
+    head.appendChild(toggle);
+    wrap.appendChild(head);
+
+    const setMonth = (m: number): void => {
+      const s = (save.sellSchedule ??= {});
+      const cur = s[prod.id] ?? { month: m, auto: false };
+      cur.month = m;
+      s[prod.id] = cur;
+      refreshInventory(true);
+    };
+
+    const strip = document.createElement("div");
+    strip.className = "sell-cal-strip";
+    for (const m of SCHEDULE_MONTH_ORDER) {
+      const bonus = seasonalBonus(prod.id, m);
+      const tier = bonus >= 0.25 ? "p25" : bonus >= 0.15 ? "p15" : bonus >= 0.1 ? "p10" : "p0";
+      const isScheduled = sched?.month === m;
+      const firstOfSeason = m === 2 || m === 5 || m === 8 || m === 11;
+      const cell = document.createElement("div");
+      cell.className = `sell-cal-cell ${tier}` + (isScheduled ? " scheduled" : "");
+      cell.title = `${MONTH_SHORT[m]} — ${bonus > 0 ? `+${Math.round(bonus * 100)}% above base` : "base price"}${isScheduled ? " · scheduled sell month" : " · click to sell here"}`;
+      cell.innerHTML =
+        `<span class="mo">${firstOfSeason ? SCHEDULE_SEASON_ICON[seasonOfMonth(m)] + " " : ""}${MONTH_SHORT[m]}</span>` +
+        `<span class="pct">${bonus > 0 ? "+" + Math.round(bonus * 100) + "%" : "·"}</span>` +
+        (isScheduled ? `<span class="mk">💰</span>` : "");
+      cell.addEventListener("click", () => setMonth(m));
+      if (isScheduled) {
+        cell.draggable = true;
+        cell.addEventListener("dragstart", () => { draggingSellCell = { product: prod.id }; });
+        cell.addEventListener("dragend", () => { draggingSellCell = null; });
+      }
+      cell.addEventListener("dragover", (e) => {
+        if (draggingSellCell?.product !== prod.id) return;
+        e.preventDefault();
+        cell.classList.add("drag-over");
+      });
+      cell.addEventListener("dragleave", () => cell.classList.remove("drag-over"));
+      cell.addEventListener("drop", (e) => {
+        e.preventDefault();
+        cell.classList.remove("drag-over");
+        if (draggingSellCell?.product === prod.id) setMonth(m);
+      });
+      strip.appendChild(cell);
+    }
+    wrap.appendChild(strip);
+    rows.appendChild(wrap);
+  }
+}
+
 /** Inventory is organized around STORAGE STRUCTURES, not crops (maintainer
  * request, 2026-07-16): each silo is its own row with its own capacity and a
  * crop dropdown; grain is still one pooled bin per crop under the hood
@@ -1257,13 +1523,17 @@ function refreshInventory(force = false) {
   const bldgKey = save.buildings
     .map((b) => `${b.id}:${b.assignedCrop ?? ""}:${b.assignedProduct ?? ""}:${JSON.stringify(b.storedBales ?? {})}`)
     .join("|");
-  const fieldBaleKey = baleInventory(save).map((s) => `${s.product}:${s.bales}`).join(",");
-  const key = `${grainKey}#${bldgKey}#${fieldBaleKey}`;
+  const fieldBaleKey = baleInventory(save, clock.time()).map((s) => `${s.product}:${s.bales}`).join(",");
+  // Also keyed on the current month (seasonal prices shift the strip + badges)
+  // and the sell schedule.
+  const key = `${grainKey}#${bldgKey}#${fieldBaleKey}#m${monthOf(clock.time())}#${JSON.stringify(save.sellSchedule ?? {})}`;
   if (!force && key === lastInventoryKey) return;
   lastInventoryKey = key;
 
   const rows = $("inv-rows");
   rows.innerHTML = "";
+
+  buildSellScheduleSection(rows);
 
   // --- Grain Silos ---
   const silos = save.buildings.filter((b) => b.kind === "silo");
@@ -1322,16 +1592,17 @@ function refreshInventory(force = false) {
     const cfg = gameConfig.crops[crop];
     const bar = siloCapacityBar(cfg, tons, capacity);
     rows.appendChild(bar);
+    const unitPrice = grainUnitPrice(crop, monthOf(clock.time()));
     const sellRow = document.createElement("div");
     sellRow.className = "inv-row inv-sell-row";
-    sellRow.innerHTML = `<span class="price">${cfg.emoji} ${cfg.name} · $${cfg.sellPricePerTon.toLocaleString()}/t</span>`;
+    sellRow.innerHTML = `<span class="price">${cfg.emoji} ${cfg.name} · $${Math.round(unitPrice).toLocaleString()}/t ${priceBadge(crop)}</span>`;
     const sellBtn = document.createElement("button");
     sellBtn.className = "primary";
-    const value = Math.round(tons * cfg.sellPricePerTon);
+    const value = Math.round(tons * unitPrice);
     sellBtn.textContent = tons > 0 ? `Sell all · $${value.toLocaleString()}` : "Empty";
     sellBtn.disabled = tons <= 0;
     sellBtn.addEventListener("click", () => {
-      const { tons: sold, revenue } = sellGrain(save, crop, tons);
+      const { tons: sold, revenue } = sellGrain(save, crop, tons, clock.time());
       if (sold <= 0) return;
       logSale("sellGrain", { crop, label: cfg.name, tons: sold, revenue });
       updateHud();
@@ -1354,6 +1625,7 @@ function refreshInventory(force = false) {
     for (const cropId of orphaned) {
       const cfg = gameConfig.crops[cropId];
       const tons = save.grain[cropId];
+      const unitPrice = grainUnitPrice(cropId, monthOf(clock.time()));
       const row = document.createElement("div");
       row.className = "inv-row";
       row.innerHTML = `
@@ -1362,13 +1634,13 @@ function refreshInventory(force = false) {
           <div class="name">${cfg.name}</div>
           <div class="qty">${tons.toFixed(1)} t · no silo claims it</div>
         </span>
-        <span class="price">$${cfg.sellPricePerTon.toLocaleString()}/t</span>`;
+        <span class="price">$${Math.round(unitPrice).toLocaleString()}/t ${priceBadge(cropId)}</span>`;
       const btn = document.createElement("button");
       btn.className = "primary";
-      const value = Math.round(tons * cfg.sellPricePerTon);
+      const value = Math.round(tons * unitPrice);
       btn.textContent = `Sell all · $${value.toLocaleString()}`;
       btn.addEventListener("click", () => {
-        const { tons: sold, revenue } = sellGrain(save, cropId, Infinity);
+        const { tons: sold, revenue } = sellGrain(save, cropId, Infinity, clock.time());
         if (sold <= 0) return;
         logSale("sellGrain", { crop: cropId, label: cfg.name, tons: sold, revenue });
         updateHud();
@@ -1432,15 +1704,16 @@ function refreshInventory(force = false) {
         const n = b.storedBales?.[p] ?? 0;
         if (n <= 0) continue;
         const cfg = gameConfig.baleProducts[p];
-        const value = Math.round(n * cfg.pricePerBale);
+        const unitPrice = baleUnitPrice(p, monthOf(clock.time()));
+        const value = Math.round(n * unitPrice);
         const sellRow = document.createElement("div");
         sellRow.className = "inv-row inv-sell-row";
-        sellRow.innerHTML = `<span class="price">${cfg.name} · ${n} bale${n === 1 ? "" : "s"} · $${cfg.pricePerBale.toLocaleString()}/bale</span>`;
+        sellRow.innerHTML = `<span class="price">${cfg.name} · ${n} bale${n === 1 ? "" : "s"} · $${Math.round(unitPrice).toLocaleString()}/bale ${priceBadge(p)}</span>`;
         const sellBtn = document.createElement("button");
         sellBtn.className = "primary";
         sellBtn.textContent = `Sell all · $${value.toLocaleString()}`;
         sellBtn.addEventListener("click", () => {
-          const { bales: sold, revenue } = sellStoredBalesFrom(save, b, p);
+          const { bales: sold, revenue } = sellStoredBalesFrom(save, b, p, clock.time());
           if (sold <= 0) return;
           logSale("sellBales", { label: cfg.name, bales: sold, tons: sold * gameConfig.forage.baleTons, revenue });
           updateHud();
@@ -1457,7 +1730,7 @@ function refreshInventory(force = false) {
   // this IS where every bale lives today (baling drops them on the field and
   // nothing moves them since there's no hauling mechanic), sellable in one
   // click here as well as from a field's own panel. ---
-  const stocks = baleInventory(save);
+  const stocks = baleInventory(save, clock.time());
   rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">🌾 In-Field Bales (not yet hauled)</div>`);
   if (stocks.length === 0) {
     rows.insertAdjacentHTML("beforeend", `<div class="silo-bar-empty">No bales sitting in any field right now.</div>`);
@@ -1472,12 +1745,12 @@ function refreshInventory(force = false) {
         <div class="name">${stock.name}</div>
         <div class="qty">${stock.bales} bales · ${tons} t</div>
       </span>
-      <span class="price">$${stock.pricePerBale.toLocaleString()}/bale</span>`;
+      <span class="price">$${stock.pricePerBale.toLocaleString()}/bale ${priceBadge(stock.product)}</span>`;
     const btn = document.createElement("button");
     btn.className = "primary";
     btn.textContent = `Sell all · $${stock.value.toLocaleString()}`;
     btn.addEventListener("click", () => {
-      const { bales: sold, revenue } = sellBalesOfProduct(save, stock.product);
+      const { bales: sold, revenue } = sellBalesOfProduct(save, stock.product, clock.time());
       if (sold <= 0) return;
       logSale("sellBales", { label: stock.name, bales: sold, tons: sold * gameConfig.forage.baleTons, revenue });
       updateHud();
@@ -2164,11 +2437,15 @@ function buildEquipShop(): void {
   line("Mower", mowerIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
     spec: `${gameConfig.equipment.mower[s].widthFt} ft · cuts hay`, price: implementPrice("mower", s), onBuy: buyImpl("mower", s),
   }])));
+  // Mulcher: optional post-harvest residue pass on annuals — all three sizes.
+  line("Mulcher", mulcherIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.mulcher[s].widthFt} ft · shreds residue`, price: implementPrice("mulcher", s), onBuy: buyImpl("mulcher", s),
+  }])));
   // Rake & baler: single-size forage tools.
   line("Rake", rakeIconSvg(26), {
     small: { spec: `${gameConfig.equipment.rake.small.widthFt} ft · windrows forage`, price: implementPrice("rake", "small"), onBuy: buyImpl("rake", "small") },
   });
-  line("Baler", balerIconSvg(26), {
+  line("Baler", implementIconHtml("bailer", "medium", 26), {
     medium: { spec: `${gameConfig.equipment.bailer.medium.widthFt} ft pickup · drops bales`, price: implementPrice("bailer", "medium"), onBuy: buyImpl("bailer", "medium") },
   });
   line("Grain Trailer", grainTrailerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
@@ -2178,8 +2455,13 @@ function buildEquipShop(): void {
   line("Hay Spikes", haySpikesIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
     spec: `${haySpikesCapacityBales(s)} bale${haySpikesCapacityBales(s) === 1 ? "" : "s"} · collects`, price: implementPrice("haySpikes", s), onBuy: buyImpl("haySpikes", s),
   }])));
-  // Bale Trailer: bulk bale hauler — Small (10) & Medium (20).
-  line("Bale Trailer", baleTrailerIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
+  // Bale Trailer: bulk bale hauler — Small (10) & Medium (20). Catalog preview
+  // shows the empty (0%) fill sprite — a fresh purchase starts empty.
+  const baleTrailerCatalogIcon = (() => {
+    const url = trailerFillImageUrl("baleTrailer", 0);
+    return url ? machineImgTag(url, 26) : baleTrailerIconSvg(26);
+  })();
+  line("Bale Trailer", baleTrailerCatalogIcon, Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
     spec: `${baleTrailerCapacityBales(s)} bale cargo`, price: implementPrice("baleTrailer", s), onBuy: buyImpl("baleTrailer", s),
   }])));
 }
@@ -2306,8 +2588,6 @@ function buildEquipMachines(): void {
   }
 }
 
-const IMPLEMENT_ICON = IMPLEMENT_ICON_SVG;
-
 /** IMPLEMENTS you attach: every plow/planter, with a selector to hitch it to a
  * tractor (or park it in the yard) and a sell button. */
 function buildEquipImplements(): void {
@@ -2336,7 +2616,7 @@ function buildEquipImplements(): void {
     row.className = `equip-card implement ${stateClass}`;
     row.innerHTML = `
       <span class="ec-dot ${stateClass}" title="${statusText}"></span>
-      <span class="icon">${(IMPLEMENT_ICON[impl.kind] ?? plowIconSvg)(30)}</span>
+      <span class="icon">${trailerIconHtml(impl, 30)}</span>
       <div class="ec-name">${implementName(save, impl)}</div>
       <div class="ec-status" title="${statusText}">${statusText}</div>`;
 
@@ -2904,6 +3184,10 @@ function wireFieldSelection(map: maplibregl.Map) {
   });
   $("fp-close").addEventListener("click", closeFieldPanel);
 
+  for (const t of FIELD_PANEL_TABS) {
+    $(`fp-tab-${t}`).addEventListener("click", () => switchFieldPanelTab(t));
+  }
+
   $("fp-rename").addEventListener("click", () => {
     const field = save.fields.find((f) => f.id === selectedFieldId);
     if (!field) return;
@@ -3010,14 +3294,27 @@ function wireFieldHover(map: maplibregl.Map) {
 function openFieldPanel(fieldId: string) {
   if (accessEditFieldId && accessEditFieldId !== fieldId) stopAccessEdit();
   selectedFieldId = fieldId;
-  $("fieldpanel").style.display = "block";
-  refreshFieldPanel();
+  $("fieldpanel").style.display = "flex";
+  switchFieldPanelTab("view"); // always land on View for a freshly-selected field
 }
 
 function closeFieldPanel() {
   stopAccessEdit();
   selectedFieldId = null;
   $("fieldpanel").style.display = "none";
+}
+
+/** Switch the Field panel's active side-tab, updating the tab-strip's
+ * highlighted button and which tab-content div is visible, then force-
+ * refreshing so the newly-shown tab repaints immediately. All four tabs share
+ * one uniform width (see `.fp-main`). */
+function switchFieldPanelTab(tab: FieldPanelTab): void {
+  fieldPanelTab = tab;
+  for (const t of FIELD_PANEL_TABS) {
+    $(`fp-${t}-tab`).style.display = t === tab ? "block" : "none";
+    $(`fp-tab-${t}`).classList.toggle("active", t === tab);
+  }
+  refreshFieldPanel(true);
 }
 
 // --- Access-point editing (maintainer request, 2026-07-12) -------------------
@@ -3067,7 +3364,7 @@ function fieldMsg(text: string) {
 }
 
 /** Queue a task from a panel button, with shared feedback plumbing. */
-function queueFromPanel(field: Field, type: "plow" | "plant" | "harvest" | "mow" | "weed" | "fertilize" | "rake" | "bale", crop?: CropId): void {
+function queueFromPanel(field: Field, type: "plow" | "plant" | "harvest" | "mow" | "mulch" | "weed" | "fertilize" | "rake" | "bale", crop?: CropId): void {
   try {
     const task = enqueueTask(save, field, type, clock.time(), crop);
     updateHud();
@@ -3115,12 +3412,9 @@ function refreshPlanEditor(field: Field, now: number, auto: boolean): void {
       : `<div class="plan-hint">Rotation — one plan per year, loops after Yr ${plans.length}. Running Yr ${activeIdx + 1} now.</div>`,
   );
 
-  const ops: Array<{ prop: "weed" | "fertilize" | "bale"; icon: string; title: string }> = [
-    { prop: "weed", icon: "💦", title: "Weed once, when the window opens" },
-    { prop: "fertilize", icon: "🌿", title: "Fertilize once, the month after planting" },
-    { prop: "bale", icon: "📦", title: "Rake + bale the residue after harvest (forage crops)" },
-  ];
-
+  // The weed/fertilize/bale toggles used to live here as per-row buttons; they
+  // moved onto the Schedule calendar below (maintainer request, 2026-07-21) —
+  // the plan editor is now just crop-per-year + rotation-year management.
   plans.forEach((plan, i) => {
     const row = document.createElement("div");
     row.className = "plan-row" + (i === activeIdx ? " active" : "");
@@ -3152,22 +3446,6 @@ function refreshPlanEditor(field: Field, now: number, auto: boolean): void {
       editPlans();
     });
     row.appendChild(sel);
-
-    for (const o of ops) {
-      // Perennials only expose Fertilize & Bale (no weeding) — hide the weed op.
-      if (o.prop === "weed" && isPerennial(plan.crop)) continue;
-      const b = document.createElement("button");
-      const forageOnly = o.prop === "bale" && !gameConfig.crops[plan.crop].producesForage;
-      b.className = "plan-op" + (plan[o.prop] ? " on" : "");
-      b.textContent = o.icon;
-      b.title = forageOnly ? "Only forage crops (e.g. corn) can be baled" : o.title;
-      b.disabled = forageOnly;
-      b.addEventListener("click", () => {
-        plan[o.prop] = !plan[o.prop];
-        editPlans();
-      });
-      row.appendChild(b);
-    }
 
     if (plans.length > 1) {
       const del = document.createElement("button");
@@ -3201,12 +3479,87 @@ function refreshPlanEditor(field: Field, now: number, auto: boolean): void {
   }
 }
 
-/** Rebuild the panel contents from the selected field's current state. */
-let lastPanelKey = "";
+/** Rebuild just the field panel's shared header (title/sub/status) — shown
+ * above the tab content regardless of which side-tab is active. Cheap enough
+ * to run unconditionally on every refresh, no change-detection needed. */
+function refreshFieldPanelHeader(field: Field): void {
+  const pending = tasksFor(save, field.id);
+  const activeTask = pending.find((t) => t.status === "active");
+  $("fp-title").textContent = "🌾 " + fieldLabel(field);
+  $("fp-sub").textContent = `${areaAcres(field.boundary).toFixed(1)} acres`;
+  $("fp-status").textContent = activeTask ? taskVerb(activeTask) : field.status;
+}
+
+/** Rebuild the panel contents from the selected field's current state —
+ * dispatches to whichever side-tab (View/Schedule/Finances/Settings) is
+ * currently active. Each tab keeps its OWN change-detection cache (mirroring
+ * refreshPlanEditor's existing lastPlansKey pattern) rather than one shared
+ * key, so switching/editing one tab doesn't force-rebuild the others. */
 function refreshFieldPanel(force = false) {
   const field = save.fields.find((f) => f.id === selectedFieldId);
   if (!field) return closeFieldPanel();
   const now = clock.time();
+  const auto = !!field.autoManage;
+  refreshFieldPanelHeader(field);
+  switch (fieldPanelTab) {
+    case "view": refreshFieldViewTab(field, now, auto, force); break;
+    case "schedule": refreshFieldScheduleTab(field, now, force); break;
+    case "finances": refreshFieldFinancesTab(field, force); break;
+    case "settings": refreshFieldSettingsTab(field, force); break;
+  }
+}
+
+/** Icon per yield-modifier label (see `yieldModifierSteps`) for the waterfall
+ * graphic below — distinct per factor even where the game reuses an emoji
+ * elsewhere (e.g. the Fertilize button also uses 🌿). */
+const YIELD_STEP_ICON: Record<string, string> = { Weeds: "🐛", Fertilizer: "🌿", Mulch: "♻️", Rotation: "🔄" };
+
+/** "What's going into this yield" waterfall: a Base bar, one small delta bar
+ * per active modifier (weeds/fertilizer/mulch/rotation), and a final Estimate
+ * bar — each delta bar's height is its own ± ton/acre contribution off Base,
+ * exactly matching `productivityMultiplier`'s linear sum (no compounding),
+ * so the bars' math always agrees with the number in the range display above
+ * them. Only annuals get this (perennials show cut-count progress instead). */
+function yieldWaterfallHtml(field: Field, now: number): string {
+  const crop = field.crop;
+  if (!crop) return "";
+  const cfg = gameConfig.crops[crop];
+  const base = cfg.baseYieldTonsPerAcre;
+  const steps = yieldModifierSteps(field, now);
+  if (steps.length === 0) return ""; // nothing modifying yield yet — the plain range bar says enough
+
+  let running = base;
+  const deltas = steps.map((s) => {
+    const delta = base * s.pct;
+    running += delta;
+    return { ...s, delta };
+  });
+  const maxVal = Math.max(base, running, 0.01);
+  const trackPx = 64;
+  const barPx = (v: number) => Math.max(4, Math.min(trackPx, (v / maxVal) * trackPx));
+
+  const step = (label: string, valueLabel: string, heightPx: number, cls: string, icon: string, bold = false) => `
+    <div class="yw-step">
+      <div class="yw-val">${valueLabel}</div>
+      <div class="yw-bar ${cls}" style="height:${heightPx.toFixed(0)}px"></div>
+      <div class="yw-name${bold ? " bold" : ""}">${icon} ${label}</div>
+    </div>`;
+
+  let html = `<div class="small" style="margin-top:8px">What's going into this yield (t/acre)</div><div class="yield-waterfall">`;
+  html += step("Base", base.toFixed(1), barPx(base), "base", cfg.emoji);
+  for (const d of deltas) {
+    const pctLabel = `${d.pct >= 0 ? "+" : ""}${Math.round(d.pct * 100)}%`;
+    html += step(d.label, pctLabel, barPx(Math.abs(d.delta)), d.delta >= 0 ? "bonus" : "penalty", YIELD_STEP_ICON[d.label] ?? "");
+  }
+  html += step("Estimate", running.toFixed(1), barPx(running), "final", "🎯", true);
+  html += `</div>`;
+  return html;
+}
+
+/** Field View tab: task progress, bales, plow/plant/weed/fertilize/harvest
+ * controls — everything the field needs RIGHT NOW under manual control. */
+let lastViewKey = "";
+function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: boolean): void {
   const acres = areaAcres(field.boundary);
   const pending = tasksFor(save, field.id);
   const activeTask = pending.find((t) => t.status === "active");
@@ -3218,7 +3571,6 @@ function refreshFieldPanel(force = false) {
   // Skip the rebuild when nothing visible changed — replacing buttons under the
   // player's cursor twice a second makes them unclickable. Growth/task progress
   // is bucketed to 1% so live bars still animate.
-  const auto = !!field.autoManage;
   const key = [
     field.id, field.status, eff, auto,
     pending.map((t) => `${t.type}${t.status}${Math.round((t.doneAcres / t.totalAcres) * 100)}`).join(","),
@@ -3227,19 +3579,9 @@ function refreshFieldPanel(force = false) {
     Math.round(save.money), // affordability of input costs
     field.forageReady ? 1 : 0, field.windrowed ? 1 : 0, field.baleLocations?.length ?? 0, // forage/bale state
     field.weedy ? 1 : 0, field.baleProduct ?? "", field.cutsThisYear ?? 0, field.cutYear ?? 0, // perennial/bale
-    accessEditFieldId === field.id ? "gates" : "",
   ].join("|");
-  // The rotation planner has its OWN change-detection (below) so its dropdowns
-  // don't get rebuilt under the cursor on every money/status tick.
-  refreshPlanEditor(field, now, auto);
-  if (!force && key === lastPanelKey) return;
-  lastPanelKey = key;
-
-  $("fp-title").textContent = "🌾 " + fieldLabel(field);
-  $("fp-sub").textContent = `${acres.toFixed(1)} acres`;
-  const badge = $("fp-status");
-  badge.textContent = activeTask ? taskVerb(activeTask) : field.status;
-  ($("fp-auto") as HTMLInputElement).checked = auto;
+  if (!force && key === lastViewKey) return;
+  lastViewKey = key;
 
   const refund = field.purchaseCost ?? Math.round(acres * gameConfig.landPricePerAcre);
   const sellBtn = $("fp-sell") as HTMLButtonElement;
@@ -3266,15 +3608,17 @@ function refreshFieldPanel(force = false) {
   // --- Bales sitting in the field (persist until sold) — the field's market ---
   const bales = field.baleLocations?.length ?? 0;
   if (bales > 0) {
-    const product = gameConfig.baleProducts[field.baleProduct ?? "cornStover"];
-    const value = Math.round(bales * product.pricePerBale);
+    const productId = field.baleProduct ?? "cornStover";
+    const product = gameConfig.baleProducts[productId];
+    const unitPrice = baleUnitPrice(productId, monthOf(now));
+    const value = Math.round(bales * unitPrice);
     const tons = (bales * gameConfig.forage.baleTons).toFixed(0);
-    body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">📦 <b>${bales}</b> ${product.name} bales (${tons} t) · $${product.pricePerBale.toLocaleString()}/bale</div>`);
+    body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">📦 <b>${bales}</b> ${product.name} bales (${tons} t) · $${Math.round(unitPrice).toLocaleString()}/bale ${priceBadge(productId)}</div>`);
     const btn = document.createElement("button");
     btn.className = "primary";
     btn.innerHTML = `💰 Sell Bales <span class="small">$${value.toLocaleString()}</span>`;
     btn.addEventListener("click", () => {
-      const { bales: sold, revenue } = sellBales(save, field);
+      const { bales: sold, revenue } = sellBales(save, field, clock.time());
       if (sold <= 0) return;
       logSale("sellBales", { fieldId: field.id, label: product.name, bales: sold, tons: sold * gameConfig.forage.baleTons, revenue });
       updateHud();
@@ -3445,6 +3789,7 @@ function refreshFieldPanel(force = false) {
         html += `<div class="small">Est. yield (narrows over the season)</div>
           <div class="rangebar"><div class="band" style="left:${l}%;width:${Math.max(2, w)}%"></div></div>
           <div class="small">${(range.low * acres).toFixed(0)}–${(range.high * acres).toFixed(0)} t total</div>`;
+        html += yieldWaterfallHtml(field, now);
       }
     }
     body.insertAdjacentHTML("beforeend", html);
@@ -3504,35 +3849,419 @@ function refreshFieldPanel(force = false) {
         actions.appendChild(btn);
       }
     }
+
+    // Optional post-harvest residue pass (annuals we aren't baling): available
+    // once the field is harvested, until it's plowed or baled. +7% next crop.
+    if (!auto && canMulch(save, field) && tasksFor(save, field.id, "mulch").length === 0) {
+      const cost = taskCost(field, "mulch");
+      const btn = document.createElement("button");
+      btn.innerHTML = `🍂 Queue Mulch <span class="small">$${cost.toLocaleString()}</span>`;
+      btn.title = "Shred crop residue back in — +7% to the next crop's yield";
+      btn.addEventListener("click", () => queueFromPanel(field, "mulch"));
+      actions.appendChild(btn);
+    }
+  }
+}
+
+/** Field Schedule tab: the Auto-manage switch + the rotation-plan editor
+ * (crop per year, weed/fertilize/bale toggles) + a monthly drag-drop calendar
+ * of the active/viewed rotation year's task months. */
+function refreshFieldScheduleTab(field: Field, now: number, _force: boolean): void {
+  const auto = !!field.autoManage;
+  ($("fp-auto") as HTMLInputElement).checked = auto;
+  // refreshPlanEditor has its own change-detection (lastPlansKey) so its
+  // dropdowns aren't rebuilt under the cursor on every tick.
+  refreshPlanEditor(field, now, auto);
+  refreshScheduleCalendar(field, now, auto);
+}
+
+// --- Field Schedule calendar (maintainer request, 2026-07-21; rotated to a
+//     VERTICAL layout 2026-07-21 to save horizontal space) -------------------
+/** Which rotation-year (plans[] index) the calendar is currently showing —
+ * independent of which year is actually ACTIVE right now (the maintainer
+ * asked for "active year only, with a year switcher", so the player can
+ * still page ahead/back to view or edit a future/past year's schedule).
+ * Reset to the active year whenever a different field is selected. */
+let scheduleViewFieldId: string | null = null;
+let scheduleViewYearIdx = 0;
+/** The Schedule calendar's own drag state — kept separate from the Work
+ * Queue's `draggingTaskId` (different domain/shape), mirroring its
+ * dragstart/dragover/drop pattern. */
+let draggingScheduleCell: { type: ScheduleTaskType } | null = null;
+
+/** Month ROWS top-to-bottom, in the game's season order (Mar→Feb, starting at
+ * START_MONTH) so the year reads Spring→Winter down the calendar, matching the
+ * year bar. `SCHEDULE_MONTH_ORDER[row]` = the real 0-11 month number. */
+const SCHEDULE_MONTH_ORDER: number[] = Array.from({ length: 12 }, (_, i) => (START_MONTH + i) % MONTHS_PER_YEAR);
+
+type ScheduleSeason = "spring" | "summer" | "fall" | "winter";
+function seasonOfMonth(m: number): ScheduleSeason {
+  if (m >= 2 && m <= 4) return "spring";
+  if (m >= 5 && m <= 7) return "summer";
+  if (m >= 8 && m <= 10) return "fall";
+  return "winter";
+}
+const SCHEDULE_SEASON_ICON: Record<ScheduleSeason, string> = { spring: "🌱", summer: "☀️", fall: "🍂", winter: "❄️" };
+
+/** One task COLUMN in the vertical calendar. A `type` marks a draggable/
+ * overridable task (plow/plant/weed/fertilize/harvest); its absence marks an
+ * auto-positioned column (mow/rake-bale/perennial fertilize). */
+interface ScheduleColumn {
+  icon: string;
+  label: string;
+  type?: ScheduleTaskType;
+  legal: Set<number>;   // months the task MAY occupy (draggable cols only)
+  active: Set<number>;  // months it currently occupies (both kinds)
+  toggleProp?: "weed" | "fertilize" | "mulch" | "bale";
+  on: boolean;
+  plantMonth?: number;
+}
+
+let lastScheduleCalKey = "";
+function refreshScheduleCalendar(field: Field, now: number, auto: boolean): void {
+  const yearBar = $("fp-schedule-year");
+  const host = $("fp-schedule-grid");
+  const msg = $("fp-schedule-msg");
+  if (!auto) {
+    // The schedule only drives the auto-manager — say so rather than leaving
+    // the tab blank when the field is under manual control.
+    yearBar.innerHTML = "";
+    host.innerHTML = `<div class="fp-sched-hint">Turn on <b>Auto-manage</b> above to lay out this field's task schedule. The schedule tells the auto-manager which month to run each step — it has no effect while you drive the field manually from the View tab.</div>`;
+    msg.textContent = "";
+    lastScheduleCalKey = "";
+    return;
+  }
+  if (!field.plans || field.plans.length === 0) field.plans = [defaultPlan()];
+  const plans = field.plans;
+  const perennialField = isPerennial(plans[0]!.crop);
+  const activeIdx = (dateOf(now).year - 1) % plans.length;
+
+  if (scheduleViewFieldId !== field.id) {
+    scheduleViewFieldId = field.id;
+    scheduleViewYearIdx = activeIdx;
+  }
+  if (scheduleViewYearIdx >= plans.length) scheduleViewYearIdx = plans.length - 1;
+  const viewIdx = perennialField ? 0 : scheduleViewYearIdx;
+  const plan = plans[viewIdx]!;
+
+  const key = [field.id, viewIdx, activeIdx, plans.length, JSON.stringify(plan)].join("|");
+  if (key === lastScheduleCalKey) return;
+  lastScheduleCalKey = key;
+
+  // --- Year switcher (only for a multi-year rotation) ---
+  yearBar.innerHTML = "";
+  if (!perennialField && plans.length > 1) {
+    const bar = document.createElement("div");
+    bar.className = "fp-sched-yearbar";
+    const prev = document.createElement("button");
+    prev.textContent = "‹";
+    prev.disabled = viewIdx <= 0;
+    prev.addEventListener("click", () => {
+      scheduleViewYearIdx = viewIdx - 1;
+      lastScheduleCalKey = "";
+      refreshFieldPanel(true);
+    });
+    const label = document.createElement("span");
+    label.textContent = `Yr ${viewIdx + 1}` + (viewIdx === activeIdx ? " ·" : "");
+    label.title = viewIdx === activeIdx ? "The rotation year running now" : "";
+    const next = document.createElement("button");
+    next.textContent = "›";
+    next.disabled = viewIdx >= plans.length - 1;
+    next.addEventListener("click", () => {
+      scheduleViewYearIdx = viewIdx + 1;
+      lastScheduleCalKey = "";
+      refreshFieldPanel(true);
+    });
+    bar.appendChild(prev);
+    bar.appendChild(label);
+    bar.appendChild(next);
+    yearBar.appendChild(bar);
   }
 
-  // --- Access points: two gates machines enter/leave through. Invisible on
-  // the map until this edit mode shows their draggable markers. ---
-  {
-    const editing = accessEditFieldId === field.id;
-    const row = document.createElement("div");
-    row.className = "access-row";
-    if (editing) {
-      row.insertAdjacentHTML("beforeend", `<div class="small">Drag the two 🚪 markers on the map, then press Done.</div>`);
-    }
-    const btn = document.createElement("button");
-    btn.className = editing ? "primary" : "";
-    btn.style.width = "100%";
-    btn.textContent = editing ? "✅ Done — save access points" : "🚪 Edit access points";
-    btn.title = "The two gates machines use to enter and leave this field";
-    btn.addEventListener("click", () => {
-      if (accessEditFieldId === field.id) {
-        stopAccessEdit();
-        toast(`🚪 ${fieldLabel(field)}'s access points saved`);
-        refreshFieldPanel(true);
-      } else {
-        startAccessEdit(field);
-        toast("🚪 Drag the markers to move this field's gates");
-      }
+  // --- Build the task columns for this plan ---
+  const plantMonth = effectiveMonthFor("plant", plan.crop, plan.schedule?.plant);
+  const cols: ScheduleColumn[] = [];
+  const taskCol = (icon: string, label: string, type: ScheduleTaskType, pm: number | undefined, toggleProp?: "weed" | "fertilize" | "mulch"): void => {
+    const eff = effectiveMonthFor(type, plan.crop, plan.schedule?.[type], pm);
+    cols.push({
+      icon, label, type,
+      legal: new Set(legalMonthsFor(type, plan.crop, pm)),
+      active: new Set(eff !== undefined ? [eff] : []),
+      toggleProp, on: toggleProp ? !!plan[toggleProp] : true, plantMonth: pm,
     });
-    row.appendChild(btn);
-    actions.appendChild(row);
+  };
+  const autoCol = (icon: string, label: string, months: number[], toggleProp?: "fertilize" | "bale"): void => {
+    cols.push({ icon, label, legal: new Set(), active: new Set(months), toggleProp, on: toggleProp ? !!plan[toggleProp] : true });
+  };
+  taskCol("🚜", "Plow", "plow", undefined);
+  taskCol("🌱", "Plant", "plant", undefined);
+  if (perennialField) {
+    const cfg = gameConfig.crops[plan.crop];
+    autoCol("🌿", "Fertilize", cfg.fertilizeMonth !== undefined ? [cfg.fertilizeMonth] : [], "fertilize");
+    autoCol("🌾", "Mow", cfg.harvestMonths ?? []);
+    autoCol("📦", "Rake / Bale", cfg.harvestMonths ?? [], "bale");
+  } else {
+    taskCol("💦", "Weed", "weed", plantMonth, "weed");
+    taskCol("🌿", "Fertilize", "fertilize", plantMonth, "fertilize");
+    taskCol("🌾", "Harvest", "harvest", plantMonth);
+    // Optional residue pass — an alternative to baling; off by default.
+    taskCol("🍂", "Mulch", "mulch", plantMonth, "mulch");
+    const harvestEff = effectiveMonthFor("harvest", plan.crop, plan.schedule?.harvest, plantMonth);
+    autoCol("📦", "Rake / Bale", harvestEff !== undefined ? [harvestEff] : [], "bale");
   }
+
+  // --- Legend + vertical grid (months down the rows, tasks across the cols) ---
+  host.innerHTML = "";
+  host.insertAdjacentHTML(
+    "beforeend",
+    `<div class="fp-cal-legend">
+      <span><i class="lg-sched"></i>Scheduled — drag/click</span>
+      <span><i class="lg-legal"></i>Available</span>
+      <span><i class="lg-auto"></i>Automatic</span>
+    </div>`,
+  );
+  const grid = document.createElement("div");
+  grid.className = "fp-vcal-grid";
+  grid.style.gridTemplateColumns = `58px repeat(${cols.length}, 1fr)`;
+  host.appendChild(grid);
+
+  // Header row: a blank corner + one task-icon header per column.
+  grid.insertAdjacentHTML("beforeend", `<div class="fp-vcal-corner"></div>`);
+  for (const c of cols) {
+    grid.insertAdjacentHTML("beforeend", `<div class="fp-vcal-head" title="${c.label}">${c.icon}</div>`);
+  }
+
+  // One row per month: a season-tinted month label + each task's cell.
+  for (const m of SCHEDULE_MONTH_ORDER) {
+    const season = seasonOfMonth(m);
+    const firstOfSeason = m === 2 || m === 5 || m === 8 || m === 11;
+    const monthCell = document.createElement("div");
+    monthCell.className = `fp-vmonth ${season}`;
+    monthCell.innerHTML = `<span class="fp-vmonth-ico">${firstOfSeason ? SCHEDULE_SEASON_ICON[season] : ""}</span><span>${MONTH_SHORT[m]}</span>`;
+    grid.appendChild(monthCell);
+    for (const c of cols) grid.appendChild(scheduleCell(c, m, plan, msg));
+  }
+
+  // --- Defaults button: clear this year's month overrides (automatic timing). ---
+  const def = document.createElement("button");
+  def.className = "fp-sched-defaults";
+  def.textContent = "↺ Reset to automatic timing";
+  def.title = "Clear your month overrides for this year — each task goes back to running at its earliest natural time";
+  def.disabled = !plan.schedule || Object.keys(plan.schedule).length === 0;
+  def.addEventListener("click", () => {
+    plan.schedule = {};
+    msg.textContent = "";
+    editPlans();
+  });
+  host.appendChild(def);
+}
+
+/** One calendar cell for column `c` at month `m`. Consolidates the four cell
+ * states (scheduled/legal/auto/off/plain) and their interactions. */
+function scheduleCell(c: ScheduleColumn, m: number, plan: FieldPlan, msg: HTMLElement): HTMLElement {
+  const cell = document.createElement("div");
+  const isActive = c.active.has(m);
+  const isLegal = c.legal.has(m);
+  const toggleOnOff = () => {
+    if (!c.toggleProp) return;
+    plan[c.toggleProp] = !plan[c.toggleProp];
+    editPlans();
+  };
+
+  // Optional task turned OFF: a dim hollow marker at its would-be month;
+  // click to re-enable. No available/draggable cells while off.
+  if (isActive && c.toggleProp && !c.on) {
+    cell.className = "fp-cal-cell off";
+    cell.title = `${c.label} is off — click to turn it on`;
+    cell.addEventListener("click", toggleOnOff);
+    return cell;
+  }
+
+  // Scheduled + draggable (an overridable task at its current month).
+  if (isActive && c.type) {
+    const type = c.type;
+    cell.className = "fp-cal-cell scheduled";
+    cell.draggable = true;
+    cell.title = c.toggleProp ? "Drag to another month, or click to turn off" : "Drag to another month";
+    cell.addEventListener("dragstart", () => {
+      draggingScheduleCell = { type };
+      cell.classList.add("dragging");
+    });
+    cell.addEventListener("dragend", () => {
+      draggingScheduleCell = null;
+      cell.classList.remove("dragging");
+    });
+    if (c.toggleProp) cell.addEventListener("click", toggleOnOff);
+    return cell;
+  }
+
+  // Auto-positioned (mow/rake-bale/perennial fertilize) — not draggable.
+  if (isActive) {
+    cell.className = "fp-cal-cell auto";
+    if (c.toggleProp) {
+      cell.style.cursor = "pointer";
+      cell.title = "Automatic — click to turn off";
+      cell.addEventListener("click", toggleOnOff);
+    } else {
+      cell.title = "Automatic — runs right after harvest/mow, no scheduling";
+    }
+    return cell;
+  }
+
+  // Available month for a draggable task (drop target + click-to-set).
+  if (isLegal && c.type && c.on) {
+    const type = c.type;
+    const pm = c.plantMonth;
+    const applyMove = () => {
+      try {
+        setScheduleOverride(plan, type, m, pm);
+        msg.textContent = "";
+        editPlans();
+      } catch (err) {
+        msg.textContent = (err as Error).message;
+      }
+    };
+    cell.className = "fp-cal-cell legal";
+    cell.title = "Click, or drop the scheduled month here, to move this task";
+    cell.addEventListener("click", applyMove);
+    cell.addEventListener("dragover", (e) => {
+      if (!draggingScheduleCell || draggingScheduleCell.type !== type) return;
+      e.preventDefault();
+      cell.classList.add("drag-over");
+    });
+    cell.addEventListener("dragleave", () => cell.classList.remove("drag-over"));
+    cell.addEventListener("drop", (e) => {
+      e.preventDefault();
+      cell.classList.remove("drag-over");
+      if (!draggingScheduleCell || draggingScheduleCell.type !== type) return;
+      applyMove();
+    });
+    return cell;
+  }
+
+  cell.className = "fp-cal-cell"; // plain background track
+  return cell;
+}
+
+/** Field Finances tab: per-field multi-year profit & loss, mirroring the
+ * global Finance tab's cashflow table but scoped to one field and only 2
+ * categories (Expenses/Revenue — this field ledger has no Land & Equipment/
+ * Loan Expenses analog, those are whole-farm concepts). Revenue is modeled at
+ * production time (see sim/fieldLedger.ts's doc comment for why that's exact,
+ * not an approximation, under this game's flat-price economy). */
+let lastFieldFinKey = "";
+/** The body-portaled tooltip for the field-panel Finances table. Lives in
+ * <body> (not inside the cell) so it clears the panel's overflow clip and the
+ * #fieldpanel transform that would trap a position:fixed descendant. Reused
+ * across hovers; shows visually as a `.cf-tip`. */
+function fieldFinTipEl(): HTMLElement {
+  let el = document.getElementById("fp-cf-tip-float");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "fp-cf-tip-float";
+    el.className = "cf-tip";
+    el.style.position = "fixed";
+    document.body.appendChild(el);
+  }
+  return el;
+}
+function showFieldFinTip(cell: HTMLElement, html: string): void {
+  const el = fieldFinTipEl();
+  el.innerHTML = html;
+  const r = cell.getBoundingClientRect();
+  // Anchor the tip's bottom-left to the cell's top-left → opens up and right.
+  el.style.right = "auto";
+  el.style.left = `${r.left}px`;
+  el.style.bottom = `${window.innerHeight - r.top + 4}px`;
+  el.style.display = "block";
+}
+function hideFieldFinTip(): void {
+  const el = document.getElementById("fp-cf-tip-float");
+  if (el) el.style.display = "none";
+}
+
+function refreshFieldFinancesTab(field: Field, force: boolean): void {
+  const key = `${field.id}|${save.finance.openYear}|${JSON.stringify(save.fieldLedger?.[field.id] ?? {})}`;
+  if (!force && key === lastFieldFinKey) return;
+  lastFieldFinKey = key;
+  hideFieldFinTip(); // the table's about to be rebuilt — drop any stale hover tip
+
+  const body = $("fp-finances-body");
+  body.innerHTML = `<div class="small">Revenue is booked when produce is sold, at that month's seasonal price.</div>`;
+
+  const table = document.createElement("div");
+  table.className = "cf-table";
+  table.insertAdjacentHTML(
+    "beforeend",
+    `<div class="cf-row fp-cf-row cf-head"><div>Year</div><div>Expenses</div><div>Revenue</div><div>Net</div></div>`,
+  );
+  for (const year of fieldLedgerYears(save, field.id)) {
+    const y = save.fieldLedger?.[field.id]?.[year];
+    const row = document.createElement("div");
+    row.className = "cf-row fp-cf-row" + (year === save.finance.openYear ? " current" : "");
+    const crop = y?.crop;
+    const cropHtml = crop ? `<div class="cf-crop">${gameConfig.crops[crop].emoji} ${gameConfig.crops[crop].name}</div>` : "";
+    row.insertAdjacentHTML("beforeend", `<div class="cf-year">Yr ${year}${year === save.finance.openYear ? " ·" : ""}${cropHtml}</div>`);
+    for (const cat of ["expenses", "revenue"] as const) {
+      const total = fieldCategoryTotal(y, cat);
+      const cell = document.createElement("div");
+      cell.className = "cf-cell" + (total < 0 ? " neg" : total > 0 ? " pos" : "");
+      cell.textContent = cfAmount(total);
+      const items = Object.entries(y?.[cat] ?? {}).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+      if (items.length > 0) {
+        // Portaled to <body> (not appended to the cell) so it escapes .fp-main's
+        // overflow clip AND #fieldpanel's transform, which would otherwise trap
+        // a position:fixed child. Opens up and to the LEFT of the cell.
+        const tipHtml =
+          `<div class="cf-tip-title">${cat === "expenses" ? "Expenses" : "Revenue"} · Yr ${year}</div>` +
+          items.map(([n, v]) => `<div class="cf-tip-row"><span>${n}</span><span class="${v < 0 ? "neg" : "pos"}">${cfAmount(v)}</span></div>`).join("");
+        cell.addEventListener("mouseenter", () => showFieldFinTip(cell, tipHtml));
+        cell.addEventListener("mouseleave", hideFieldFinTip);
+      }
+      row.appendChild(cell);
+    }
+    const net = fieldNetCashflow(y);
+    row.insertAdjacentHTML("beforeend", `<div class="cf-cell cf-net ${net < 0 ? "neg" : net > 0 ? "pos" : ""}">${cfAmount(net)}</div>`);
+    table.appendChild(row);
+  }
+  body.appendChild(table);
+}
+
+/** Field Settings tab: misc field-level settings — for now, just the
+ * access-point editor (moved verbatim from the old refreshFieldPanel tail;
+ * startAccessEdit/stopAccessEdit need no changes, they're driven by
+ * accessEditFieldId module state, not by where this button's markup lives). */
+let lastSettingsKey = "";
+function refreshFieldSettingsTab(field: Field, force: boolean): void {
+  const editing = accessEditFieldId === field.id;
+  const key = [field.id, editing ? 1 : 0].join("|");
+  if (!force && key === lastSettingsKey) return;
+  lastSettingsKey = key;
+
+  const body = $("fp-settings-body");
+  body.innerHTML = "";
+  const row = document.createElement("div");
+  row.className = "access-row";
+  if (editing) {
+    row.insertAdjacentHTML("beforeend", `<div class="small">Drag the two 🚪 markers on the map, then press Done.</div>`);
+  }
+  const btn = document.createElement("button");
+  btn.className = editing ? "primary" : "";
+  btn.style.width = "100%";
+  btn.textContent = editing ? "✅ Done — save access points" : "🚪 Edit access points";
+  btn.title = "The two gates machines use to enter and leave this field";
+  btn.addEventListener("click", () => {
+    if (accessEditFieldId === field.id) {
+      stopAccessEdit();
+      toast(`🚪 ${fieldLabel(field)}'s access points saved`);
+      refreshFieldPanel(true);
+    } else {
+      startAccessEdit(field);
+      toast("🚪 Drag the markers to move this field's gates");
+    }
+  });
+  row.appendChild(btn);
+  body.appendChild(row);
 }
 
 function prettyId(id: string): string {

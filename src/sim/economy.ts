@@ -12,9 +12,13 @@ import { gameConfig } from "../config/gameConfig";
 import type { CropId, BaleProduct } from "../config/gameConfig";
 import type { SaveState, Field, Agent, Implement, Building } from "../state/saveState";
 import { areaAcres } from "../geo/geometry";
-import { agentPrice, implementPrice } from "./tasks";
+import { agentPrice, implementPrice, appendCompletedTask } from "./tasks";
 import type { EquipmentKind } from "./tasks";
 import { recordCash } from "./ledger";
+import type { SimTime } from "./clock";
+import { START_MONTH, MONTHS_PER_YEAR, minutesPerMonth } from "./calendar";
+import { grainUnitPrice, baleUnitPrice, monthOf, attributeSale, SELLABLE_GRAINS } from "./market";
+import type { MarketProduct } from "./market";
 
 export interface SaleResult {
   tons: number;
@@ -22,34 +26,42 @@ export interface SaleResult {
 }
 
 /**
- * Sell `tons` of `crop` from the bin (clamped to what's stored) at the flat
- * config price. Mutates the save; returns what actually sold.
+ * Sell `tons` of `crop` from the bin (clamped to what's stored) at the current
+ * month's SEASONAL price (`sim/market.ts`). Mutates the save; returns what
+ * actually sold.
  */
-export function sellGrain(save: SaveState, crop: CropId, tons: number): SaleResult {
+export function sellGrain(save: SaveState, crop: CropId, tons: number, now: SimTime): SaleResult {
   const available = save.grain[crop];
   const sold = Math.min(available, Math.max(0, tons));
   if (sold <= 0) return { tons: 0, revenue: 0 };
-  const revenue = Math.round(sold * gameConfig.crops[crop].sellPricePerTon);
+  const unit = grainUnitPrice(crop, monthOf(now));
+  const revenue = Math.round(sold * unit);
   save.grain[crop] -= sold;
   save.money += revenue;
   recordCash(save, "cropRevenue", gameConfig.crops[crop].name, revenue);
+  // Pooled grain sale — credit source fields pro-rata at the actual sale price.
+  attributeSale(save, crop, sold, unit, { label: gameConfig.crops[crop].name });
   return { tons: sold, revenue };
 }
 
 /**
- * Sell every bale sitting in `field` at the flat config price. Mutates the save;
- * returns what sold. Bales are tracked per-field and stay put until sold (no
- * collection mechanic yet) — this is the field's "market interface."
+ * Sell every bale sitting in `field` at the current month's seasonal price.
+ * Mutates the save; returns what sold. Bales are tracked per-field and stay put
+ * until sold — this is the field's "market interface."
  */
-export function sellBales(save: SaveState, field: Field): { bales: number; revenue: number } {
+export function sellBales(save: SaveState, field: Field, now: SimTime): { bales: number; revenue: number } {
   const bales = field.baleLocations?.length ?? 0;
   if (bales <= 0) return { bales: 0, revenue: 0 };
-  const product = gameConfig.baleProducts[field.baleProduct ?? "cornStover"];
-  const revenue = Math.round(bales * product.pricePerBale);
+  const productId = field.baleProduct ?? "cornStover";
+  const product = gameConfig.baleProducts[productId];
+  const unit = baleUnitPrice(productId, monthOf(now));
+  const revenue = Math.round(bales * unit);
   field.baleLocations = [];
   save.money += revenue;
   // Book by product so the Finance cashflow breakdown separates hay/alfalfa/stover.
   recordCash(save, "cropRevenue", `${product.name} bales`, revenue);
+  // A field's OWN loose bales — attribute the revenue straight to this field.
+  attributeSale(save, productId, bales, unit, { label: `${product.name} bales`, fieldId: field.id });
   return { bales, revenue };
 }
 
@@ -64,8 +76,10 @@ export interface BaleStock {
 }
 
 /** Every bale sitting in every field, summed per product (2026-07-14) — the
- * Inventory tab's bale section. Only products with at least one bale appear. */
-export function baleInventory(save: SaveState): BaleStock[] {
+ * Inventory tab's bale section. `pricePerBale`/`value` are at the current
+ * month's seasonal price. Only products with at least one bale appear. */
+export function baleInventory(save: SaveState, now: SimTime): BaleStock[] {
+  const month = monthOf(now);
   const counts = new Map<BaleProduct, number>();
   for (const f of save.fields) {
     const n = f.baleLocations?.length ?? 0;
@@ -76,7 +90,8 @@ export function baleInventory(save: SaveState): BaleStock[] {
   const out: BaleStock[] = [];
   for (const [product, bales] of counts) {
     const cfg = gameConfig.baleProducts[product];
-    out.push({ product, name: cfg.name, bales, pricePerBale: cfg.pricePerBale, value: Math.round(bales * cfg.pricePerBale), color: cfg.color });
+    const unit = baleUnitPrice(product, month);
+    out.push({ product, name: cfg.name, bales, pricePerBale: Math.round(unit), value: Math.round(bales * unit), color: cfg.color });
   }
   // Stable, readable order (highest value first).
   return out.sort((a, b) => b.value - a.value);
@@ -84,29 +99,100 @@ export function baleInventory(save: SaveState): BaleStock[] {
 
 /** Sell the bales of `product` stored in one Bale Storage building at the flat
  * price (2026-07-17 — bales can now be hauled into storage). Mutates the save. */
-export function sellStoredBalesFrom(save: SaveState, building: Building, product: BaleProduct): { bales: number; revenue: number } {
+export function sellStoredBalesFrom(save: SaveState, building: Building, product: BaleProduct, now: SimTime): { bales: number; revenue: number } {
   const bales = building.storedBales?.[product] ?? 0;
   if (bales <= 0) return { bales: 0, revenue: 0 };
   const cfg = gameConfig.baleProducts[product];
-  const revenue = Math.round(bales * cfg.pricePerBale);
+  const unit = baleUnitPrice(product, monthOf(now));
+  const revenue = Math.round(bales * unit);
   building.storedBales![product] = 0;
   save.money += revenue;
   recordCash(save, "cropRevenue", `${cfg.name} bales`, revenue);
+  // Pooled storage — credit source fields pro-rata at the actual sale price.
+  attributeSale(save, product, bales, unit, { label: `${cfg.name} bales` });
   return { bales, revenue };
 }
 
 /** Sell EVERY field's bales of one product at once (Inventory "Sell all"). */
-export function sellBalesOfProduct(save: SaveState, product: BaleProduct): { bales: number; revenue: number } {
+export function sellBalesOfProduct(save: SaveState, product: BaleProduct, now: SimTime): { bales: number; revenue: number } {
   let bales = 0;
   let revenue = 0;
   for (const field of save.fields) {
     if ((field.baleLocations?.length ?? 0) === 0) continue;
     if ((field.baleProduct ?? "cornStover") !== product) continue;
-    const r = sellBales(save, field);
+    const r = sellBales(save, field, now);
     bales += r.bales;
     revenue += r.revenue;
   }
   return { bales, revenue };
+}
+
+// --- Auto-sell (maintainer request, 2026-07-21) ----------------------------
+
+let autoSellSeq = 0;
+
+/** Sell EVERYTHING of `product` currently in inventory at the current month's
+ * price and log it to the Completed feed — grain from the bin, bale products
+ * from every Bale-Storage building AND every field's loose bales. Used by the
+ * scheduled auto-sell. */
+export function sellAllOfProduct(save: SaveState, product: MarketProduct, now: SimTime): void {
+  if ((SELLABLE_GRAINS as string[]).includes(product)) {
+    const crop = product as CropId;
+    const { tons, revenue } = sellGrain(save, crop, Infinity, now);
+    if (tons > 0) {
+      appendCompletedTask(save, {
+        id: `autosell-${++autoSellSeq}`, type: "sellGrain", crop,
+        label: gameConfig.crops[crop].name, tons, revenue, completedAt: now,
+      });
+    }
+    return;
+  }
+  const p = product as BaleProduct;
+  let bales = 0;
+  let revenue = 0;
+  for (const b of save.buildings) {
+    if (b.kind !== "baleBarn" && b.kind !== "baleArea") continue;
+    const r = sellStoredBalesFrom(save, b, p, now);
+    bales += r.bales;
+    revenue += r.revenue;
+  }
+  const fr = sellBalesOfProduct(save, p, now);
+  bales += fr.bales;
+  revenue += fr.revenue;
+  if (bales > 0) {
+    appendCompletedTask(save, {
+      id: `autosell-${++autoSellSeq}`, type: "sellBales",
+      label: gameConfig.baleProducts[p].name, bales, tons: bales * gameConfig.forage.baleTons,
+      revenue, completedAt: now,
+    });
+  }
+}
+
+/**
+ * Fire any due scheduled auto-sells (call once per tick, after `tickLoans`).
+ * Loops over every month crossed since the last call — like `tickLoans`'s
+ * payment loop — so it survives time-compression / skip-month and fires each
+ * product's sell exactly once in its chosen month. Prices each month's sale at
+ * that month's seasonal rate.
+ */
+export function tickAutoSell(save: SaveState, now: SimTime): void {
+  save.sellSchedule ??= {};
+  const curAbs = Math.floor(now / minutesPerMonth());
+  if (save.sellLastMonthAbs === undefined) {
+    // First run (new game / freshly-loaded save) — arm the cursor, never
+    // retro-fire for months that already elapsed.
+    save.sellLastMonthAbs = curAbs;
+    return;
+  }
+  if (curAbs <= save.sellLastMonthAbs) return;
+  for (let mAbs = save.sellLastMonthAbs + 1; mAbs <= curAbs; mAbs++) {
+    const cal = (START_MONTH + mAbs) % MONTHS_PER_YEAR;
+    const monthNow = mAbs * minutesPerMonth(); // a sim-time in that month → correct price
+    for (const [product, sched] of Object.entries(save.sellSchedule)) {
+      if (sched.auto && sched.month === cal) sellAllOfProduct(save, product as MarketProduct, monthNow);
+    }
+  }
+  save.sellLastMonthAbs = curAbs;
 }
 
 /** A field's liquidation value — mirrors `sellField`'s refund exactly (what

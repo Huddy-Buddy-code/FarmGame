@@ -92,6 +92,87 @@ describe("auto-manage runs the field's rotation plan", () => {
     expect(field.autoFertDone).toBe(true);
   });
 
+  it("field.plans with no schedule set behaves byte-identical to before (regression guard)", () => {
+    const save = gameWithAgents();
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary, status: "tilled", autoManage: true,
+      plans: [{ crop: "corn" }],
+    };
+    save.fields.push(field);
+    expect(field.plans![0]!.schedule).toBeUndefined();
+    runUntil(save, APRIL_1, () => field.crop === "corn");
+    expect(field.crop).toBe("corn"); // plants at the earliest legal month, same as always
+  });
+
+  it("a plow override skips an otherwise-legal winter month and fires once the chosen month arrives", () => {
+    const save = gameWithAgents();
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary, status: "stubble", autoManage: true,
+      plans: [{ crop: "corn", schedule: { plow: 0 } }], // Jan only (Dec/Feb are also normally legal)
+    };
+    save.fields.push(field);
+
+    const DEC_1 = 9 * minutesPerMonth();
+    // Run through the whole of December without ever satisfying `done` — the
+    // override should keep it un-plowed despite Dec being a legal plow month.
+    const afterDec = runUntil(save, DEC_1, () => false, minutesPerMonth() - 1);
+    expect(field.status).toBe("stubble");
+    // Continue into January — the chosen month — and it fires.
+    runUntil(save, afterDec, () => field.status === "tilled");
+    expect(field.status).toBe("tilled");
+  });
+
+  it("a plant override skips the earliest legal month and fires once the chosen month arrives", () => {
+    const save = gameWithAgents();
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary, status: "tilled", autoManage: true,
+      // Corn's plantMonths are [3,4] (Apr,May) — earliest legal is April;
+      // override to May instead.
+      plans: [{ crop: "corn", schedule: { plant: 4 } }],
+    };
+    save.fields.push(field);
+
+    const afterApril = runUntil(save, APRIL_1, () => false, minutesPerMonth() - 1);
+    expect(field.crop).toBeUndefined(); // not planted in April despite being legal
+    runUntil(save, afterApril, () => field.crop === "corn");
+    expect(field.crop).toBe("corn"); // fires once May arrives
+  });
+
+  it("a harvest override delays queueing past the natural ready month, then fires once reached", () => {
+    const save = gameWithAgents();
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary, status: "tilled", autoManage: true,
+      // Corn planted in April, growMonths 4 -> naturally ready in August (month
+      // 7). Delay the harvest to October (month 9) instead.
+      plans: [{ crop: "corn", schedule: { harvest: 9 } }],
+    };
+    save.fields.push(field);
+
+    const afterPlant = runUntil(save, APRIL_1, () => field.status === "ready");
+    expect(field.status).toBe("ready");
+    // Ready, but not yet harvested — run through Aug/Sep without ever
+    // satisfying `done`, well past the natural ready point.
+    const afterWait = runUntil(save, afterPlant, () => false, 2 * minutesPerMonth() - 1);
+    expect(field.status).toBe("ready"); // still waiting on the override month
+    runUntil(save, afterWait, () => field.status === "harvested");
+    expect(field.status).toBe("harvested"); // fires once October arrives
+  });
+
+  it("a weed override still fires later in the legal window if it's scheduled at its LAST legal month, not just the first tick checked", () => {
+    const save = gameWithAgents();
+    buyImplement(save, "sprayer", "medium");
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary, status: "tilled", autoManage: true,
+      // Corn planted April: weed's legal window is [Jun, Jul] (plantMonth+2..
+      // plantMonth+growMonths-1). Schedule it at the LAST legal month (Jul).
+      plans: [{ crop: "corn", weed: true, schedule: { weed: 6 } }],
+    };
+    save.fields.push(field);
+
+    runUntil(save, APRIL_1, () => !!field.autoWeedDone);
+    expect(field.autoWeedDone).toBe(true);
+  });
+
   it("a plan without baling plows the residue under (no bales) even with the gear", () => {
     const save = gameWithAgents();
     buyImplement(save, "rake", "small");

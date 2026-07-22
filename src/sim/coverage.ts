@@ -220,6 +220,7 @@ export const TASK_HEADLANDS: Partial<Record<TaskType, HeadlandConfig>> = {
   fertilize: { laps: 1, order: "last" },
   weed: { laps: 1, order: "last" },
   mow: { laps: 3, order: "first" },
+  mulch: { laps: 3, order: "first" },
   rake: { laps: 3, order: "first" },
   bale: { laps: 3, order: "first" },
   harvest: { laps: 3, order: "first" },

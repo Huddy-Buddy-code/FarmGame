@@ -394,13 +394,13 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     const save = newGame();
     save.grain.corn = 50;
     const cash = save.money;
-    const r = sellGrain(save, "corn", Infinity);
+    const r = sellGrain(save, "corn", Infinity, 4 * minutesPerMonth());
     expect(r.tons).toBe(50);
     expect(r.revenue).toBe(Math.round(50 * gameConfig.crops.corn.sellPricePerTon));
     expect(save.money).toBe(cash + r.revenue);
     expect(save.grain.corn).toBe(0);
     // Selling from an empty bin is a no-op.
-    expect(sellGrain(save, "corn", 10)).toEqual({ tons: 0, revenue: 0 });
+    expect(sellGrain(save, "corn", 10, 4 * minutesPerMonth())).toEqual({ tons: 0, revenue: 0 });
   });
 });
 

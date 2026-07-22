@@ -162,6 +162,10 @@ export function applyPlant(field: Field, crop: CropId, now: SimTime, rand: () =>
   // and reset the weed cycle (a new flush can come with the new crop).
   field.autoWeedDone = undefined;
   field.autoFertDone = undefined;
+  // A fresh crop cycle: re-arm the once-per-cycle auto mulch guard so the pass
+  // can fire again after THIS crop's harvest. (residueMulched stays — it's the
+  // boost this new crop earned from the previous cycle's mulch.)
+  field.autoMulchDone = undefined;
   field.weedy = undefined;
   field.weeded = undefined;
   field.fertilized = undefined;
@@ -198,11 +202,17 @@ export function applyHarvestDone(field: Field): void {
     field.windrowed = undefined;
   }
   field.status = "harvested";
+  // Remember what just came off — the next crop planted here compares against
+  // this for the rotation yield bonus (productivityMultiplier).
+  field.lastCrop = field.crop;
   field.crop = undefined;
   field.plantedAt = undefined;
   field.trueYieldTonsPerAcre = undefined;
   // Reset the yield boost — a fresh crop cycle starts at the default 100%.
   field.fertilized = undefined;
+  // Consume the mulch bonus: it lifted THIS harvest (+7%); the next crop must
+  // be mulched again to earn it.
+  field.residueMulched = undefined;
 }
 
 /** Baling-complete effect: the windrows are gone and the field is left
@@ -249,21 +259,48 @@ export function growthProgress(field: Field, now: SimTime): number {
  *    default 100% once all of the year's cuttings are done. Re-fertilizing
  *    the following year restarts the taper (fertilized/cutsThisYear both
  *    reset on the year turn — see applyMowDone).
+ *  - Crop rotation adds +10% (`gameConfig.rotationBonusPct`) when the current
+ *    crop differs from the one this field grew immediately before
+ *    (`field.lastCrop`, set at harvest — see applyHarvestDone). No bonus for
+ *    replanting the same crop, and none on a field's first-ever crop (no prior
+ *    crop to rotate away from).
+ *  - A mulch pass on the previous cycle's residue adds a flat +7%
+ *    (`field.residueMulched`, set post-harvest by the mulch task, consumed by
+ *    the next harvest). Annuals only.
  * Read at whatever moment output is produced: live for a display estimate
  * (yieldRange), or at task-completion time for the actual harvested/baled
  * amount — both read the same current field state, so they agree.
  */
-export function productivityMultiplier(field: Field, now: SimTime): number {
-  let mult = 1;
-  if (field.weedy) mult -= 0.1;
+export interface YieldModifierStep {
+  label: string;
+  pct: number;
+}
+
+/** The individual modifiers behind `productivityMultiplier`, in application
+ * order — the source of truth it reduces over, only listing the ones
+ * currently active. Also feeds the Field View tab's yield breakdown graphic. */
+export function yieldModifierSteps(field: Field, now: SimTime): YieldModifierStep[] {
+  const steps: YieldModifierStep[] = [];
+  if (field.weedy) steps.push({ label: "Weeds", pct: -0.1 });
   if (field.fertilized) {
     if (isPerennial(field.crop)) {
       const totalCuts = (field.crop && gameConfig.crops[field.crop].harvestMonths?.length) || 0;
-      if (totalCuts > 0) mult += 0.3 * Math.max(0, 1 - cutsThisYear(field, now) / totalCuts);
+      if (totalCuts > 0) steps.push({ label: "Fertilizer", pct: 0.3 * Math.max(0, 1 - cutsThisYear(field, now) / totalCuts) });
     } else {
-      mult += 0.3;
+      steps.push({ label: "Fertilizer", pct: 0.3 });
     }
   }
+  // Mulched crop residue from the previous cycle adds a flat +7% (annuals only;
+  // the flag is never set on a perennial). Cleared by the next harvest.
+  if (field.residueMulched) steps.push({ label: "Mulch", pct: 0.07 });
+  if (field.crop && field.lastCrop !== undefined && field.lastCrop !== field.crop) {
+    steps.push({ label: "Rotation", pct: gameConfig.rotationBonusPct });
+  }
+  return steps;
+}
+
+export function productivityMultiplier(field: Field, now: SimTime): number {
+  const mult = 1 + yieldModifierSteps(field, now).reduce((sum, s) => sum + s.pct, 0);
   return Math.max(0, mult);
 }
 
