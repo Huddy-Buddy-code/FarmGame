@@ -6,9 +6,6 @@ import type { Field, SaveState } from "../src/state/saveState";
 import {
   recordFieldCash, recordFieldCrop, fieldCategoryTotal, fieldNetCashflow, fieldLedgerYears,
 } from "../src/sim/fieldLedger";
-import {
-  addProduce, grainUnitPrice, baleUnitPrice, seasonalMultiplier, monthOf,
-} from "../src/sim/market";
 import { sellGrain, sellBales } from "../src/sim/economy";
 import { ensureAgents, enqueueTask, cancelTask, tickTasks, buyImplement } from "../src/sim/tasks";
 import { applyPlant, tickFarming } from "../src/sim/farming";
@@ -131,7 +128,7 @@ describe("field-scoped booking at real call sites (integration)", () => {
     expect(fieldCategoryTotal(yB, "expenses")).not.toBe(0);
   });
 
-  it("grain revenue is booked at SALE time & price, not at harvest", () => {
+  it("grain revenue is booked at HARVEST time at the base config price", () => {
     const save = gameWithAgents();
     giveHaulingGear(save);
     const field = freshField("field-1", boundary100);
@@ -142,34 +139,18 @@ describe("field-scoped booking at real call sites (integration)", () => {
     tickFarming(save, ready); // jump straight to ready (no weed flush in between)
     enqueueTask(save, field, "harvest", ready);
     runUntil(save, ready, () => field.status === "harvested");
-    runUntil(save, ready, () => save.grain.corn >= 100 * gameConfig.crops.corn.baseYieldTonsPerAcre - 0.5);
 
-    // Harvest alone books NO field revenue — it just records provenance.
-    expect(fieldCategoryTotal(save.fieldLedger!["field-1"]?.[save.finance.openYear], "revenue")).toBe(0);
-
-    // Sell at the peak month (Dec = +25%); the whole pooled sale traces back to
-    // this one field, so it gets full credit at the sale price.
-    const dec = 9 * minutesPerMonth();
-    expect(seasonalMultiplier("corn", monthOf(dec))).toBeCloseTo(1.25, 6);
-    const banked = save.grain.corn;
-    const { revenue } = sellGrain(save, "corn", Infinity, dec);
+    // The moment the crop comes off: tons x base sellPricePerTon, no sale needed.
+    const expected = Math.round(100 * gameConfig.crops.corn.baseYieldTonsPerAcre * gameConfig.crops.corn.sellPricePerTon);
     const y = save.fieldLedger!["field-1"]![save.finance.openYear]!;
-    expect(fieldCategoryTotal(y, "revenue")).toBeCloseTo(revenue, 0);
-    expect(fieldCategoryTotal(y, "revenue")).toBeCloseTo(Math.round(banked * grainUnitPrice("corn", monthOf(dec))), 0);
-  });
+    expect(fieldCategoryTotal(y, "revenue")).toBeCloseTo(expected, -1);
+    expect(Object.keys(y.revenue ?? {})).toEqual([gameConfig.crops.corn.name]);
 
-  it("a pooled grain sale splits revenue pro-rata across contributing fields", () => {
-    const save = newGame();
-    addProduce(save, "corn", "field-a", 60);
-    addProduce(save, "corn", "field-b", 40);
-    save.grain.corn = 100;
-    const july = 4 * minutesPerMonth(); // base-price month
-    const unit = grainUnitPrice("corn", monthOf(july));
-    sellGrain(save, "corn", 100, july);
-    const yA = save.fieldLedger!["field-a"]![save.finance.openYear]!;
-    const yB = save.fieldLedger!["field-b"]![save.finance.openYear]!;
-    expect(fieldCategoryTotal(yA, "revenue")).toBeCloseTo(Math.round(60 * unit), 0);
-    expect(fieldCategoryTotal(yB, "revenue")).toBeCloseTo(Math.round(40 * unit), 0);
+    // A later sale of the pooled grain books NO additional field revenue.
+    const before = fieldCategoryTotal(y, "revenue");
+    runUntil(save, ready, () => save.grain.corn >= 100 * gameConfig.crops.corn.baseYieldTonsPerAcre - 0.5);
+    sellGrain(save, "corn", Infinity, 9 * minutesPerMonth());
+    expect(fieldCategoryTotal(y, "revenue")).toBe(before);
   });
 
   it("the plant task stamps the year's crop on the field ledger (Finances crop icon)", () => {
@@ -181,7 +162,7 @@ describe("field-scoped booking at real call sites (integration)", () => {
     expect(save.fieldLedger!["field-1"]![save.finance.openYear]!.crop).toBe("corn");
   });
 
-  it("a field's own bale sale credits that field at the sale month's price (not at bale time)", () => {
+  it("bale revenue is booked at BALE time at the base per-bale price", () => {
     const save = gameWithAgents();
     buyImplement(save, "mower", "medium");
     buyImplement(save, "rake", "small");
@@ -199,15 +180,16 @@ describe("field-scoped booking at real call sites (integration)", () => {
     enqueueTask(save, field, "bale", now);
     now = runUntil(save, now, () => field.status === "growing"); // applyBaleDone's perennial settle
 
-    // Baling books NO field revenue yet — the bales sit unsold.
-    expect(fieldCategoryTotal(save.fieldLedger!["field-1"]?.[save.finance.openYear], "revenue")).toBe(0);
-
+    // Bale-run completion books bales x base pricePerBale — no sale needed.
     const baleCount = field.baleLocations!.length;
-    const jan = 10 * minutesPerMonth(); // hay's peak too (+25%)
-    const { revenue } = sellBales(save, field, jan);
+    expect(baleCount).toBeGreaterThan(0);
     const y = save.fieldLedger!["field-1"]![save.finance.openYear]!;
     expect(Object.keys(y.revenue ?? {})).toEqual([`${gameConfig.baleProducts.hay.name} bales`]);
-    expect(fieldCategoryTotal(y, "revenue")).toBeCloseTo(revenue, 0);
-    expect(fieldCategoryTotal(y, "revenue")).toBeCloseTo(Math.round(baleCount * baleUnitPrice("hay", monthOf(jan))), 0);
+    expect(fieldCategoryTotal(y, "revenue")).toBe(Math.round(baleCount * gameConfig.baleProducts.hay.pricePerBale));
+
+    // Selling the bales later books NO additional field revenue.
+    const before = fieldCategoryTotal(y, "revenue");
+    sellBales(save, field, 10 * minutesPerMonth());
+    expect(fieldCategoryTotal(y, "revenue")).toBe(before);
   });
 });

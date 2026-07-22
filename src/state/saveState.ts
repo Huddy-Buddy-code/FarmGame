@@ -413,13 +413,9 @@ export interface SaveState {
    * whole-farm Finance tab is unaffected. Last 5 years per field, pruned in
    * `sim/fieldLedger.ts`. */
   fieldLedger?: Record<string, Record<number, import("../sim/fieldLedger").FieldLedgerYear>>;
-  /** Produce provenance (maintainer request, 2026-07-21): product -> fieldId ->
-   * amount produced-but-not-yet-sold (tons for grain, bales for bale products).
-   * Lets a pooled sale (grain bin / shared bale storage) credit its real
-   * revenue back to the source field(s) at sale time. Seeded from existing
-   * inventory on migration; "" keys are unattributed legacy stock. See
-   * `sim/market.ts`. */
-  produceStock?: Record<string, Record<string, number>>;
+  /** REMOVED 2026-07-22: `produceStock` (sale-time produce provenance) — field
+   * revenue is now booked at harvest/bale time in `sim/fieldLedger.ts`. Stale
+   * keys in old saves are simply ignored. */
   /** Auto-sell schedule (maintainer request, 2026-07-21): product -> chosen
    * sell month (0-11) + whether auto-sell is on. When on, all stored inventory
    * of that product is sold the moment the clock reaches that month

@@ -10,12 +10,13 @@
  * Finance tab is completely unaffected by this module's existence.
  *
  * Revenue is booked as PRODUCTION VALUE at harvest/bale completion time
- * (tons/bales x the flat, static config sell price), not traced through an
- * actual sale — grain pools farm-wide in a shared bin and hauled bales pool
- * in shared storage, so real-cash-at-sale per-field attribution isn't
- * reconstructable from existing data. Under this game's flat-price economy
- * (no dynamic market), that's not an approximation — it's exactly what the
- * tons/bales will sell for whenever they're actually sold.
+ * (tons/bales x the BASE config sell price), not traced through an actual
+ * sale — grain pools farm-wide in a shared bin and hauled bales pool in
+ * shared storage, so real-cash-at-sale per-field attribution was fragile and
+ * inconsistent (a sale-time provenance system existed 2026-07-21..22 and was
+ * removed, maintainer request). Any seasonal bonus captured at the actual
+ * sale simply isn't reflected per-field — base value is the deliberate,
+ * simple approximation.
  *
  * Sign convention matches ledger.ts: expenses negative, revenue positive.
  */

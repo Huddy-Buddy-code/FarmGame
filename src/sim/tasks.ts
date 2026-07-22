@@ -43,7 +43,7 @@ import { planRoute } from "./roadNet";
 import type { RoadNetwork } from "./roadNet";
 import { recordCash } from "./ledger";
 import { recordFieldCash, recordFieldCrop } from "./fieldLedger";
-import { addProduce, attributeSale, grainUnitPrice, baleUnitPrice, monthOf } from "./market";
+import { grainUnitPrice, baleUnitPrice, monthOf } from "./market";
 
 const ACRE_M2 = 4046.8564224;
 
@@ -1208,21 +1208,15 @@ function chooseBaleDest(save: SaveState, product: BaleProduct, from: Meters): { 
  * no Bale Storage exists or all of it's full (maintainer request,
  * 2026-07-17). Records the sale like any other bale sale so it shows up in
  * the Work Queue's Completed section + cashflow, even though no player click
- * triggered it.
- *
- * `fieldId` is the ONE field this specific load came from — always pass it.
- * Omitting it (bug fixed 2026-07-21) made `attributeSale` fall through to its
- * pooled/pro-rata path, splitting revenue across every OTHER field that
- * happened to have any unsold stock of this product, even though this
- * particular haul's provenance was completely unambiguous. */
-function sellHauledBales(save: SaveState, product: BaleProduct, n: number, now: SimTime, fieldId: string): void {
+ * triggered it. (Per-field revenue is already booked at bale time — no
+ * field attribution happens here.) */
+function sellHauledBales(save: SaveState, product: BaleProduct, n: number, now: SimTime): void {
   if (n <= 0) return;
   const cfg = gameConfig.baleProducts[product];
   const unit = baleUnitPrice(product, monthOf(now));
   const revenue = Math.round(n * unit);
   save.money += revenue;
   recordCash(save, "cropRevenue", `${cfg.name} bales`, revenue);
-  attributeSale(save, product, n, unit, { label: `${cfg.name} bales`, fieldId });
   appendCompletedTask(save, {
     id: `sale-${++taskSeq}`,
     type: "sellBales",
@@ -1269,16 +1263,14 @@ function chooseGrainDest(save: SaveState, crop: CropId, from: Meters): { pos: Me
 /** Sell a grain cart's load at a Sell Point on the spot — its fallback when the
  * silos are full/absent (maintainer request, 2026-07-20). Flat crop price, same
  * as selling from a silo; recorded so it shows in the Completed list + cashflow.
- *
- * `fieldId` is the ONE field this specific load came from — see the matching
- * note on `sellHauledBales` for why this must never be omitted. */
-function sellHauledGrain(save: SaveState, crop: CropId, tons: number, now: SimTime, fieldId: string): void {
+ * (Per-field revenue is already booked at harvest time — no field attribution
+ * happens here.) */
+function sellHauledGrain(save: SaveState, crop: CropId, tons: number, now: SimTime): void {
   if (tons <= 1e-9) return;
   const unit = grainUnitPrice(crop, monthOf(now));
   const revenue = Math.round(tons * unit);
   save.money += revenue;
   recordCash(save, "cropRevenue", gameConfig.crops[crop].name, revenue);
-  attributeSale(save, crop, tons, unit, { label: gameConfig.crops[crop].name, fieldId });
   appendCompletedTask(save, {
     id: `sale-${++taskSeq}`,
     type: "sellGrain",
@@ -1540,7 +1532,7 @@ function tickAgent(
         const crop = trailer.cargoCrop!;
         if (task.unloadDest === "sell") {
           // Diverted to a Sell Point — offload the whole load for cash.
-          sellHauledGrain(save, crop, trailer.cargoTons ?? 0, now, task.fieldId);
+          sellHauledGrain(save, crop, trailer.cargoTons ?? 0, now);
           trailer.cargoTons = 0;
           trailer.cargoCrop = undefined;
           task.waitingForSilo = false;
@@ -1704,7 +1696,7 @@ function tickAgent(
           }
           task.trailerTimer = undefined;
           if (task.trailerDest === "sell") {
-            sellHauledBales(save, product, tCargo, now, task.fieldId);
+            sellHauledBales(save, product, tCargo, now);
             trailerImpl.cargoBales = 0;
             trailerImpl.cargoBaleProduct = undefined;
             task.waitingForStorage = false;
@@ -1852,7 +1844,7 @@ function tickAgent(
         }
         task.phaseTimer = undefined;
         if (task.haulDest === "sell") {
-          sellHauledBales(save, product, spikes.cargoBales ?? 0, now, task.fieldId);
+          sellHauledBales(save, product, spikes.cargoBales ?? 0, now);
           spikes.cargoBales = 0;
           spikes.cargoBaleProduct = undefined;
           task.waitingForStorage = false;
@@ -2127,11 +2119,13 @@ function tickAgent(
         const baledCount = field.baleLocations?.length ?? totalBales;
         completeTask(task, field, now, rand);
         recordCompletion(save, task, field, agent, now, { tons: baledCount * baleTons, bales: baledCount });
-        // Revenue is booked at SALE time now (seasonal prices) — record this
-        // field's produce so its eventual sale credits back here. applyBaleDone
-        // (inside completeTask) already stamped field.baleProduct while the
-        // crop was still readable, so it's authoritative here.
-        addProduce(save, field.baleProduct ?? "cornStover", field.id, baledCount);
+        // Field Finances (2026-07-22): revenue is booked HERE, at bale time —
+        // bales x the base config price. Simpler and consistent vs. tracing the
+        // eventual sale of pooled storage back to fields. applyBaleDone (inside
+        // completeTask) already stamped field.baleProduct while the crop was
+        // still readable, so it's authoritative here.
+        const baleCfg = gameConfig.baleProducts[field.baleProduct ?? "cornStover"];
+        recordFieldCash(save, field.id, "revenue", `${baleCfg.name} bales`, Math.round(baledCount * baleCfg.pricePerBale));
         changed.push(field);
         events.push({ kind: "finished", task, agent });
         clearTaskRuntime(task.id);
@@ -2237,14 +2231,12 @@ function tickAgent(
         : undefined;
       completeTask(task, field, now, rand);
       recordCompletion(save, task, field, agent, now, harvestTons !== undefined ? { tons: harvestTons } : {});
-      // Field Finances tab (2026-07-21): modeled revenue at production time —
-      // tons x the flat config sell price. Under this game's static-price
-      // economy that's exactly what it'll sell for, whenever it's actually
-      // sold from the shared grain bin (which has no per-field trace).
+      // Field Finances tab (2026-07-22): revenue at production time — tons x
+      // the base config sell price, booked the moment the crop comes off. The
+      // grain pools farm-wide from here, so per-field sale tracing was dropped.
       if (harvestTons !== undefined && cropAtHarvest) {
-        // Revenue is booked at SALE time now (seasonal prices) — record this
-        // field's produce so its eventual sale credits back here.
-        addProduce(save, cropAtHarvest, field.id, harvestTons);
+        recordFieldCash(save, field.id, "revenue", gameConfig.crops[cropAtHarvest].name,
+          Math.round(harvestTons * gameConfig.crops[cropAtHarvest].sellPricePerTon));
         recordFieldCrop(save, field.id, cropAtHarvest);
       }
       // A finished rake changes no field STATUS, and its windrows are already on

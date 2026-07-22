@@ -123,26 +123,6 @@ if (loaded) {
   save.grain.alfalfa ??= 0;
   save.completedTasks ??= [];
   save.fieldLedger ??= {};
-  // Produce provenance (2026-07-21): seed from existing inventory so pre-feature
-  // saves still attribute sales — grain bin + building-stored bales as
-  // unattributed (""), each field's loose bales under its own id. (sellSchedule
-  // / sellLastMonthAbs are lazy-initialized in tickAutoSell.)
-  if (save.produceStock === undefined) {
-    const ps: Record<string, Record<string, number>> = {};
-    for (const c of Object.keys(save.grain) as CropId[]) {
-      if (save.grain[c] > 0) (ps[c] ??= {})[""] = save.grain[c];
-    }
-    for (const b of save.buildings) {
-      for (const [p, n] of Object.entries(b.storedBales ?? {})) {
-        if (n && n > 0) { const s = (ps[p] ??= {}); s[""] = (s[""] ?? 0) + n; }
-      }
-    }
-    for (const f of save.fields) {
-      const n = f.baleLocations?.length ?? 0;
-      if (n > 0) { const p = f.baleProduct ?? "cornStover"; const s = (ps[p] ??= {}); s[f.id] = (s[f.id] ?? 0) + n; }
-    }
-    save.produceStock = ps;
-  }
   initBuildingIdCounters(save);
   // Pre-finance saves: start the open borrowing year at whatever campaign
   // year the save was loaded at (tickLoans self-corrects instantly either
@@ -259,6 +239,7 @@ async function main() {
     refreshQueuePanel();
     clock.play(); // the world breathes from the start (idle-game 1×)
     requestAnimationFrame(gameLoop);
+    startBackgroundTick();
   });
 
   updateHud();
@@ -307,15 +288,38 @@ let lastFrame = performance.now();
 let lastUiRefresh = 0;
 
 function gameLoop(ts: number) {
-  const realSeconds = Math.min(1, (ts - lastFrame) / 1000); // clamp tab-sleep jumps
+  const realSeconds = Math.min(1, (ts - lastFrame) / 1000); // clamp OS-sleep jumps
   lastFrame = ts;
+  advanceSim(realSeconds);
+  requestAnimationFrame(gameLoop);
+}
 
+/** One sim step of `realSeconds` wall-clock time. Shared by the rAF loop and
+ * the background-tab fallback below. */
+function advanceSim(realSeconds: number) {
   const before = clock.time();
   clock.advance(realSeconds);
   tickWorld(before);
-  maybeAutoSkipMonth();
+  // No auto-skip while hidden: its montage animates on rAF, which is frozen in
+  // background tabs — it would stall mid-skip with the clock paused.
+  if (!document.hidden) maybeAutoSkipMonth();
+}
 
-  requestAnimationFrame(gameLoop);
+/** Keep the sim running while the tab is hidden or minimized: rAF freezes in
+ * background tabs, so a wall-clock interval takes over. Background timers get
+ * throttled (~1/s, ~1/min after 5 min hidden), but the sim advances by real
+ * elapsed time, so it just catches up in bigger steps — tickWorld already
+ * handles month-sized deltas (the skip montage pushes far larger ones). */
+function startBackgroundTick() {
+  setInterval(() => {
+    const now = performance.now();
+    // Run when hidden, or when rAF has stalled >2s for any other reason.
+    if (!document.hidden && now - lastFrame < 2000) return;
+    if (montageActive) return; // montage drives the clock itself
+    const realSeconds = (now - lastFrame) / 1000;
+    lastFrame = now;
+    advanceSim(realSeconds);
+  }, 1000);
 }
 
 /** Advance farming + fieldwork from the clock's previous time to now; repaint
@@ -4187,7 +4191,7 @@ function refreshFieldFinancesTab(field: Field, force: boolean): void {
   hideFieldFinTip(); // the table's about to be rebuilt — drop any stale hover tip
 
   const body = $("fp-finances-body");
-  body.innerHTML = `<div class="small">Revenue is booked when produce is sold, at that month's seasonal price.</div>`;
+  body.innerHTML = `<div class="small">Revenue is booked at harvest, at the base price of what came off the field.</div>`;
 
   const table = document.createElement("div");
   table.className = "cf-table";

@@ -17,7 +17,7 @@ import type { EquipmentKind } from "./tasks";
 import { recordCash } from "./ledger";
 import type { SimTime } from "./clock";
 import { START_MONTH, MONTHS_PER_YEAR, minutesPerMonth } from "./calendar";
-import { grainUnitPrice, baleUnitPrice, monthOf, attributeSale, SELLABLE_GRAINS } from "./market";
+import { grainUnitPrice, baleUnitPrice, monthOf, SELLABLE_GRAINS } from "./market";
 import type { MarketProduct } from "./market";
 
 export interface SaleResult {
@@ -39,8 +39,6 @@ export function sellGrain(save: SaveState, crop: CropId, tons: number, now: SimT
   save.grain[crop] -= sold;
   save.money += revenue;
   recordCash(save, "cropRevenue", gameConfig.crops[crop].name, revenue);
-  // Pooled grain sale — credit source fields pro-rata at the actual sale price.
-  attributeSale(save, crop, sold, unit, { label: gameConfig.crops[crop].name });
   return { tons: sold, revenue };
 }
 
@@ -60,8 +58,6 @@ export function sellBales(save: SaveState, field: Field, now: SimTime): { bales:
   save.money += revenue;
   // Book by product so the Finance cashflow breakdown separates hay/alfalfa/stover.
   recordCash(save, "cropRevenue", `${product.name} bales`, revenue);
-  // A field's OWN loose bales — attribute the revenue straight to this field.
-  attributeSale(save, productId, bales, unit, { label: `${product.name} bales`, fieldId: field.id });
   return { bales, revenue };
 }
 
@@ -108,8 +104,6 @@ export function sellStoredBalesFrom(save: SaveState, building: Building, product
   building.storedBales![product] = 0;
   save.money += revenue;
   recordCash(save, "cropRevenue", `${cfg.name} bales`, revenue);
-  // Pooled storage — credit source fields pro-rata at the actual sale price.
-  attributeSale(save, product, bales, unit, { label: `${cfg.name} bales` });
   return { bales, revenue };
 }
 

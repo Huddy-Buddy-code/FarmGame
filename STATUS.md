@@ -1498,6 +1498,31 @@ December**, tapering the same way around it.
   products"; `fieldLedger.test.ts` sale-at-peak moved Jan→Dec. **302/302,
   typecheck clean.**
 
+## Latest changes (2026-07-22, background-tab sim + field revenue at harvest)
+
+**Sim runs while tab hidden/minimized:** rAF freezes in background tabs and the
+old 1s frame clamp discarded hidden time. `main.ts`: extracted `advanceSim()`
+(shared sim step), added `startBackgroundTick()` — a 1s `setInterval` that
+advances the sim off wall-clock whenever the tab is hidden or rAF stalls >2s.
+Background-timer throttling just makes the catch-up chunkier (tickWorld already
+handles month-sized deltas). Auto-skip is suppressed while hidden (its montage
+needs rAF). OS sleep still pauses (clamp absorbs it, as before).
+
+**Field Finances revenue re-worked (maintainer request):** sale-time provenance
+attribution (2026-07-21's `produceStock` + `addProduce`/`attributeSale`) was
+inconsistent — REMOVED. Per-field revenue is now booked once, at
+harvest/bale-run completion, as tons/bales x the BASE config price
+(`recordFieldCash` in `tasks.ts`). Sales no longer touch the field ledger at
+all (global `recordCash` cashflow unchanged; seasonal prices still apply to
+actual cash).
+- `market.ts`: provenance section deleted. `economy.ts`: 3 `attributeSale`
+  calls removed. `tasks.ts`: `sellHauledGrain`/`sellHauledBales` lost their
+  `fieldId` param. `saveState.ts`: `produceStock` field removed (stale keys in
+  old saves ignored); `main.ts` migration block deleted; Finances-tab caption
+  updated.
+- Tests: `fieldLedger.test.ts` sale-time tests rewritten for harvest-time
+  booking (pro-rata test dropped). **301/301, typecheck clean.**
+
 ## Known gaps / unverified
 
 - **Field panel Schedule calendar drag-and-drop is logic-tested only** — no
