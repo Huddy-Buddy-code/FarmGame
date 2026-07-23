@@ -1523,6 +1523,41 @@ actual cash).
 - Tests: `fieldLedger.test.ts` sale-time tests rewritten for harvest-time
   booking (pro-rata test dropped). **301/301, typecheck clean.**
 
+## Latest changes (2026-07-22, polish: six new crops + Inventory & Fields tab reworks)
+
+**Six new annual crops** (`gameConfig.ts`): Winter Wheat (Sep–Oct plant, 9-month
+overwinter, straw), Oats & Barley (cheap early-spring small grains, straw),
+Canola & Sunflowers (oilseeds — sunflowers ready Oct/Nov, riding the Dec price
+ramp), Potatoes (~2× corn's net/acre but ~$1k/ac sunk cost + ±45% yield risk +
+14 t/ac of silo pressure). Balance targets documented inline in the config.
+- New `straw` BaleProduct; `baleProductForField` now falls back via
+  `field.lastCrop` so post-harvest annual residue routes correctly
+  (corn→stover, small grains→straw). Grass emoji 🌾→🌿 (ceded to wheat).
+- `newGame()` seeds grain keys from config; load migration backfills any
+  missing crop keys. Ready-palette tints per crop in `fieldRender.ts`.
+- Crop calendar bands now WRAP the display-year edge (winter wheat overflowed
+  it — real bug, fixed with split bands).
+- New `tests/crops.test.ts` (config invariants + straw routing).
+
+**Inventory tab rework** (was "very busy"): the per-product 12-month price
+strips are GONE — the seasonal curve is identical for every product, so it's
+one note line now. New "Market" section: one compact row per product showing
+holdings wherever they sit (bin/storage/field), today's price + badge, a
+Sell-all button (routes through `sellAllOfProduct`, same as auto-sell), and
+the auto-sell month dropdown + toggle. Absorbs the old Unassigned-Grain and
+In-Field-Bales sections; per-silo/per-storage sell rows removed (silo rows are
+assignment + fill bar only). Panel retitled "Inventory & Market".
+
+**Fields tab rework** (was sparse): now a sortable management table — columns
+Field/Acres/Status/Yield/Net-this-year (from fieldLedger), inline auto-manage
+switch (same behavior as the field panel's, incl. seeding a starter plan) and
+a locate button per row, topped by a whole-farm summary strip (fields, acres,
+growing count, bales down, net YTD). Click headers to sort; numbers sort
+big-first on first click.
+
+**307/307 tests, typecheck clean.** UI changes are logic-tested only — the new
+Inventory/Fields layouts and the 10-crop calendar need eyes in a browser.
+
 ## Known gaps / unverified
 
 - **Field panel Schedule calendar drag-and-drop is logic-tested only** — no

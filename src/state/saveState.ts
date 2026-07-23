@@ -441,7 +441,8 @@ export function newGame(): SaveState {
     money: gameConfig.startingMoney,
     parcels: [],
     fields: [],
-    grain: { corn: 0, soybeans: 0, grass: 0, alfalfa: 0 },
+    // Every crop key present from day one; loads backfill new keys in main.ts.
+    grain: Object.fromEntries((Object.keys(gameConfig.crops) as CropId[]).map((c) => [c, 0])) as GrainBin,
     buildings: [],
     agents: [],
     implements: [],

@@ -460,31 +460,19 @@
       }
       .inv-sell-row .price { flex: 1; text-align: left; margin-right: 0; }
 
-      /* ---------- Auto-sell schedule: per-product price strip (2026-07-21) ---------- */
-      .sell-cal { margin: 4px 2px 12px; }
-      .sell-cal-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
-      .sell-cal-head .sc-icon { display: inline-flex; align-items: center; font-size: 16px; }
-      .sell-cal-head .name { font-weight: 700; font-size: 13px; }
-      .sell-cal-head .price { flex: 1; font-size: 11px; color: #8a7658; }
-      .sell-cal-head .sc-switch { flex-shrink: 0; }
-      .sell-cal-strip { display: grid; grid-template-columns: repeat(12, 1fr); gap: 2px; }
-      .sell-cal-cell {
-        position: relative; border-radius: 4px; border: 1.5px solid transparent; cursor: pointer;
-        min-height: 30px; display: flex; flex-direction: column; align-items: center;
-        justify-content: center; gap: 1px; padding: 2px 0; line-height: 1.1;
+      /* ---------- Market section (2026-07-22, replaces the per-product price
+         strips): one compact row per product — holdings, price, sell, and the
+         auto-sell month picker + switch. ---------- */
+      .mkt-note { font-size: 11.5px; color: #8a7658; margin: 4px 2px 8px; }
+      .mkt-row { margin: 5px 0; padding: 6px 10px; }
+      .mkt-row.empty { opacity: 0.55; }
+      .mkt-row .icon { font-size: 20px; width: 24px; text-align: center; }
+      .mkt-sellbtn { flex-shrink: 0; white-space: nowrap; }
+      .mkt-month {
+        font: inherit; font-size: 11px; font-weight: 600; padding: 3px 4px;
+        border-radius: 8px; border: 1.5px solid var(--wood); background: var(--cream);
+        flex-shrink: 0;
       }
-      .sell-cal-cell .mo { font-size: 8px; font-weight: 700; color: var(--wood-dark); white-space: nowrap; }
-      .sell-cal-cell .pct { font-size: 8.5px; font-weight: 700; color: var(--wood-dark); }
-      .sell-cal-cell .mk { position: absolute; top: -7px; right: -3px; font-size: 11px; }
-      /* Shaded by seasonal premium so the price curve is visible at a glance. */
-      .sell-cal-cell.p0 { background: rgba(138, 90, 51, 0.08); }
-      .sell-cal-cell.p0 .pct { color: #a89678; }
-      .sell-cal-cell.p10 { background: #ecdcae; }
-      .sell-cal-cell.p15 { background: #f0c874; }
-      .sell-cal-cell.p25 { background: var(--gold); }
-      .sell-cal-cell.scheduled { border-color: var(--green-dark); box-shadow: 0 0 0 1.5px var(--green-dark) inset; cursor: grab; }
-      .sell-cal-cell.scheduled:active { cursor: grabbing; }
-      .sell-cal-cell.drag-over { border-color: var(--green-dark); background: var(--green); }
 
       /* Silo capacity bar — sits under each crop's inv-row, fills left→right. */
       .silo-bar { margin: -2px 0 10px; }
@@ -613,17 +601,42 @@
         position: absolute; top: 10px; right: 12px; border: none; background: none;
         font-size: 16px; padding: 2px 6px; color: #8a7658;
       }
-      #fields-rows { display: flex; flex-direction: column; gap: 6px; }
+      #fields-rows { display: flex; flex-direction: column; gap: 4px; }
+      /* Whole-farm summary strip above the table (2026-07-22 rework). */
+      .ft-summary {
+        display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center;
+        font-size: 12px; color: #8a7658; padding: 2px 4px 6px;
+      }
+      .ft-summary b { color: var(--ink); }
+      .ft-summary .pos, .ft-num.pos { color: var(--green-dark); }
+      .ft-summary .neg, .ft-num.neg { color: var(--red); }
+      /* One shared grid so header + rows align: field | acres | status | yield
+         | net | auto | locate. */
+      .ft-row {
+        display: grid; align-items: center; gap: 8px;
+        grid-template-columns: minmax(110px, 1.2fr) 52px minmax(90px, 1fr) minmax(72px, 0.9fr) 82px 40px 34px;
+      }
+      .ft-head { padding: 0 12px; }
+      .ft-h {
+        font-size: 10px; font-weight: 700; color: #b3a184; text-transform: uppercase;
+        letter-spacing: 0.05em; cursor: pointer; user-select: none; white-space: nowrap;
+      }
+      .ft-h:hover, .ft-h.active { color: #8a7658; }
       .field-row {
-        display: flex; align-items: center; gap: 10px; cursor: pointer;
-        background: var(--cream-2); border: 1.5px solid var(--wood);
-        border-radius: 12px; padding: 8px 12px; transition: background 0.12s;
+        cursor: pointer; background: var(--cream-2); border: 1.5px solid var(--wood);
+        border-radius: 12px; padding: 6px 12px; transition: background 0.12s;
       }
       .field-row:hover { background: #ead9b5; }
-      .field-row .fr-name { font-weight: 700; }
-      .field-row .fr-sub { font-size: 12px; color: #8a7658; }
-      .field-row .fr-info { flex: 1; min-width: 0; }
-      .field-row .fr-yield { font-size: 12px; text-align: right; color: #8a7658; }
+      .field-row .ft-name {
+        font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px;
+        min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .field-row .ft-name .icon { font-size: 18px; }
+      .field-row .ft-num { font-size: 12px; color: #8a7658; white-space: nowrap; }
+      .field-row .ft-status {
+        font-size: 12px; color: #8a7658; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .ft-switch { transform: scale(0.85); transform-origin: left center; }
       #fields-empty { font-size: 13px; color: #8a7658; padding: 10px 2px; }
 
       /* ---------- Equipment tab (fleet management) ---------- */
@@ -1043,8 +1056,8 @@
 
     <div id="inventory" class="panel">
       <button class="close" id="inv-close">✕</button>
-      <h2>📦 Storage</h2>
-      <div class="sub">Your silos &amp; bale storage · sold at local flat price (market &amp; hauling coming soon)</div>
+      <h2>📦 Inventory &amp; Market</h2>
+      <div class="sub">Everything you've grown — sell it now or schedule the month it sells itself</div>
       <div id="inv-rows"></div>
     </div>
 

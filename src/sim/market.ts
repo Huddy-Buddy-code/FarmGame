@@ -31,7 +31,7 @@ export const SELLABLE_GRAINS: CropId[] = (Object.keys(gameConfig.crops) as CropI
 );
 
 /** Bale products that are actually reachable/sellable (`forage` never is). */
-export const SELLABLE_BALES: BaleProduct[] = ["cornStover", "hay", "alfalfaHay"];
+export const SELLABLE_BALES: BaleProduct[] = ["cornStover", "straw", "hay", "alfalfaHay"];
 
 /** The single peak-price month (0-11) — December, shared by every product. */
 export function peakSaleMonth(): number {

@@ -40,7 +40,7 @@ import {
   switchFarm, deleteFarm, getActiveFarmId, loadGameFor,
 } from "./state/persistence";
 import type { PersistedGame } from "./state/persistence";
-import { sellGrain, sellBales, netWorth, baleInventory, sellBalesOfProduct, sellStoredBalesFrom, tickAutoSell } from "./sim/economy";
+import { sellBales, netWorth, baleInventory, sellAllOfProduct, tickAutoSell } from "./sim/economy";
 import {
   grainUnitPrice, baleUnitPrice, seasonalBonus, monthOf, peakSaleMonth,
   SELLABLE_GRAINS, SELLABLE_BALES,
@@ -117,10 +117,10 @@ if (loaded) {
   save.agents ??= [];
   save.implements ??= [];
   save.buildings ??= [];
-  // Pre-perennial saves: the grain bin gained grass/alfalfa keys (0 tons — they
-  // never bank grain anyway, but the record must have every crop key).
-  save.grain.grass ??= 0;
-  save.grain.alfalfa ??= 0;
+  // Older saves: the grain bin must carry a key for EVERY config crop —
+  // backfill whatever this save predates (perennials 2026-07-13, the six new
+  // annuals 2026-07-22, and anything added after).
+  for (const c of Object.keys(gameConfig.crops) as CropId[]) save.grain[c] ??= 0;
   save.completedTasks ??= [];
   save.fieldLedger ??= {};
   initBuildingIdCounters(save);
@@ -1414,38 +1414,107 @@ function buildingIndex(building: Building): number {
   return save.buildings.filter((b) => b.kind === building.kind).indexOf(building) + 1;
 }
 
-/** The Inventory tab's per-product auto-sell scheduler (maintainer request,
- * 2026-07-21). Drag state, kept separate from the other calendars' drag. */
-let draggingSellCell: { product: string } | null = null;
+/** The Market section (2026-07-22 rework, maintainer: the tab was "very
+ * busy"). ONE compact row per sellable product — holdings wherever they sit
+ * (bin / storage / field), today's price, a Sell-all button, and the auto-sell
+ * schedule (month dropdown + toggle). Replaces the per-product 12-month price
+ * strips: the seasonal curve is IDENTICAL for every product (fixed Dec peak),
+ * so it's explained once in the note line instead of drawn twelve times over.
+ * Also absorbs the old "Unassigned Grain" and "In-Field Bales" sections —
+ * holdings here are totals, so nothing can strand out of view. */
+function buildMarketSection(rows: HTMLElement): void {
+  const now = clock.time();
+  const month = monthOf(now);
+  rows.insertAdjacentHTML(
+    "beforeend",
+    `<div class="inv-heading">🏷️ Market</div>
+     <div class="mkt-note">Every product sells best in <b>December</b>: +25% Dec · +15% Nov &amp; Jan · +10% Oct &amp; Feb · base otherwise.</div>`,
+  );
 
-/** A compact horizontal 12-month price strip per sellable product: visualizes
- * the seasonal price curve (cells shaded by premium) AND lets the player pick
- * the auto-sell month (click / drag the 💰 marker) + toggle auto-sell on. */
-function buildSellScheduleSection(rows: HTMLElement): void {
-  rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">📅 Auto-Sell Schedule</div>`);
-  const month = monthOf(clock.time());
-  const products: { id: MarketProduct; name: string; iconHtml: string; unit: string; price: number }[] = [];
+  const fieldBales = new Map(baleInventory(save, now).map((s) => [s.product, s.bales]));
+  const claimed = new Set(save.buildings.filter((b) => b.kind === "silo").map((b) => b.assignedCrop).filter(Boolean));
+
+  interface MarketRow { id: MarketProduct; name: string; iconHtml: string; unit: string; unitPrice: number; qty: number; qtyLabel: string }
+  const products: MarketRow[] = [];
   for (const c of SELLABLE_GRAINS) {
-    products.push({ id: c, name: gameConfig.crops[c].name, iconHtml: gameConfig.crops[c].emoji, unit: "/t", price: grainUnitPrice(c, month) });
+    const cfg = gameConfig.crops[c];
+    const tons = save.grain[c];
+    const orphanNote = tons > 0 && !claimed.has(c) ? " · ⚠️ no silo assigned" : "";
+    products.push({
+      id: c, name: cfg.name, iconHtml: cfg.emoji, unit: "/t",
+      unitPrice: grainUnitPrice(c, month),
+      qty: tons,
+      qtyLabel: tons > 0 ? `${tons.toFixed(1)} t stored${orphanNote}` : "none stored",
+    });
   }
   for (const p of SELLABLE_BALES) {
-    products.push({ id: p, name: gameConfig.baleProducts[p].name, iconHtml: baleIconSvg(18, gameConfig.baleProducts[p].color), unit: "/bale", price: baleUnitPrice(p, month) });
+    const cfg = gameConfig.baleProducts[p];
+    const stored = save.buildings.reduce((s, b) => s + (b.storedBales?.[p] ?? 0), 0);
+    const inField = fieldBales.get(p) ?? 0;
+    const parts: string[] = [];
+    if (stored > 0) parts.push(`${stored} stored`);
+    if (inField > 0) parts.push(`${inField} in the field`);
+    products.push({
+      id: p, name: cfg.name, iconHtml: baleIconSvg(20, cfg.color), unit: "/bale",
+      unitPrice: baleUnitPrice(p, month),
+      qty: stored + inField,
+      qtyLabel: parts.length > 0 ? `${parts.join(" · ")} bales` : "no bales",
+    });
   }
 
   for (const prod of products) {
     const sched = save.sellSchedule?.[prod.id];
-    const wrap = document.createElement("div");
-    wrap.className = "sell-cal";
+    const row = document.createElement("div");
+    row.className = "inv-row mkt-row" + (prod.qty <= 0 ? " empty" : "");
+    row.innerHTML = `
+      <span class="icon">${prod.iconHtml}</span>
+      <span class="info">
+        <div class="name">${prod.name}</div>
+        <div class="qty">${prod.qtyLabel}</div>
+      </span>
+      <span class="price">$${Math.round(prod.unitPrice).toLocaleString()}${prod.unit} ${priceBadge(prod.id)}</span>`;
 
-    const head = document.createElement("div");
-    head.className = "sell-cal-head";
-    head.innerHTML = `
-      <span class="sc-icon">${prod.iconHtml}</span>
-      <span class="name">${prod.name}</span>
-      <span class="price">$${Math.round(prod.price).toLocaleString()}${prod.unit} ${priceBadge(prod.id)}</span>`;
+    // Sell EVERYTHING of this product, wherever it sits — same path the
+    // scheduled auto-sell takes (which also logs the Completed-feed entry).
+    const value = Math.round(prod.qty * prod.unitPrice);
+    const sellBtn = document.createElement("button");
+    sellBtn.className = "primary mkt-sellbtn";
+    sellBtn.textContent = prod.qty > 0 ? `Sell · $${value.toLocaleString()}` : "Sell";
+    sellBtn.disabled = prod.qty <= 0;
+    sellBtn.addEventListener("click", () => {
+      const before = save.money;
+      sellAllOfProduct(save, prod.id, clock.time());
+      const revenue = save.money - before;
+      if (revenue <= 0) return;
+      updateHud();
+      refreshInventory(true);
+      updateBaleMarkers();
+      if (selectedFieldId) refreshFieldPanel(true);
+      toast(`💰 Sold all ${prod.name.toLowerCase()} for $${revenue.toLocaleString()}`);
+    });
+    row.appendChild(sellBtn);
+
+    // Auto-sell: pick the month, flip the switch — tickAutoSell does the rest.
+    const select = document.createElement("select");
+    select.className = "mkt-month";
+    select.title = "Auto-sell month — everything of this product sells when this month arrives (if the switch is on)";
+    select.innerHTML = SCHEDULE_MONTH_ORDER.map((m) => {
+      const bonus = seasonalBonus(prod.id, m);
+      return `<option value="${m}">${MONTH_SHORT[m]}${bonus > 0 ? ` +${Math.round(bonus * 100)}%` : ""}</option>`;
+    }).join("");
+    select.value = String(sched?.month ?? peakSaleMonth());
+    select.addEventListener("change", () => {
+      const s = (save.sellSchedule ??= {});
+      const cur = s[prod.id] ?? { month: peakSaleMonth(), auto: false };
+      cur.month = Number(select.value);
+      s[prod.id] = cur;
+      refreshInventory(true);
+    });
+    row.appendChild(select);
+
     const toggle = document.createElement("label");
-    toggle.className = "switch sc-switch";
-    toggle.title = "Auto-sell all of this product when the highlighted month arrives";
+    toggle.className = "switch";
+    toggle.title = "Auto-sell all of this product when the chosen month arrives";
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = !!sched?.auto;
@@ -1458,52 +1527,9 @@ function buildSellScheduleSection(rows: HTMLElement): void {
     });
     toggle.appendChild(cb);
     toggle.insertAdjacentHTML("beforeend", `<span class="slider"></span>`);
-    head.appendChild(toggle);
-    wrap.appendChild(head);
+    row.appendChild(toggle);
 
-    const setMonth = (m: number): void => {
-      const s = (save.sellSchedule ??= {});
-      const cur = s[prod.id] ?? { month: m, auto: false };
-      cur.month = m;
-      s[prod.id] = cur;
-      refreshInventory(true);
-    };
-
-    const strip = document.createElement("div");
-    strip.className = "sell-cal-strip";
-    for (const m of SCHEDULE_MONTH_ORDER) {
-      const bonus = seasonalBonus(prod.id, m);
-      const tier = bonus >= 0.25 ? "p25" : bonus >= 0.15 ? "p15" : bonus >= 0.1 ? "p10" : "p0";
-      const isScheduled = sched?.month === m;
-      const firstOfSeason = m === 2 || m === 5 || m === 8 || m === 11;
-      const cell = document.createElement("div");
-      cell.className = `sell-cal-cell ${tier}` + (isScheduled ? " scheduled" : "");
-      cell.title = `${MONTH_SHORT[m]} — ${bonus > 0 ? `+${Math.round(bonus * 100)}% above base` : "base price"}${isScheduled ? " · scheduled sell month" : " · click to sell here"}`;
-      cell.innerHTML =
-        `<span class="mo">${firstOfSeason ? SCHEDULE_SEASON_ICON[seasonOfMonth(m)] + " " : ""}${MONTH_SHORT[m]}</span>` +
-        `<span class="pct">${bonus > 0 ? "+" + Math.round(bonus * 100) + "%" : "·"}</span>` +
-        (isScheduled ? `<span class="mk">💰</span>` : "");
-      cell.addEventListener("click", () => setMonth(m));
-      if (isScheduled) {
-        cell.draggable = true;
-        cell.addEventListener("dragstart", () => { draggingSellCell = { product: prod.id }; });
-        cell.addEventListener("dragend", () => { draggingSellCell = null; });
-      }
-      cell.addEventListener("dragover", (e) => {
-        if (draggingSellCell?.product !== prod.id) return;
-        e.preventDefault();
-        cell.classList.add("drag-over");
-      });
-      cell.addEventListener("dragleave", () => cell.classList.remove("drag-over"));
-      cell.addEventListener("drop", (e) => {
-        e.preventDefault();
-        cell.classList.remove("drag-over");
-        if (draggingSellCell?.product === prod.id) setMonth(m);
-      });
-      strip.appendChild(cell);
-    }
-    wrap.appendChild(strip);
-    rows.appendChild(wrap);
+    rows.appendChild(row);
   }
 }
 
@@ -1537,7 +1563,7 @@ function refreshInventory(force = false) {
   const rows = $("inv-rows");
   rows.innerHTML = "";
 
-  buildSellScheduleSection(rows);
+  buildMarketSection(rows);
 
   // --- Grain Silos ---
   const silos = save.buildings.filter((b) => b.kind === "silo");
@@ -1593,67 +1619,9 @@ function refreshInventory(force = false) {
       rows.insertAdjacentHTML("beforeend", `<div class="silo-bar-empty">Not assigned — pick a crop above to start filling it.</div>`);
       continue;
     }
-    const cfg = gameConfig.crops[crop];
-    const bar = siloCapacityBar(cfg, tons, capacity);
-    rows.appendChild(bar);
-    const unitPrice = grainUnitPrice(crop, monthOf(clock.time()));
-    const sellRow = document.createElement("div");
-    sellRow.className = "inv-row inv-sell-row";
-    sellRow.innerHTML = `<span class="price">${cfg.emoji} ${cfg.name} · $${Math.round(unitPrice).toLocaleString()}/t ${priceBadge(crop)}</span>`;
-    const sellBtn = document.createElement("button");
-    sellBtn.className = "primary";
-    const value = Math.round(tons * unitPrice);
-    sellBtn.textContent = tons > 0 ? `Sell all · $${value.toLocaleString()}` : "Empty";
-    sellBtn.disabled = tons <= 0;
-    sellBtn.addEventListener("click", () => {
-      const { tons: sold, revenue } = sellGrain(save, crop, tons, clock.time());
-      if (sold <= 0) return;
-      logSale("sellGrain", { crop, label: cfg.name, tons: sold, revenue });
-      updateHud();
-      refreshInventory();
-      toast(`💰 Sold ${sold.toFixed(1)} t of ${cfg.name.toLowerCase()} for $${revenue.toLocaleString()}`);
-    });
-    sellRow.appendChild(sellBtn);
-    rows.appendChild(sellRow);
-  }
-
-  // --- Unassigned grain safety net: a crop can end up with pooled tons but no
-  // silo currently claiming it (e.g. the assigned silo got sold) — still show
-  // it somewhere sellable rather than silently stranding it. ---
-  const claimed = new Set(silos.map((s) => s.assignedCrop).filter((c): c is CropId => !!c));
-  const orphaned = (Object.keys(gameConfig.crops) as CropId[]).filter(
-    (c) => gameConfig.crops[c].producesGrain !== false && !claimed.has(c) && save.grain[c] > 0,
-  );
-  if (orphaned.length > 0) {
-    rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">⚠️ Unassigned Grain</div>`);
-    for (const cropId of orphaned) {
-      const cfg = gameConfig.crops[cropId];
-      const tons = save.grain[cropId];
-      const unitPrice = grainUnitPrice(cropId, monthOf(clock.time()));
-      const row = document.createElement("div");
-      row.className = "inv-row";
-      row.innerHTML = `
-        <span class="icon">${cfg.emoji}</span>
-        <span class="info">
-          <div class="name">${cfg.name}</div>
-          <div class="qty">${tons.toFixed(1)} t · no silo claims it</div>
-        </span>
-        <span class="price">$${Math.round(unitPrice).toLocaleString()}/t ${priceBadge(cropId)}</span>`;
-      const btn = document.createElement("button");
-      btn.className = "primary";
-      const value = Math.round(tons * unitPrice);
-      btn.textContent = `Sell all · $${value.toLocaleString()}`;
-      btn.addEventListener("click", () => {
-        const { tons: sold, revenue } = sellGrain(save, cropId, Infinity, clock.time());
-        if (sold <= 0) return;
-        logSale("sellGrain", { crop: cropId, label: cfg.name, tons: sold, revenue });
-        updateHud();
-        refreshInventory();
-        toast(`💰 Sold ${sold.toFixed(1)} t of ${cfg.name.toLowerCase()} for $${revenue.toLocaleString()}`);
-      });
-      row.appendChild(btn);
-      rows.appendChild(row);
-    }
+    // Selling lives in the Market section now (2026-07-22) — a silo row is
+    // just assignment + fill level.
+    rows.appendChild(siloCapacityBar(gameConfig.crops[crop], tons, capacity));
   }
 
   // --- Bale storage structures (2026-07-17): now hold hauled bales (per
@@ -1679,10 +1647,9 @@ function refreshInventory(force = false) {
       // Optional product assignment — mirrors the silo crop dropdown.
       const select = document.createElement("select");
       select.className = "inv-crop-select";
-      const products: BaleProduct[] = ["cornStover", "hay", "alfalfaHay"];
       select.innerHTML =
         `<option value="">— any product —</option>` +
-        products.map((p) => `<option value="${p}">${gameConfig.baleProducts[p].name}</option>`).join("");
+        SELLABLE_BALES.map((p) => `<option value="${p}">${gameConfig.baleProducts[p].name}</option>`).join("");
       select.value = b.assignedProduct ?? "";
       select.addEventListener("change", () => {
         assignBaleStorageProduct(save, b.id, (select.value || undefined) as BaleProduct | undefined);
@@ -1703,68 +1670,16 @@ function refreshInventory(force = false) {
       );
       rows.appendChild(row);
 
-      // Per-product stored tally, each sellable at the flat price.
-      for (const p of products) {
-        const n = b.storedBales?.[p] ?? 0;
-        if (n <= 0) continue;
-        const cfg = gameConfig.baleProducts[p];
-        const unitPrice = baleUnitPrice(p, monthOf(clock.time()));
-        const value = Math.round(n * unitPrice);
-        const sellRow = document.createElement("div");
-        sellRow.className = "inv-row inv-sell-row";
-        sellRow.innerHTML = `<span class="price">${cfg.name} · ${n} bale${n === 1 ? "" : "s"} · $${Math.round(unitPrice).toLocaleString()}/bale ${priceBadge(p)}</span>`;
-        const sellBtn = document.createElement("button");
-        sellBtn.className = "primary";
-        sellBtn.textContent = `Sell all · $${value.toLocaleString()}`;
-        sellBtn.addEventListener("click", () => {
-          const { bales: sold, revenue } = sellStoredBalesFrom(save, b, p, clock.time());
-          if (sold <= 0) return;
-          logSale("sellBales", { label: cfg.name, bales: sold, tons: sold * gameConfig.forage.baleTons, revenue });
-          updateHud();
-          refreshInventory();
-          toast(`💰 Sold ${sold} stored ${cfg.name.toLowerCase()} bales for $${revenue.toLocaleString()}`);
-        });
-        sellRow.appendChild(sellBtn);
-        rows.appendChild(sellRow);
+      // Per-product stored tally — a compact counts line; selling lives in the
+      // Market section now (2026-07-22).
+      const held = SELLABLE_BALES
+        .map((p) => ({ p, n: b.storedBales?.[p] ?? 0 }))
+        .filter((x) => x.n > 0)
+        .map((x) => `${gameConfig.baleProducts[x.p].name} × ${x.n}`);
+      if (held.length > 0) {
+        rows.insertAdjacentHTML("beforeend", `<div class="silo-bar-empty">${held.join(" · ")}</div>`);
       }
     }
-  }
-
-  // --- In-field bales (2026-07-14): every field's bales summed per product —
-  // this IS where every bale lives today (baling drops them on the field and
-  // nothing moves them since there's no hauling mechanic), sellable in one
-  // click here as well as from a field's own panel. ---
-  const stocks = baleInventory(save, clock.time());
-  rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">🌾 In-Field Bales (not yet hauled)</div>`);
-  if (stocks.length === 0) {
-    rows.insertAdjacentHTML("beforeend", `<div class="silo-bar-empty">No bales sitting in any field right now.</div>`);
-  }
-  for (const stock of stocks) {
-    const tons = (stock.bales * gameConfig.forage.baleTons).toFixed(0);
-    const row = document.createElement("div");
-    row.className = "inv-row";
-    row.innerHTML = `
-      <span class="icon">${baleIconSvg(22, stock.color)}</span>
-      <span class="info">
-        <div class="name">${stock.name}</div>
-        <div class="qty">${stock.bales} bales · ${tons} t</div>
-      </span>
-      <span class="price">$${stock.pricePerBale.toLocaleString()}/bale ${priceBadge(stock.product)}</span>`;
-    const btn = document.createElement("button");
-    btn.className = "primary";
-    btn.textContent = `Sell all · $${stock.value.toLocaleString()}`;
-    btn.addEventListener("click", () => {
-      const { bales: sold, revenue } = sellBalesOfProduct(save, stock.product, clock.time());
-      if (sold <= 0) return;
-      logSale("sellBales", { label: stock.name, bales: sold, tons: sold * gameConfig.forage.baleTons, revenue });
-      updateHud();
-      refreshInventory();
-      updateBaleMarkers();
-      if (selectedFieldId) refreshFieldPanel(true);
-      toast(`💰 Sold ${sold} ${stock.name.toLowerCase()} bales for $${revenue.toLocaleString()}`);
-    });
-    row.appendChild(btn);
-    rows.appendChild(row);
   }
 }
 
@@ -2055,15 +1970,21 @@ function refreshSettingsTab(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Fields tab: every owned field at a glance — status, acres, expected yield.
-// Click a row to open its detail panel (where Plow/Plant/Harvest/Sell live).
+// Fields tab (reworked 2026-07-22): a sortable management table — crop/status,
+// acres, expected yield, this year's net P&L, plus inline auto-manage and
+// locate controls — topped by a whole-farm summary strip. Click a row to open
+// its detail panel (where Plow/Plant/Harvest/Sell live).
 // ---------------------------------------------------------------------------
 function wireFieldsTab() {
   $("btn-fields").addEventListener("click", () => toggleToolbarPanel("fieldstab", refreshFieldsTab));
   $("fields-close").addEventListener("click", () => ($("fieldstab").style.display = "none"));
 }
 
-/** Rebuild the fields list. Cheap no-op while the panel is hidden. */
+type FieldsSortKey = "name" | "acres" | "status" | "yield" | "net";
+let fieldsSortKey: FieldsSortKey = "name";
+let fieldsSortDesc = false;
+
+/** Rebuild the fields table. Cheap no-op while the panel is hidden. */
 function refreshFieldsTab() {
   const el = $("fieldstab");
   if (el.style.display !== "block") return;
@@ -2075,33 +1996,141 @@ function refreshFieldsTab() {
   }
 
   const now = clock.time();
-  rows.innerHTML = "";
-  for (const field of save.fields) {
+  const year = save.finance.openYear;
+
+  // Everything each row shows, computed once so sorting + summary reuse it.
+  const entries = save.fields.map((field) => {
     const acres = areaAcres(field.boundary);
     const pending = tasksFor(save, field.id);
     const statusLabel = isFieldHarvesting(save, field.id)
       ? "harvesting"
       : pending.length > 0
-        ? `${field.status} · ${pending.length} job${pending.length > 1 ? "s" : ""} queued`
+        ? `${field.status} · ${pending.length} job${pending.length > 1 ? "s" : ""}`
         : field.status;
-
-    let icon = "🟫";
+    const bales = field.baleLocations?.length ?? 0;
+    // Yield column: bales sitting out rank first (they're money on the
+    // ground), then a growing/ready annual's narrowing range, else —.
     let yieldText = "—";
-    if (field.crop) {
-      icon = gameConfig.crops[field.crop].emoji;
+    let yieldSort = 0;
+    if (bales > 0) {
+      yieldText = `${bales} bales down`;
+      yieldSort = bales;
+    } else if (field.crop && !isPerennial(field.crop)) {
       const range = yieldRange(field, now);
-      if (range) yieldText = `${(range.low * acres).toFixed(0)}–${(range.high * acres).toFixed(0)} t`;
+      if (range) {
+        yieldText = `${(range.low * acres).toFixed(0)}–${(range.high * acres).toFixed(0)} t`;
+        yieldSort = ((range.low + range.high) / 2) * acres;
+      }
     }
+    const net = fieldNetCashflow(save.fieldLedger?.[field.id]?.[year]);
+    return { field, acres, statusLabel, yieldText, yieldSort, net };
+  });
 
+  const dir = fieldsSortDesc ? -1 : 1;
+  entries.sort((a, b) => {
+    switch (fieldsSortKey) {
+      case "acres": return (a.acres - b.acres) * dir;
+      case "status": return a.statusLabel.localeCompare(b.statusLabel) * dir;
+      case "yield": return (a.yieldSort - b.yieldSort) * dir;
+      case "net": return (a.net - b.net) * dir;
+      default: return fieldLabel(a.field).localeCompare(fieldLabel(b.field), undefined, { numeric: true }) * dir;
+    }
+  });
+
+  rows.innerHTML = "";
+
+  // Whole-farm summary strip.
+  const totalAcres = entries.reduce((s, e) => s + e.acres, 0);
+  const totalNet = entries.reduce((s, e) => s + e.net, 0);
+  const totalBales = entries.reduce((s, e) => s + (e.field.baleLocations?.length ?? 0), 0);
+  const growing = entries.filter((e) => e.field.status === "growing" || e.field.status === "ready").length;
+  rows.insertAdjacentHTML(
+    "beforeend",
+    `<div class="ft-summary">
+      <span><b>${entries.length}</b> field${entries.length === 1 ? "" : "s"} · <b>${totalAcres.toFixed(0)}</b> ac</span>
+      <span><b>${growing}</b> growing</span>
+      ${totalBales > 0 ? `<span><b>${totalBales}</b> bales down</span>` : ""}
+      <span>Net Yr ${year}: <b class="${totalNet < 0 ? "neg" : "pos"}">${totalNet < 0 ? "−" : ""}$${Math.abs(totalNet).toLocaleString()}</b></span>
+    </div>`,
+  );
+
+  // Sortable header row.
+  const head = document.createElement("div");
+  head.className = "ft-row ft-head";
+  const cols: { key: FieldsSortKey | null; label: string }[] = [
+    { key: "name", label: "Field" },
+    { key: "acres", label: "Acres" },
+    { key: "status", label: "Status" },
+    { key: "yield", label: "Yield" },
+    { key: "net", label: `Net Yr ${year}` },
+    { key: null, label: "🤖" },
+    { key: null, label: "" },
+  ];
+  for (const col of cols) {
+    const cell = document.createElement("span");
+    const active = col.key !== null && fieldsSortKey === col.key;
+    cell.className = "ft-h" + (active ? " active" : "");
+    cell.textContent = col.label + (active ? (fieldsSortDesc ? " ↓" : " ↑") : "");
+    if (col.key !== null) {
+      const key = col.key;
+      cell.title = `Sort by ${col.label.toLowerCase()}`;
+      cell.addEventListener("click", () => {
+        if (fieldsSortKey === key) fieldsSortDesc = !fieldsSortDesc;
+        else {
+          fieldsSortKey = key;
+          // Numbers read best big-first on the first click; names A→Z.
+          fieldsSortDesc = key === "acres" || key === "yield" || key === "net";
+        }
+        refreshFieldsTab();
+      });
+    }
+    head.appendChild(cell);
+  }
+  rows.appendChild(head);
+
+  for (const e of entries) {
+    const { field } = e;
+    const icon = field.crop ? gameConfig.crops[field.crop].emoji : "🟫";
     const row = document.createElement("div");
-    row.className = "field-row";
+    row.className = "ft-row field-row";
     row.innerHTML = `
-      <span class="icon">${icon}</span>
-      <span class="fr-info">
-        <div class="fr-name">${fieldLabel(field)}</div>
-        <div class="fr-sub">${acres.toFixed(1)} ac · ${statusLabel}${field.autoManage ? " · 🤖" : ""}</div>
-      </span>
-      <span class="fr-yield">${yieldText}</span>`;
+      <span class="ft-name"><span class="icon">${icon}</span> ${fieldLabel(field)}</span>
+      <span class="ft-num">${e.acres.toFixed(1)}</span>
+      <span class="ft-status">${e.statusLabel}</span>
+      <span class="ft-num">${e.yieldText}</span>
+      <span class="ft-num ${e.net < 0 ? "neg" : e.net > 0 ? "pos" : ""}">${e.net === 0 ? "—" : `${e.net < 0 ? "−" : ""}$${Math.abs(e.net).toLocaleString()}`}</span>`;
+
+    // Inline auto-manage switch — same behavior as the field panel's toggle
+    // (seeds a starter plan and acts immediately on first flip).
+    const toggle = document.createElement("label");
+    toggle.className = "switch ft-switch";
+    toggle.title = field.autoManage ? "Auto-managed — click to take manual control" : "Hand this field to the rotation plan";
+    toggle.addEventListener("click", (ev) => ev.stopPropagation());
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!field.autoManage;
+    cb.addEventListener("change", () => {
+      field.autoManage = cb.checked;
+      if (field.autoManage) {
+        if (!field.plans || field.plans.length === 0) field.plans = [defaultPlan()];
+        autoManageField(save, field, clock.time());
+        renderField(mapRef, overlay, field, clock.time());
+        updateHud();
+        toast(`🤖 ${fieldLabel(field)} will run its rotation plan`);
+      } else {
+        toast(`🖐️ ${fieldLabel(field)} is back to manual control`);
+      }
+      refreshFieldsTab();
+      if (selectedFieldId === field.id) refreshFieldPanel(true);
+    });
+    toggle.appendChild(cb);
+    toggle.insertAdjacentHTML("beforeend", `<span class="slider"></span>`);
+    row.appendChild(toggle);
+
+    const locate = locateButton(fieldLabel(field), centroidOf(field.boundary));
+    locate.addEventListener("click", (ev) => ev.stopPropagation());
+    row.appendChild(locate);
+
     row.addEventListener("click", () => {
       el.style.display = "none";
       openFieldPanel(field.id);
@@ -2915,23 +2944,36 @@ function rebuildCropCalendarGrid() {
     html += `<div class="mo">${MONTH_SHORT[(START_MONTH + i) % MONTHS_PER_YEAR]}</div>`;
   }
   // One lane per crop with plant + harvest bands (percent of the display year).
+  // Bands can WRAP the display-year edge (winter wheat: planted Sep, ready
+  // Jun — 2026-07-22) — split into two segments instead of overflowing.
   const pct = (months: number) => (months / MONTHS_PER_YEAR) * 100;
+  const band = (cls: string, start: number, len: number): string => {
+    if (start + len > MONTHS_PER_YEAR) {
+      return (
+        `<div class="band ${cls}" style="left:${pct(start)}%;width:${pct(MONTHS_PER_YEAR - start)}%"></div>` +
+        `<div class="band ${cls}" style="left:0%;width:${pct(start + len - MONTHS_PER_YEAR)}%"></div>`
+      );
+    }
+    return `<div class="band ${cls}" style="left:${pct(start)}%;width:${pct(len)}%"></div>`;
+  };
   for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
     const cfg = gameConfig.crops[cropId];
     const plantStart = disp(cfg.plantMonths[0]!);
     const plantLen = cfg.plantMonths.length;
-    let bands = `<div class="band plant" style="left:${pct(plantStart)}%;width:${pct(plantLen)}%"></div>`;
+    let bands = band("plant", plantStart, plantLen);
     if (cfg.perennial) {
       // Perennials are cut on separate monthly windows — draw a plain harvest
       // bar per cutting month, same style as the annual crops below
       // (maintainer request: drop the special detached/inset "cut" look).
       for (const mo of cfg.harvestMonths ?? []) {
-        bands += `<div class="band harv" style="left:${pct(disp(mo))}%;width:${pct(1)}%"></div>`;
+        bands += band("harv", disp(mo), 1);
       }
     } else {
-      // Annual: harvest opens a grow-time after planting, as wide as the window.
-      const harvStart = plantStart + cfg.growMonths;
-      bands += `<div class="band harv" style="left:${pct(harvStart)}%;width:${pct(plantLen)}%"></div>`;
+      // Annual: harvest opens a grow-time after planting, as wide as the
+      // window — modulo a full year so an overwintering crop lands back
+      // inside the display year instead of off the right edge.
+      const harvStart = disp((cfg.plantMonths[0]! + cfg.growMonths) % MONTHS_PER_YEAR);
+      bands += band("harv", harvStart, plantLen);
     }
     html += `<div class="crop">${cfg.emoji} ${cfg.name}</div>
       <div class="lane">${bands}</div>`;

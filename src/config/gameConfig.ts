@@ -16,14 +16,20 @@
 
 /** Crops the player can plant (brief §6, §10). All numbers are balance = tunable.
  * Grass & Alfalfa (2026-07-13) are PERENNIAL forage crops — planted once, cut
- * 3× a year, never plowed/replanted (see `perennial`/`harvestMonths`). */
-export type CropId = "corn" | "soybeans" | "grass" | "alfalfa";
+ * 3× a year, never plowed/replanted (see `perennial`/`harvestMonths`).
+ * 2026-07-22: six more annuals (maintainer request) — wheat/oats/barley (small
+ * grains, straw residue), canola/sunflowers (oilseeds), potatoes (high-risk
+ * high-capital roots). */
+export type CropId =
+  | "corn" | "soybeans" | "grass" | "alfalfa"
+  | "wheat" | "oats" | "barley" | "canola" | "sunflowers" | "potatoes";
 
 /** What a field's dropped bales ARE, for pricing + coloring (2026-07-13). Corn
  * leaves stover; grass raked→baled is hay; alfalfa raked→baled is alfalfa hay;
- * "forage" is the (currently unreachable — baling always follows a rake) unraked
- * path the maintainer called out. */
-export type BaleProduct = "cornStover" | "hay" | "alfalfaHay" | "forage";
+ * small grains (wheat/oats/barley, 2026-07-22) leave straw; "forage" is the
+ * (currently unreachable — baling always follows a rake) unraked path the
+ * maintainer called out. */
+export type BaleProduct = "cornStover" | "hay" | "alfalfaHay" | "straw" | "forage";
 
 /** Equipment size classes. A tractor pulls implements of its class or smaller. */
 export type EquipmentSize = "small" | "medium" | "large";
@@ -344,6 +350,7 @@ export const gameConfig: GameConfig = {
       growMonths: 4, // whole months → planted in Apr, ready the 1st of Aug
       sellPricePerTon: 180,
       producesForage: true, // corn stover → rake + bale before re-plowing
+      baleProduct: "cornStover",
     },
     soybeans: {
       name: "Soybeans",
@@ -356,13 +363,97 @@ export const gameConfig: GameConfig = {
       growMonths: 4, // whole months → planted in May, ready the 1st of Sep
       sellPricePerTon: 390,
     },
+    // --- Six more annuals (maintainer request, 2026-07-22). Balance targets,
+    // per acre at base yield & base price (net of input+fert+plow+weed ≈ $35):
+    //   corn ~$485 (+stover), soy ~$270 — the yardsticks.
+    //   wheat ~$315 (+straw)  — the winter slot: field busy Sep→Jun, its own cycle.
+    //   oats ~$185 (+straw)   — cheapest inputs in the game; low ceiling.
+    //   barley ~$235 (+straw) — a step up from oats, still cheap.
+    //   canola ~$390          — near-corn profit without corn's fertilizer bill,
+    //                           but the widest uncertainty of the oilseeds.
+    //   sunflowers ~$295      — soy-tier, but ready Oct/Nov = right at the
+    //                           seasonal price ramp toward the Dec peak.
+    //   potatoes ~$1060       — DOUBLE corn, but ~$1k/ac sunk before harvest and
+    //                           ±45% yield risk; 14 t/ac also crushes silo space.
+    wheat: {
+      name: "Winter Wheat",
+      emoji: "🌾",
+      inputCostPerAcre: 130, // cheap seed + a fall herbicide pass
+      fertilizeCostPerAcre: 130, // spring N topdress + pass
+      baseYieldTonsPerAcre: 2.9, // ~95 bu/ac
+      yieldUncertainty: 0.25, // overwinters established — steadier than spring crops
+      plantMonths: [8, 9], // Sep–Oct (fall seeding)
+      growMonths: 9, // Sep 1 + 9 → ready the 1st of Jun (overwinters)
+      sellPricePerTon: 210,
+      producesForage: true, // wheat straw → rake + bale before re-plowing
+      baleProduct: "straw",
+    },
+    oats: {
+      name: "Oats",
+      emoji: "🥣",
+      inputCostPerAcre: 90, // cheapest seed going
+      fertilizeCostPerAcre: 70, // light N — oats lodge if pushed hard
+      baseYieldTonsPerAcre: 2.3, // ~130 bu/ac (32 lb bushels)
+      yieldUncertainty: 0.3,
+      plantMonths: [2, 3], // Mar–Apr (early spring)
+      growMonths: 4, // ready the 1st of Jul/Aug
+      sellPricePerTon: 165,
+      producesForage: true,
+      baleProduct: "straw",
+    },
+    barley: {
+      name: "Barley",
+      emoji: "🍺",
+      inputCostPerAcre: 110,
+      fertilizeCostPerAcre: 105,
+      baseYieldTonsPerAcre: 2.5, // ~105 bu/ac
+      yieldUncertainty: 0.3,
+      plantMonths: [2, 3], // Mar–Apr
+      growMonths: 4, // ready the 1st of Jul/Aug
+      sellPricePerTon: 195,
+      producesForage: true,
+      baleProduct: "straw",
+    },
+    canola: {
+      name: "Canola",
+      emoji: "🌼",
+      inputCostPerAcre: 190, // hybrid seed is pricey
+      fertilizeCostPerAcre: 150, // heavy N + sulfur
+      baseYieldTonsPerAcre: 1.5, // ~55 bu/ac
+      yieldUncertainty: 0.35, // touchy at flowering — heat snaps hurt
+      plantMonths: [3, 4], // Apr–May
+      growMonths: 4, // ready the 1st of Aug/Sep
+      sellPricePerTon: 510,
+    },
+    sunflowers: {
+      name: "Sunflowers",
+      emoji: "🌻",
+      inputCostPerAcre: 150,
+      fertilizeCostPerAcre: 95, // deep taproot scavenges leftover N
+      baseYieldTonsPerAcre: 1.2, // ~2100 lb/ac
+      yieldUncertainty: 0.35,
+      plantMonths: [4, 5], // May–Jun
+      growMonths: 5, // ready the 1st of Oct/Nov — rides the ramp to the Dec peak
+      sellPricePerTon: 480,
+    },
+    potatoes: {
+      name: "Potatoes",
+      emoji: "🥔",
+      inputCostPerAcre: 780, // seed potatoes cost a fortune
+      fertilizeCostPerAcre: 260, // heavy, split-applied feeding
+      baseYieldTonsPerAcre: 14, // ~500 cwt/ac
+      yieldUncertainty: 0.45, // boom or bust — the game's riskiest roll
+      plantMonths: [3], // April only — a tight window
+      growMonths: 5, // ready the 1st of Sep
+      sellPricePerTon: 150,
+    },
     // Perennial forage crops (2026-07-13): planted once in spring, cut 3× a
     // year (mow → rake → bale = hay), fertilized annually, never plowed. Yield
     // is realized as BALES, not grain, so baseYield/sellPricePerTon are unused
     // (kept at 0 to satisfy the shared CropConfig shape).
     grass: {
       name: "Grass",
-      emoji: "🌾",
+      emoji: "🌿", // was 🌾, ceded to Winter Wheat (2026-07-22)
       inputCostPerAcre: 100, // establishment seed only
       fertilizeCostPerAcre: 110, // annual topdress (N-P-K) + pass, hay removes a lot of nutrients
       baseYieldTonsPerAcre: 0,
@@ -504,6 +595,9 @@ export const gameConfig: GameConfig = {
     hay: { name: "Grass Hay", pricePerBale: 65, balesPerAcre: 1.5, color: "hay" },
     // Alfalfa hay: a bit denser + roughly 2× the value of grass (~$170 vs ~$110/t).
     alfalfaHay: { name: "Alfalfa Hay", pricePerBale: 130, balesPerAcre: 1.6, color: "alfalfa" },
+    // Small-grain straw (wheat/oats/barley, 2026-07-22) — bulkier and cheaper
+    // than feed hay; bedding, not fodder.
+    straw: { name: "Straw", pricePerBale: 35, balesPerAcre: 1.8, color: "hay" },
     // Unraked cut forage (currently unreachable — baling always follows a rake).
     forage: { name: "Forage", pricePerBale: 40, balesPerAcre: 1.5, color: "hay" },
   },

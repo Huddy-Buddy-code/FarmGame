@@ -37,10 +37,13 @@ function cutsThisYear(field: Field, now: SimTime): number {
 }
 
 /** What the field's bales are, for pricing + tint (2026-07-13). Reads the
- * crop's configured `baleProduct` (grass→hay, alfalfa→alfalfaHay); corn's crop
- * is already cleared by harvest time, so it falls back to corn stover. */
+ * crop's configured `baleProduct` (grass→hay, alfalfa→alfalfaHay). An annual's
+ * crop is already cleared by harvest time, so fall back to `lastCrop` (set by
+ * applyHarvestDone) — corn residue→stover, wheat/oats/barley→straw
+ * (2026-07-22); pre-`lastCrop` legacy saves land on corn stover. */
 export function baleProductForField(field: Field): BaleProduct {
-  const cfg = field.crop ? gameConfig.crops[field.crop] : undefined;
+  const crop = field.crop ?? field.lastCrop;
+  const cfg = crop ? gameConfig.crops[crop] : undefined;
   return cfg?.baleProduct ?? "cornStover";
 }
 

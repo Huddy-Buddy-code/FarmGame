@@ -326,13 +326,21 @@ function palette(p: FieldPaintParams): { base: string; dark: string; light: stri
         light: lerpColor("#8c795d", "#5d7c44", smooth(t)),
       };
     }
-    case "ready":
+    case "ready": {
       // Perennial forage stands are GREEN at cutting, not golden like grain.
       if (p.crop === "grass") return { base: "#7f9a4e", dark: "#65803a", light: "#9bb267" }; // lush tall grass
       if (p.crop === "alfalfa") return { base: "#5f7d40", dark: "#4c6733", light: "#7a9455" }; // deep alfalfa green
-      return p.crop === "soybeans"
-        ? { base: "#a3924f", dark: "#8a7a3e", light: "#b5a563" }
-        : { base: "#b09a58", dark: "#977f43", light: "#c2ad6d" };
+      // Per-crop ripe tint (2026-07-22, with the six new annuals) — unlisted
+      // crops (corn, wheat, barley…) share the classic golden-grain default.
+      const ripe: Partial<Record<CropId, { base: string; dark: string; light: string }>> = {
+        soybeans: { base: "#a3924f", dark: "#8a7a3e", light: "#b5a563" }, // dusty tan-olive
+        oats: { base: "#c2ab6a", dark: "#a68f52", light: "#d4c184" }, // palest of the grains
+        canola: { base: "#c9b23e", dark: "#a8922e", light: "#ddc95a" }, // yellow, still echoing bloom
+        sunflowers: { base: "#b3953a", dark: "#93782c", light: "#c8ab52" }, // heavy brown-gold heads
+        potatoes: { base: "#6b7f46", dark: "#576a38", light: "#809455" }, // green vines to the end
+      };
+      return (p.crop && ripe[p.crop]) || { base: "#b09a58", dark: "#977f43", light: "#c2ad6d" };
+    }
     case "harvested":
       // A freshly-cut hay stand is dark green stubble/regrowth, not tan chaff.
       if (p.crop === "grass" || p.crop === "alfalfa") return { base: "#4f6537", dark: "#3f522c", light: "#63794a" };
