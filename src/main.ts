@@ -125,6 +125,30 @@ if (loaded) {
   for (const c of Object.keys(gameConfig.crops) as CropId[]) save.grain[c] ??= 0;
   save.completedTasks ??= [];
   save.fieldLedger ??= {};
+  // A crop can be REMOVED from the config (Potatoes, 2026-07-23 — they'd need
+  // specialty equipment the game doesn't model). Anything still referencing one
+  // would hit `gameConfig.crops[undefined]` and throw, so scrub it here: a
+  // standing crop is dropped back to bare stubble, and rotation steps fall back
+  // to the default crop rather than leaving the plan un-runnable.
+  {
+    const known = (c: string | undefined): boolean => !!c && c in gameConfig.crops;
+    for (const f of save.fields) {
+      if (f.crop && !known(f.crop)) {
+        f.crop = undefined;
+        f.plantedAt = undefined;
+        f.trueYieldTonsPerAcre = undefined;
+        f.status = "stubble";
+      }
+      if (f.lastCrop && !known(f.lastCrop)) f.lastCrop = undefined;
+      for (const p of f.plans ?? []) if (!known(p.crop)) p.crop = defaultPlan().crop;
+    }
+    for (const key of Object.keys(save.grain)) {
+      if (!known(key)) delete (save.grain as Record<string, number>)[key];
+    }
+    for (const key of Object.keys(save.sellSchedule ?? {})) {
+      if (!known(key) && !(key in gameConfig.baleProducts)) delete save.sellSchedule![key];
+    }
+  }
   // Rotation-sequence rework (2026-07-23): `plans` used to be indexed by
   // campaign year (`plans[(year-1) % len]`) and is now an explicit sequence
   // pointer. Seed the pointer at whatever the year-based rule would have
@@ -1403,9 +1427,9 @@ function updateHud() {
   // Year-position marker: fraction of the display year (Mar → Feb) elapsed.
   const f = yearFraction(clock.time());
   $("year-marker").style.left = `calc(${(f * 100).toFixed(2)}% - 1px)`;
-  // The calendar grid has a 110px label column; the lanes take the rest.
+  // The calendar grid's label column; the lanes take the rest.
   const calNow = document.getElementById("cal-now");
-  if (calNow) calNow.style.left = `calc(${(110 * (1 - f)).toFixed(1)}px + ${(f * 100).toFixed(2)}%)`;
+  if (calNow) calNow.style.left = `calc(${(CAL_LABEL_W * (1 - f)).toFixed(1)}px + ${(f * 100).toFixed(2)}%)`;
   // Live current-month chip riding the same position (maintainer request,
   // 2026-07-14) — "Jun.", "Oct.", etc.
   placeChip($("month-marker"), `${MONTH_SHORT[dateOf(clock.time()).month]}.`, f);
@@ -3029,6 +3053,11 @@ function restoreSpeed(paused: boolean) {
 }
 
 // ---------------------------------------------------------------------------
+/** Width of the Crop Calendar's crop-name column, in px. MUST match
+ * `#cal-grid`'s first grid-template-column in index.html — the "you are here"
+ * line is positioned over the lanes by offsetting past it. */
+const CAL_LABEL_W = 150;
+
 // Crop calendar: planting/harvest bands per crop over the display year (Mar→Feb),
 // derived from gameConfig (plant windows + grow time) — no hand-kept data.
 // ---------------------------------------------------------------------------
@@ -3095,8 +3124,10 @@ function rebuildCropCalendarGrid() {
     const baleMark = cfg.producesForage
       ? baleIconSvg(12, gameConfig.baleProducts[cfg.baleProduct ?? "straw"].color)
       : "";
-    html += `<div class="crop">${cfg.emoji} ${cfg.name}${baleMark ? `<span class="cal-bale" title="Leaves balable residue">${baleMark}</span>` : ""}</div>
-      <div class="lane">${bands}</div>`;
+    html += `<div class="crop" title="${cfg.name}">` +
+      `<span class="cal-emoji">${cfg.emoji}</span><span class="cal-name">${cfg.name}</span>` +
+      (baleMark ? `<span class="cal-bale" title="Leaves balable residue">${baleMark}</span>` : "") +
+      `</div><div class="lane">${bands}</div>`;
   }
   grid.innerHTML = html;
 
@@ -4292,7 +4323,11 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
     // Fertilize before Weed (maintainer request, 2026-07-23) — it's also the
     // order they open in: fertilize is legal from plant+1, weeding from plant+2.
     taskCol("🌿", "Fertilize", "fertilize", plantMonth, "fertilize");
-    taskCol("💦", "Weed", "weed", plantMonth, "weed");
+    // No Weed column on a cover crop: an autumn-sown stand is never weeded, so
+    // the row would have no legal month to offer anyway.
+    if (!gameConfig.crops[plan.crop].coverCrop) {
+      taskCol("💦", "Weed", "weed", plantMonth, "weed");
+    }
     taskCol("🌾", "Harvest", "harvest", plantMonth);
     // Optional residue pass — an alternative to baling; off by default.
     taskCol("🍂", "Mulch", "mulch", plantMonth, "mulch");

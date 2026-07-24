@@ -98,6 +98,7 @@ const APRIL_1 = minutesPerMonth();
  * right after harvest). */
 const WINTER_1 = 9 * minutesPerMonth();
 const JAN_1 = 10 * minutesPerMonth(); // the default plow month for a spring crop
+const OCT_1 = 7 * minutesPerMonth(); // in corn's plow window, but before January
 
 describe("calendar", () => {
   it("starts on March 1, Year 1", () => {
@@ -170,10 +171,10 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     field.autoManage = true;
     field.plans = [defaultPlan()];
     save.fields.push(field);
-    autoManageField(save, field, APRIL_1);
-    expect(save.tasks).toHaveLength(0); // April: corn is in the ground then
+    autoManageField(save, field, OCT_1);
+    expect(save.tasks).toHaveLength(0); // October: legal to plow, but ahead of January
     autoManageField(save, field, WINTER_1);
-    expect(save.tasks).toHaveLength(0); // December: legal, but ahead of January
+    expect(save.tasks).toHaveLength(0); // December: same — still ahead of January
     autoManageField(save, field, JAN_1);
     expect(save.tasks).toHaveLength(1);
     expect(save.tasks[0]!.type).toBe("plow");
@@ -560,23 +561,14 @@ describe("auto-manage (idle mode, player-requested)", () => {
     save.fields.push(field);
     const mpm = minutesPerMonth();
 
-    // April through September: corn occupies the ground in those months, so
-    // plowing isn't even legal — auto-manage waits, nothing gets queued.
-    // (Starting in April rather than March matters: March sits AFTER January in
-    // the plow window's order, so it would be a legitimate catch-up month.)
-    let now = runWorld(save, APRIL_1, 5 * mpm, MINUTES_PER_DAY);
-    expect(field.status).toBe("stubble");
-    expect(save.tasks).toHaveLength(0);
-
-    // Fast-forward: auto-manage queues + finishes the plow at January (the
-    // default), give or take the days the pass itself takes.
-    now = runUntil(save, now, () => field.status === "tilled", 12 * mpm);
-    expect(field.status).toBe("tilled");
-    expect([0, 1, 2]).toContain(dateOf(now).month); // Jan, or just after
-
-    // Sits tilled over winter; next spring's window opens and it plants.
-    now = runUntil(save, now, () => field.crop === "corn", 10 * mpm);
+    // Bare ground in April, which is BOTH corn's planting month and (since
+    // 2026-07-23) inside its plow window — so the field is turned over and
+    // seeded in the same spring rather than idling until winter.
+    let now = runUntil(save, APRIL_1, () => field.crop === "corn", 3 * mpm);
     expect(field.crop).toBe("corn");
+    // Plowed before planting — structural (planting needs tilled ground), not
+    // something the calendar had to enforce.
+    expect(save.completedTasks!.some((c) => c.type === "plow")).toBe(true);
 
     // Ripens and auto-harvests.
     const grow = gameConfig.crops.corn.growMonths * mpm;
@@ -587,8 +579,9 @@ describe("auto-manage (idle mode, player-requested)", () => {
     now = runUntil(save, now, () => save.grain.corn > 0, 5 * MINUTES_PER_DAY);
     expect(save.grain.corn).toBeGreaterThan(0);
 
-    // Fresh off harvest (summer) — the maintainer-requested behavior: it must
-    // NOT be replowed immediately, only when its scheduled month comes round.
+    // Fresh off harvest (August) — August is the FIRST month of corn's plow
+    // window, so this is the real test of the maintainer-requested behavior:
+    // legal to plow, but not yet due, so the ground rests until January.
     // (Ignore any still-finishing Unload Harvester trip — it's not a
     // lifecycle task and self-clears once the hopper's empty.)
     expect(save.tasks.filter((t) => t.type !== "unloadHarvester")).toHaveLength(0);

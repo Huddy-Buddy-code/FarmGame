@@ -63,14 +63,16 @@ describe("mulch yield bonus (+7%, additive) via productivityMultiplier", () => {
   });
 });
 
-describe("legalMonthsFor mulch — the months following harvest", () => {
-  it("corn planted April (harvest Aug): Sep/Oct/Nov", () => {
-    expect(legalMonthsFor("mulch", "corn", 3)).toEqual([8, 9, 10]);
+describe("legalMonthsFor mulch — from the harvest month onward", () => {
+  it("corn planted April: Aug (harvest) through Nov", () => {
+    // Mulch may share the harvest month (2026-07-23) — canMulch still requires
+    // the field to actually be harvested, so it can't jump the queue.
+    expect(legalMonthsFor("mulch", "corn", 3)).toEqual([7, 8, 9, 10]);
   });
   it("wraps past December for a late crop instead of coming back empty", () => {
-    // Corn planted month 6 -> harvest month 10 (Nov) -> mulch Dec/Jan/Feb.
+    // Corn planted month 6 -> harvest month 10 (Nov) -> Nov through Feb.
     // The old December clamp returned [] here, silently disabling the row.
-    expect(legalMonthsFor("mulch", "corn", 6)).toEqual([11, 0, 1]);
+    expect(legalMonthsFor("mulch", "corn", 6)).toEqual([10, 11, 0, 1]);
   });
   it("empty for a perennial (its residue is never mulched)", () => {
     expect(legalMonthsFor("mulch", "grass", 3)).toEqual([]);

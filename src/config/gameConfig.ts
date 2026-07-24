@@ -18,11 +18,12 @@
  * Grass & Alfalfa (2026-07-13) are PERENNIAL forage crops — planted once, cut
  * 3× a year, never plowed/replanted (see `perennial`/`harvestMonths`).
  * 2026-07-22: six more annuals (maintainer request) — wheat/oats/barley (small
- * grains, straw residue), canola/sunflowers (oilseeds), potatoes (high-risk
- * high-capital roots). */
+ * grains, straw residue), canola/sunflowers (oilseeds). Potatoes were removed
+ * 2026-07-23 — they'd need specialty planting/harvesting equipment the game
+ * doesn't model; Cereal Rye took their slot as a second cover crop. */
 export type CropId =
   | "corn" | "soybeans" | "grass" | "alfalfa"
-  | "wheat" | "oats" | "barley" | "canola" | "sunflowers" | "potatoes";
+  | "wheat" | "rye" | "oats" | "barley" | "canola" | "sunflowers";
 
 /** What a field's dropped bales ARE, for pricing + coloring (2026-07-13). Corn
  * leaves stover; grass raked→baled is hay; alfalfa raked→baled is alfalfa hay;
@@ -99,6 +100,12 @@ export interface CropConfig {
    * alfalfaHay for alfalfa). Corn's stover is handled separately (its crop is
    * cleared at harvest before baling). */
   baleProduct?: BaleProduct;
+  /** A COVER CROP: sown in autumn and held through the winter (Winter Wheat,
+   * Cereal Rye). Never weeded (maintainer decision, 2026-07-23) — weeds only
+   * flush in spring and summer, and a stand that went in the previous autumn is
+   * thick enough by then to smother them, which is half the point of growing
+   * one. The Schedule tab hides the Weed column entirely for these. */
+  coverCrop?: boolean;
 }
 
 export interface GameConfig {
@@ -116,6 +123,13 @@ export interface GameConfig {
   /* REMOVED 2026-07-23: `plowMonths`. Plowing is no longer a fixed season —
    * the window is derived per crop from when the ground is actually free
    * (`sim/schedule.ts`), so there's no global month list to tune. */
+  /** 0-based months in which weeds actually flush (maintainer decision,
+   * 2026-07-23): spring and summer only, never autumn or winter. Lives here
+   * rather than in a sim module because BOTH the live gate (`inWeedingWindow`,
+   * farming.ts) and the Schedule tab's legal months (`sim/schedule.ts`) read
+   * it — and schedule.ts already imports farming.ts, so a shared constant in
+   * either of them would be an import cycle. */
+  weedSeasonMonths: number[];
   /** Cost to weed, per acre — same pay-on-queue pattern as plow. Fertilize
    * moved to a per-crop cost ([[CropConfig.fertilizeCostPerAcre]]) since real
    * fertilizer need varies far more by crop than weeding chemicals do. */
@@ -420,8 +434,10 @@ export const gameConfig: GameConfig = {
     //                           but the widest uncertainty of the oilseeds.
     //   sunflowers ~$295      — soy-tier, but ready Oct/Nov = right at the
     //                           seasonal price ramp toward the Dec peak.
-    //   potatoes ~$1060       — DOUBLE corn, but ~$1k/ac sunk before harvest and
-    //                           ±45% yield risk; 14 t/ac also crushes silo space.
+    //   rye ~$255 (+straw)    — the OTHER cover crop: cheaper and hardier than
+    //                           wheat, and off the field a month earlier (May
+    //                           vs June), which is what buys room for a
+    //                           double crop behind it.
     wheat: {
       name: "Winter Wheat",
       emoji: "🌾",
@@ -434,6 +450,21 @@ export const gameConfig: GameConfig = {
       sellPricePerTon: 210,
       producesForage: true, // wheat straw → rake + bale before re-plowing
       baleProduct: "straw",
+      coverCrop: true,
+    },
+    rye: {
+      name: "Cereal Rye",
+      emoji: "🥖",
+      inputCostPerAcre: 100, // cheap, forgiving seed — the classic cover crop
+      fertilizeCostPerAcre: 90, // modest spring topdress; rye scavenges well
+      baseYieldTonsPerAcre: 2.4, // a touch under wheat
+      yieldUncertainty: 0.22, // the hardiest overwinterer in the game
+      plantMonths: [8, 9, 10], // Sep–Nov — a wider window than wheat's
+      growMonths: 8, // Sep 1 + 8 -> ready the 1st of May, a month before wheat
+      sellPricePerTon: 175,
+      producesForage: true, // rye straw
+      baleProduct: "straw",
+      coverCrop: true,
     },
     oats: {
       name: "Oats",
@@ -483,17 +514,6 @@ export const gameConfig: GameConfig = {
       growMonths: 5, // ready the 1st of Oct/Nov — rides the ramp to the Dec peak
       sellPricePerTon: 480,
     },
-    potatoes: {
-      name: "Potatoes",
-      emoji: "🥔",
-      inputCostPerAcre: 780, // seed potatoes cost a fortune
-      fertilizeCostPerAcre: 260, // heavy, split-applied feeding
-      baseYieldTonsPerAcre: 14, // ~500 cwt/ac
-      yieldUncertainty: 0.45, // boom or bust — the game's riskiest roll
-      plantMonths: [3], // April only — a tight window
-      growMonths: 5, // ready the 1st of Sep
-      sellPricePerTon: 150,
-    },
     // Perennial forage crops (2026-07-13): planted once in spring, cut 3× a
     // year (mow → rake → bale = hay), fertilized annually, never plowed. Yield
     // is realized as BALES, not grain, so baseYield/sellPricePerTon are unused
@@ -535,6 +555,7 @@ export const gameConfig: GameConfig = {
   },
 
   plowCostPerAcre: 20,
+  weedSeasonMonths: [2, 3, 4, 5, 6, 7], // Mar–Aug (spring + summer)
   weedCostPerAcre: 15,
   mowCostPerAcre: 12,
   mulchCostPerAcre: 8,

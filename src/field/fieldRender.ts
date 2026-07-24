@@ -356,7 +356,7 @@ function palette(p: FieldPaintParams): { base: string; dark: string; light: stri
         oats: { base: "#c2ab6a", dark: "#a68f52", light: "#d4c184" }, // palest of the grains
         canola: { base: "#c9b23e", dark: "#a8922e", light: "#ddc95a" }, // yellow, still echoing bloom
         sunflowers: { base: "#b3953a", dark: "#93782c", light: "#c8ab52" }, // heavy brown-gold heads
-        potatoes: { base: "#6b7f46", dark: "#576a38", light: "#809455" }, // green vines to the end
+        rye: { base: "#b8a878", dark: "#9c8d5f", light: "#cbbd92" }, // greyer, taller straw than wheat
       };
       return (p.crop && ripe[p.crop]) || { base: "#b09a58", dark: "#977f43", light: "#c2ad6d" };
     }

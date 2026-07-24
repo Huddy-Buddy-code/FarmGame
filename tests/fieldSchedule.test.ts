@@ -20,16 +20,22 @@ function freshField(status: Field["status"] = "tilled"): Field {
 }
 
 describe("legalMonthsFor", () => {
-  it("plow: every month the ground isn't occupied, ordered from when it clears", () => {
-    // Corn: planted Apr (3), in the ground 4 grow + 2 harvest-window = 6 months
-    // (Apr–Sep). So plowing is open Oct through Mar, listed in that order.
-    expect(legalMonthsFor("plow", "corn", 3)).toEqual([9, 10, 11, 0, 1, 2]);
+  it("plow: from the harvest month through the planting month, in that order", () => {
+    // Corn: planted Apr (3), ripe 4 months later in Aug (7). Plowing is open
+    // from that harvest month right through to the next April — both ends
+    // deliberately overlapping a neighbouring task by one month (2026-07-23).
+    expect(legalMonthsFor("plow", "corn", 3)).toEqual([7, 8, 9, 10, 11, 0, 1, 2, 3]);
   });
 
-  it("plow: an overwintering crop leaves only the gap before its own planting", () => {
-    // Winter Wheat: planted Sep (8), 9 grow + 2 window = 11 months occupied
-    // (Sep through Jul). Only August is free.
-    expect(legalMonthsFor("plow", "wheat", 8)).toEqual([7]);
+  it("plow: shares the harvest month and the planting month with those tasks", () => {
+    const plow = legalMonthsFor("plow", "corn", 3);
+    expect(plow).toContain(legalMonthsFor("harvest", "corn", 3)[0]); // same month as harvest
+    expect(plow).toContain(3); // same month as planting
+  });
+
+  it("plow: an overwintering crop gets the gap between its harvest and its planting", () => {
+    // Winter Wheat: planted Sep (8), ripe 9 months later in Jun (5). Jun→Sep.
+    expect(legalMonthsFor("plow", "wheat", 8)).toEqual([5, 6, 7, 8]);
   });
 
   it("plow: perennials get a window too — the stand still needs ground turned once", () => {
@@ -38,12 +44,13 @@ describe("legalMonthsFor", () => {
     expect(legalMonthsFor("plow", "alfalfa").length).toBeGreaterThan(0);
   });
 
-  it("plow: never offers a month the crop is standing in", () => {
-    for (const crop of ["corn", "soybeans", "wheat", "potatoes", "sunflowers"] as const) {
+  it("plow: never offers a month the crop is still GROWING in", () => {
+    // The harvest month and the planting month are shared on purpose; the
+    // months in between, when the crop is up and growing, never are.
+    for (const crop of ["corn", "soybeans", "wheat", "rye", "sunflowers"] as const) {
       const pm = gameConfig.crops[crop].plantMonths[0]!;
       const legal = legalMonthsFor("plow", crop, pm);
-      const occupied = gameConfig.crops[crop].growMonths + gameConfig.harvestWindowMonths;
-      for (let i = 0; i < occupied; i++) {
+      for (let i = 1; i < gameConfig.crops[crop].growMonths; i++) {
         expect(legal).not.toContain((pm + i) % MONTHS_PER_YEAR);
       }
     }
@@ -82,7 +89,7 @@ describe("legalMonthsFor", () => {
     // The Schedule tab must not hand the player a way to destroy their own
     // crop: every legal month has to fall inside the window that
     // harvestWindowClosed() enforces in the sim.
-    for (const crop of ["corn", "soybeans", "wheat", "potatoes", "sunflowers"] as const) {
+    for (const crop of ["corn", "soybeans", "wheat", "rye", "sunflowers"] as const) {
       const pm = gameConfig.crops[crop].plantMonths[0]!;
       expect(legalMonthsFor("harvest", crop, pm)).toHaveLength(gameConfig.harvestWindowMonths);
     }
@@ -96,18 +103,20 @@ describe("legalMonthsFor", () => {
     expect(harvest[0]).toBe(5); // June
     expect(harvest.length).toBeGreaterThan(0);
     const mulch = legalMonthsFor("mulch", "wheat", 8);
-    expect(mulch[0]).toBe(6); // July, the month after harvest
+    expect(mulch[0]).toBe(5); // June — mulch may share the harvest month
     expect(mulch.length).toBeGreaterThan(0);
   });
 
   it("cross-checks weed/fertilize legal months against the real farming.ts gates", () => {
     for (const plantMonth of [3, 4]) {
-      const plantedAt = plantMonth * minutesPerMonth();
+      const plantedAt = timeForMonth(plantMonth);
       const legalWeed = legalMonthsFor("weed", "corn", plantMonth);
       const legalFert = legalMonthsFor("fertilize", "corn", plantMonth);
       for (let m = 0; m < MONTHS_PER_YEAR; m++) {
-        // Same-year comparison only (this crop's cycle never wraps a year).
-        const now = m * minutesPerMonth();
+        // Weeding is calendar-SENSITIVE now (spring/summer only), so `m` has to
+        // be converted to a real sim-time in calendar month m — `m *
+        // minutesPerMonth()` is an ABSOLUTE month index and lands elsewhere.
+        const now = timeForMonth(m);
         if (now < plantedAt) continue; // before planting, not a meaningful comparison
         const field = freshField("planted");
         field.crop = "corn";
@@ -135,7 +144,8 @@ describe("effectiveMonthFor", () => {
     // default — it falls back to the one free month, August, right before its
     // own September planting. Defaulting to January would schedule the plow
     // ten months AFTER the seed went in.
-    expect(effectiveMonthFor("plow", "wheat", undefined, 8)).toBe(7);
+    expect(effectiveMonthFor("plow", "wheat", undefined, 8)).toBe(6); // Jun ripe -> Jul
+    expect(effectiveMonthFor("plow", "rye", undefined, 8)).toBe(5); // May ripe -> Jun
   });
 
   it("honors a valid override", () => {
@@ -219,11 +229,11 @@ describe("baling can only be scheduled on crops that make bales (2026-07-23)", (
     // The Schedule tab keys its Rake/Bale column off producesForage, so this is
     // the contract that stops the column appearing where a bale pass could
     // never actually run.
-    for (const crop of ["wheat", "oats", "barley", "grass", "alfalfa"] as const) {
+    for (const crop of ["wheat", "rye", "oats", "barley", "grass", "alfalfa"] as const) {
       expect(gameConfig.crops[crop].producesForage).toBe(true);
       expect(gameConfig.crops[crop].baleProduct).toBeDefined();
     }
-    for (const crop of ["corn", "soybeans", "canola", "sunflowers", "potatoes"] as const) {
+    for (const crop of ["corn", "soybeans", "canola", "sunflowers"] as const) {
       expect(gameConfig.crops[crop].producesForage).toBeFalsy();
       expect(gameConfig.crops[crop].baleProduct).toBeUndefined();
     }
@@ -235,5 +245,63 @@ describe("baling can only be scheduled on crops that make bales (2026-07-23)", (
       const product = gameConfig.crops[crop].baleProduct!;
       expect(gameConfig.baleProducts[product]).toBeDefined();
     }
+  });
+});
+
+describe("weeds are seasonal, and cover crops are never weeded (2026-07-23)", () => {
+  it("weeding months are confined to spring and summer", () => {
+    for (const crop of ["corn", "soybeans", "oats", "sunflowers"] as const) {
+      for (const pm of gameConfig.crops[crop].plantMonths) {
+        for (const m of legalMonthsFor("weed", crop, pm)) {
+          expect(gameConfig.weedSeasonMonths).toContain(m);
+        }
+      }
+    }
+  });
+
+  it("cover crops get no weeding months at all", () => {
+    for (const crop of ["wheat", "rye"] as const) {
+      expect(gameConfig.crops[crop].coverCrop).toBe(true);
+      for (const pm of gameConfig.crops[crop].plantMonths) {
+        expect(legalMonthsFor("weed", crop, pm)).toEqual([]);
+      }
+    }
+  });
+
+  it("the live gate refuses a cover crop even mid-spring, when it IS growing", () => {
+    // Wheat sown in September is well into growth by April — the old rule
+    // (2 months after planting, still growing) would have allowed weeding.
+    const field = freshField("growing");
+    field.crop = "wheat";
+    field.plantedAt = timeForMonth(8);
+    expect(inWeedingWindow(field, timeForMonth(3))).toBe(false);
+  });
+
+  it("the live gate refuses an autumn month even for a normal crop", () => {
+    const field = freshField("growing");
+    field.crop = "corn";
+    field.plantedAt = timeForMonth(3);
+    // Two months on and growing, but October is out of weed season.
+    expect(gameConfig.weedSeasonMonths).not.toContain(9);
+    expect(inWeedingWindow(field, timeForMonth(9))).toBe(false);
+  });
+});
+
+describe("Potatoes are gone, Cereal Rye took their slot", () => {
+  it("potatoes are no longer a crop", () => {
+    expect(Object.keys(gameConfig.crops)).not.toContain("potatoes");
+  });
+
+  it("rye is a fall-sown cover crop that clears the field before wheat does", () => {
+    const rye = gameConfig.crops.rye;
+    expect(rye.coverCrop).toBe(true);
+    expect(rye.producesForage).toBe(true);
+    expect(rye.baleProduct).toBe("straw");
+    // Sown in autumn...
+    for (const m of rye.plantMonths) expect(m).toBeGreaterThanOrEqual(8);
+    // ...and ripe a month earlier than wheat, which is what buys room behind it.
+    const ryeReady = (rye.plantMonths[0]! + rye.growMonths) % 12;
+    const wheatReady = (gameConfig.crops.wheat.plantMonths[0]! + gameConfig.crops.wheat.growMonths) % 12;
+    expect(ryeReady).toBe(wheatReady - 1);
   });
 });

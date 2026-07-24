@@ -109,6 +109,13 @@ function monthsSincePlanting(field: Field, now: SimTime): number | null {
  * months after planting (maintainer request, 2026-07-13 — previously a fixed
  * June-onward calendar window). */
 export function inWeedingWindow(field: Field, now: SimTime): boolean {
+  if (!field.crop) return false;
+  // Weeds only flush in spring and summer, and cover crops are never weeded
+  // (maintainer decision, 2026-07-23). Kept in lockstep with
+  // `legalMonthsFor("weed", …)` — the Schedule tab must never offer a month
+  // this would then refuse.
+  if (gameConfig.crops[field.crop].coverCrop) return false;
+  if (!gameConfig.weedSeasonMonths.includes(dateOf(now).month)) return false;
   const m = monthsSincePlanting(field, now);
   return field.status === "growing" && m !== null && m >= 2;
 }

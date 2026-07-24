@@ -249,25 +249,24 @@ describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-0
     expect(field.baleProduct).toBe("hay");
   });
 
-  it("auto-manage plows stubble ground first (winter only), then plants once tilled", () => {
+  it("auto-manage plows stubble ground first, then establishes the stand", () => {
     const save = forageGame();
     const field = freshField(); // bare stubble
     field.autoManage = true;
     field.plans = [{ crop: "alfalfa", fertilize: false, bale: false }];
     save.fields.push(field);
 
-    const WINTER = 9 * minutesPerMonth(); // Dec 1 — plow window opens
-    // Before winter: nothing happens, same as an annual crop on fresh ground.
-    runUntil(save, MARCH, () => false, WINTER - MARCH, 30);
-    expect(field.status).toBe("stubble");
-    expect(field.crop).toBeUndefined();
-
-    // Winter opens: auto-manage queues + finishes the plow.
-    let now = runUntil(save, WINTER, () => field.status === "tilled");
-    expect(field.crop).toBeUndefined(); // not planted yet — outside alfalfa's March window
-
-    // The following March, it establishes the stand.
-    now = runUntil(save, now, () => field.crop === "alfalfa", 5 * minutesPerMonth());
+    // Plowing is no longer locked to winter (2026-07-23) and its window now
+    // runs right through the planting month, so a field that comes up bare in
+    // alfalfa's own March window is turned over and seeded the same spring —
+    // rather than idling nine months for winter and then another three for the
+    // next March, losing a full year.
+    const now = runUntil(save, MARCH, () => field.crop === "alfalfa", 4 * minutesPerMonth());
+    expect(field.status).not.toBe("stubble"); // ground was worked
     expect(field.crop).toBe("alfalfa");
+    // Plowed BEFORE seeding, never the other way round — enforced by
+    // canSeedPerennial requiring tilled ground, not by the calendar.
+    expect(save.completedTasks!.some((c) => c.type === "plow")).toBe(true);
+    void now;
   });
 });

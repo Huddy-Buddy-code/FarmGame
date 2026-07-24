@@ -12,10 +12,13 @@
  * WITHERS once that closes (2026-07-23), so this must never offer a month the
  * crop wouldn't survive to, nor one before it's actually ready.
  *
- * plow spans the gap between crops: every month the ground isn't occupied,
- * ordered from the month after it clears to the month before the next crop
- * goes in. It defaults to January, except where the crop overwinters and
- * January isn't available — see `effectiveMonthFor`.
+ * plow spans the gap between crops — from the harvest month through the
+ * planting month inclusive, deliberately overlapping both by one month (see
+ * `plowMonthsInOrder`). It defaults to January, or to the month after harvest
+ * for a crop that overwinters through January — see `effectiveMonthFor`.
+ *
+ * weed is SEASONAL on top of the crop's own window: weeds only flush in spring
+ * and summer, and cover crops are never weeded at all.
  *
  * mow (perennial) and rake/bale have NO entry here — they're intentionally
  * not independently schedulable. Perennial cutting is a fixed 3-times-a-year
@@ -65,32 +68,31 @@ function rangeWrappedCapped(fromIncl: number, toIncl: number, maxSpanMonths = MO
 }
 
 /**
- * How many months a crop physically occupies the ground: from the month it goes
- * in, through the end of its harvest window. Nothing can be plowed during it.
- */
-function occupancyMonths(crop: CropId): number {
-  return gameConfig.crops[crop].growMonths + gameConfig.harvestWindowMonths;
-}
-
-/**
- * The months a field can be plowed for `crop`, ORDERED from the first month
- * after the ground clears to the last month before the crop goes back in
- * (maintainer request, 2026-07-23 — plowing used to be locked to a fixed
- * Dec–Feb winter season).
+ * The months a field can be plowed for `crop`, ORDERED from the month the crop
+ * ripens to the month it goes back in (maintainer request, 2026-07-23 —
+ * plowing used to be locked to a fixed Dec–Feb winter season).
  *
- * The order matters: it's what makes "at or after the chosen month" a simple
- * index comparison for auto-manage's soft retry, without any modular
- * arithmetic at the call site.
+ * Both ends deliberately OVERLAP a neighbouring task by one month:
+ *   - it starts at the HARVEST month, not after it, so a field can be turned
+ *     over the same month it's cut;
+ *   - it runs through the PLANTING month, so ground can be broken and seeded
+ *     in one go.
  *
- * A crop that occupies the ground for a full year would leave nothing here, so
- * the month before planting is kept as a floor — a field must always have
- * somewhere to be plowed, or it could never be replanted at all.
+ * Sharing a month is safe because ordering inside it is structural, not
+ * scheduled: a plow needs `canPlow` (harvested/stubble/mulched/withered), so it
+ * physically cannot run before the harvest completes, and planting needs
+ * `tilled`, so it cannot run before the plow completes. The calendar only says
+ * WHICH month; the field's own state says what order things happen in it.
+ *
+ * The order of the returned list matters: it's what makes "at or after the
+ * chosen month" a simple index comparison for auto-manage's soft retry.
  */
 function plowMonthsInOrder(crop: CropId, plantMonth: number): number[] {
-  const span = occupancyMonths(crop);
+  const ripe = gameConfig.crops[crop].growMonths;
   const out: number[] = [];
-  for (let i = span; i < MONTHS_PER_YEAR; i++) out.push(monthMod(plantMonth + i));
-  return out.length > 0 ? out : [monthMod(plantMonth - 1)];
+  for (let i = ripe; i <= MONTHS_PER_YEAR; i++) out.push(monthMod(plantMonth + i));
+  // Dedupe: a crop occupying a full year can wrap onto its own plant month twice.
+  return [...new Set(out)];
 }
 
 /**
@@ -110,7 +112,13 @@ export function legalMonthsFor(type: ScheduleTaskType, crop: CropId, plantMonth?
   if (type === "plant") return [...gameConfig.crops[crop].plantMonths];
   if (isPerennial(crop) || plantMonth === undefined) return [];
   const span = gameConfig.crops[crop].growMonths;
-  if (type === "weed") return rangeWrapped(plantMonth + 2, plantMonth + span - 1);
+  // Weeding: the crop's own window, intersected with the months weeds actually
+  // flush in (maintainer decision, 2026-07-23). Empty for cover crops — an
+  // autumn-sown stand is thick enough by spring to smother weeds itself.
+  if (type === "weed") {
+    if (gameConfig.crops[crop].coverCrop) return [];
+    return rangeWrapped(plantMonth + 2, plantMonth + span - 1).filter((m) => gameConfig.weedSeasonMonths.includes(m));
+  }
   if (type === "fertilize") return rangeWrapped(plantMonth + 1, plantMonth + span - 1);
   // Harvest is DELAY-ONLY, and now bounded by the crop's real HARVEST WINDOW
   // (2026-07-23): from the month it ripens through `harvestWindowMonths`. This
@@ -121,9 +129,12 @@ export function legalMonthsFor(type: ScheduleTaskType, crop: CropId, plantMonth?
   if (type === "harvest") {
     return rangeWrappedCapped(plantMonth + span, plantMonth + span + gameConfig.harvestWindowMonths - 1);
   }
-  // Mulch: the months following the natural harvest. An annual residue pass.
+  // Mulch: from the HARVEST month (maintainer request, 2026-07-23 — it used to
+  // start the month after) through the mulch window. Same reasoning as plow:
+  // `canMulch` requires the field to already be harvested, and refuses while a
+  // rake or bale is queued, so sharing the month can't reorder anything.
   if (type === "mulch") {
-    return rangeWrappedCapped(plantMonth + span + 1, plantMonth + span + gameConfig.schedule.mulchWindowMonths);
+    return rangeWrappedCapped(plantMonth + span, plantMonth + span + gameConfig.schedule.mulchWindowMonths);
   }
   return [];
 }
@@ -151,7 +162,16 @@ export function effectiveMonthFor(type: ScheduleTaskType, crop: CropId, override
   const legal = legalMonthsFor(type, crop, plantMonth);
   if (legal.length === 0) return undefined;
   if (override !== undefined && legal.includes(override)) return override;
-  if (type === "plow" && legal.includes(DEFAULT_PLOW_MONTH)) return DEFAULT_PLOW_MONTH;
+  if (type === "plow") {
+    if (legal.includes(DEFAULT_PLOW_MONTH)) return DEFAULT_PLOW_MONTH;
+    // A crop that's in the ground every January (a cover crop) falls back to
+    // the month AFTER harvest — not the harvest month itself, which the window
+    // now includes but where the crop may well still be standing.
+    if (plantMonth !== undefined) {
+      const afterHarvest = monthMod(plantMonth + gameConfig.crops[crop].growMonths + 1);
+      if (legal.includes(afterHarvest)) return afterHarvest;
+    }
+  }
   return legal[0];
 }
 

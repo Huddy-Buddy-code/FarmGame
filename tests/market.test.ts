@@ -58,7 +58,7 @@ describe("unit prices apply the multiplier to the base config price", () => {
 
 describe("sellable product lists", () => {
   it("grains exclude the perennial forage crops", () => {
-    expect(SELLABLE_GRAINS).toEqual(["corn", "soybeans", "wheat", "oats", "barley", "canola", "sunflowers", "potatoes"]);
+    expect(SELLABLE_GRAINS).toEqual(["corn", "soybeans", "wheat", "rye", "oats", "barley", "canola", "sunflowers"]);
   });
   it("bales exclude the unreachable forage product", () => {
     expect(SELLABLE_BALES).toEqual(["cornStover", "straw", "hay", "alfalfaHay"]);
