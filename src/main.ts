@@ -33,7 +33,7 @@ import {
   barnSlotTotal, nearestFarmYard,
   baleStorageCapacityOf, storedBalesTotal, assignBaleStorageProduct,
 } from "./sim/buildings";
-import { distanceAtWork } from "./sim/coverage";
+import { distanceAtAcres } from "./sim/coverage";
 import type { CoveragePath } from "./sim/coverage";
 import {
   persistGame, loadGame, ensureActiveFarm, listFarms, createFarm,
@@ -738,8 +738,6 @@ function updateBaleMarkers(): void {
 // swept strips onto the field's live surface — cheap, and pixel-identical to the
 // final full repaint so there's no "pop" when the job finishes.
 // ---------------------------------------------------------------------------
-const ACRE_M2 = 4046.8564224;
-
 interface Reveal {
   taskId: string;
   fieldId: string;
@@ -843,8 +841,7 @@ function updateReveals(): void {
     // Reveal up to the swept in-field distance implied by how much is done.
     // Stamping is cheap (a few clipped drawImage calls); the GPU upload of the
     // whole canvas is what costs — throttle IT, not the stamping.
-    const revealWork = Math.min(path.totalWork, (task.doneAcres * ACRE_M2) / path.swath);
-    const revealDist = distanceAtWork(path, revealWork);
+    const revealDist = distanceAtAcres(path, task.doneAcres, task.totalAcres);
     if (revealDist > r.lastDist + 1e-6) {
       stampReveal(surface, r.baked, path, r.lastDist, revealDist);
       r.lastDist = revealDist;

@@ -234,18 +234,33 @@ export const TASK_HEADLANDS: Partial<Record<TaskType, HeadlandConfig>> = {
  * out of field to shrink. `innerBoundary` is whatever's left over for the
  * interior lane-fill — inset a further half-swath past the last ring traced,
  * so the two fills tile with no gap or overlap; the original boundary itself
- * if not even one lap fits. */
+ * if not even one lap fits.
+ *
+ * A lap is only traced while a FULL swath of un-worked ground is left to work
+ * (maintainer bug report, 2026-07-24). It used to keep laying rings down to the
+ * last sliver: on a narrow field — a 600x70 m strip with a 20 ft plow's six laps
+ * — the innermost rings ran up one side and back down the other over the same
+ * few metres of ground, and the leftover `innerBoundary` fell back to the last
+ * ring and got swept a third time. All of that counts as route WORK, so the
+ * route claimed ~10% more acreage than the field actually has, which is what
+ * made the progress bar and the texture reveal finish a lap and a half before
+ * the tractor did. Ground a skipped lap would have covered isn't lost — it
+ * falls to the interior fill, which handles a sub-swath remnant as a single
+ * lane. */
 export function buildHeadlandLaps(boundary: Meters[], swath: number, laps: number): { rings: Meters[][]; innerBoundary: Meters[] } {
   const rings: Meters[][] = [];
-  let centerline = offsetPolygonInward(boundary, swath / 2);
-  while (centerline && rings.length < laps) {
+  // The un-worked ground left for the next lap (or, at the end, the interior).
+  let remaining = boundary;
+  while (rings.length < laps) {
+    const centerline = offsetPolygonInward(remaining, swath / 2);
+    if (!centerline) break; // less than half a swath left — nothing to centre a lap on
+    const inner = offsetPolygonInward(centerline, swath / 2);
+    if (!inner) break; // this lap would consume everything left; let the interior fill do it
     rings.push(centerline);
-    centerline = offsetPolygonInward(centerline, swath);
+    remaining = inner;
   }
   if (rings.length === 0) return { rings: [], innerBoundary: boundary };
-  const last = rings[rings.length - 1]!;
-  const innerBoundary = offsetPolygonInward(last, swath / 2) ?? last;
-  return { rings, innerBoundary };
+  return { rings, innerBoundary: remaining };
 }
 
 /** One piece of a route: `work[i]` flags whether `pts[i]`→`pts[i+1]` is
@@ -402,6 +417,33 @@ export function distanceAtWork(path: CoveragePath, targetWork: number): number {
     }
   }
   return path.total;
+}
+
+/**
+ * Acres of `totalAcres` worked once the machine has driven `d` metres of the
+ * full route — progress as a FRACTION OF THE ROUTE (2026-07-24), not as swept
+ * metres x swath.
+ *
+ * The two readings agree on any field roomy enough to hold its headland laps.
+ * They diverge where the route covers ground twice (see `buildHeadlandLaps`),
+ * and since `doneAcres` is clamped to the field's real acreage, the swept-area
+ * reading saturated early — freezing the progress bar AND the texture reveal
+ * (main.ts derives the reveal distance from `doneAcres`) while the tractor was
+ * still driving its last headland. Measuring along the route ties the three
+ * together by construction: `doneAcres` can only reach `totalAcres` at the
+ * moment the machine reaches the end of the path, whatever the geometry does.
+ */
+export function acresDoneAt(path: CoveragePath, d: number, totalAcres: number): number {
+  if (path.totalWork <= 1e-9) return totalAcres;
+  return (workDoneAt(path, d) / path.totalWork) * totalAcres;
+}
+
+/** Inverse of `acresDoneAt`: the full-route distance by which `acres` of a
+ * `totalAcres` field have been worked. Used to stop a machine EXACTLY where its
+ * hopper fills rather than overshooting within a tick. */
+export function distanceAtAcres(path: CoveragePath, acres: number, totalAcres: number): number {
+  const frac = totalAcres > 1e-9 ? Math.max(0, Math.min(1, acres / totalAcres)) : 1;
+  return distanceAtWork(path, path.totalWork * frac);
 }
 
 function segmentIndexFor(cum: number[], dist: number): number {

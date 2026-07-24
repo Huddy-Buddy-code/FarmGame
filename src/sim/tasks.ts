@@ -32,7 +32,7 @@ import {
   applyMowDone, hasStandingCrop, inWeedingWindow, canFertilizeNow,
   isPerennial, balesPerAcreForField, canSeedPerennial, productivityMultiplier, baleProductForField,
 } from "./farming";
-import { buildCoveragePath, buildHeadlandCoveragePath, sampleAt, workDoneAt, distanceAtWork, TASK_HEADLANDS } from "./coverage";
+import { buildCoveragePath, buildHeadlandCoveragePath, sampleAt, acresDoneAt, distanceAtAcres, TASK_HEADLANDS } from "./coverage";
 import type { CoveragePath } from "./coverage";
 import {
   nearestFarmYard, nearestSiloForCrop, siloCapacityForCrop,
@@ -2490,7 +2490,7 @@ function tickAgent(
       }
 
       let dist = pathDistRuntime.get(task.id);
-      if (dist === undefined) dist = distanceAtWork(path, (task.doneAcres * ACRE_M2) / path.swath);
+      if (dist === undefined) dist = distanceAtAcres(path, task.doneAcres, task.totalAcres);
 
       // Mid-tie? Burn budget standing still; when the timer runs out, eject the
       // bale and empty one bale's worth from the hopper.
@@ -2529,15 +2529,15 @@ function tickAgent(
       // Working in WORK-metres (in-field only) keeps drops spread across a concave
       // field the coverage path over-sweeps.
       const roomAcres = (baleTarget - baler.cargoTons) / tonsPerAcre;
-      const roomWork = workDoneAt(path, dist) + (roomAcres * ACRE_M2) / path.swath;
-      const target = Math.min(path.total, distanceAtWork(path, roomWork));
+      const fillAt = acresDoneAt(path, dist, task.totalAcres) + roomAcres;
+      const target = Math.min(path.total, distanceAtAcres(path, fillAt, task.totalAcres));
       const timeNeeded = Math.max(0, (target - dist) / speed);
       const timeUsed = Math.min(timeNeeded, budget);
       const prevAcres = task.doneAcres;
       dist = Math.min(path.total, dist + speed * timeUsed);
       budget -= timeUsed;
       pathDistRuntime.set(task.id, dist);
-      task.doneAcres = Math.min(task.totalAcres, (workDoneAt(path, dist) * path.swath) / ACRE_M2);
+      task.doneAcres = Math.min(task.totalAcres, acresDoneAt(path, dist, task.totalAcres));
       baler.cargoTons += Math.max(0, task.doneAcres - prevAcres) * tonsPerAcre;
       const s = sampleAt(path, dist);
       agent.pos = s.pos;
@@ -2597,7 +2597,7 @@ function tickAgent(
     const path = getActivePath(save, task, field, agent);
     const speed = (taskFieldSpeedKmh(task.type) * 1000) / 60; // meters per sim-minute
     let dist = pathDistRuntime.get(task.id);
-    if (dist === undefined) dist = distanceAtWork(path, (task.doneAcres * ACRE_M2) / path.swath);
+    if (dist === undefined) dist = distanceAtAcres(path, task.doneAcres, task.totalAcres);
 
     // Harvest is capacity-limited: don't let one (possibly large, at high
     // time-compression) tick's travel budget drive the combine past what its
@@ -2615,8 +2615,8 @@ function tickAgent(
       const capacity = harvesterCapacityTons(agent.size ?? "medium");
       const room = Math.max(0, capacity - (agent.grainOnboard ?? 0));
       const roomAcres = room / effectiveYield;
-      const roomWork = workDoneAt(path, dist) + (roomAcres * ACRE_M2) / path.swath;
-      target = Math.min(path.total, distanceAtWork(path, roomWork));
+      const fullAt = acresDoneAt(path, dist, task.totalAcres) + roomAcres;
+      target = Math.min(path.total, distanceAtAcres(path, fullAt, task.totalAcres));
     }
 
     const timeNeeded = (target - dist) / speed;
@@ -2626,8 +2626,7 @@ function tickAgent(
     pathDistRuntime.set(task.id, dist);
 
     const prevAcres = task.doneAcres;
-    const workLen = workDoneAt(path, dist);
-    task.doneAcres = Math.min(task.totalAcres, (workLen * path.swath) / ACRE_M2);
+    task.doneAcres = Math.min(task.totalAcres, acresDoneAt(path, dist, task.totalAcres));
     const s = sampleAt(path, dist);
     agent.pos = s.pos;
     agent.heading = s.heading;
@@ -2636,7 +2635,7 @@ function tickAgent(
       // Grain banks into the combine's own hopper (not the farm bin directly
       // anymore) — a Grain Trailer carries it the rest of the way. NOT
       // clamped to capacity here: the distance-target clamp above keeps this
-      // close to capacity, but `distanceAtWork`/`workDoneAt` aren't exact
+      // close to capacity, but `distanceAtAcres`/`acresDoneAt` aren't exact
       // inverses of each other across a coverage path's headland turns, so a
       // tick can still bank a hair over the target (bug found in testing —
       // clamping here silently discarded that sliver of grain every fill
