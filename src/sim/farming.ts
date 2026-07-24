@@ -213,9 +213,12 @@ export function applyHarvestDone(field: Field): void {
   field.trueYieldTonsPerAcre = undefined;
   // Reset the yield boost — a fresh crop cycle starts at the default 100%.
   field.fertilized = undefined;
-  // Consume the mulch bonus: it lifted THIS harvest (+7%); the next crop must
-  // be mulched again to earn it.
+  // Consume the mulch bonus: it lifted THIS harvest; the next crop must be
+  // mulched again to earn it. `residueBaled` only qualifies that bonus, so it
+  // is spent at the same moment — leaving it set would wrongly downgrade a
+  // later mulch on residue that was never baled.
   field.residueMulched = undefined;
+  field.residueBaled = undefined;
 }
 
 /** Baling-complete effect: the windrows are gone and the field is left
@@ -231,8 +234,11 @@ export function applyBaleDone(field: Field): void {
   field.windrowed = undefined;
   field.lastCutProductivity = undefined; // consumed by this bale run
   // Perennial: the stand regrows for its next cutting — never plowed under.
-  // Annual (corn) residue: field settles to mulched, ready to re-plow.
+  // Annual residue (straw): field settles to mulched, ready to re-plow.
   field.status = isPerennial(field.crop) ? "growing" : "mulched";
+  // Annual straw hauled off — a later mulch pass only has stubble to work in,
+  // so it earns the reduced bonus (2026-07-23).
+  if (!isPerennial(field.crop)) field.residueBaled = true;
 }
 
 /** Growth progress 0..1 (1 = harvest-ready). 0 if nothing is growing.
@@ -293,9 +299,15 @@ export function yieldModifierSteps(field: Field, now: SimTime): YieldModifierSte
       steps.push({ label: "Fertilizer", pct: 0.3 });
     }
   }
-  // Mulched crop residue from the previous cycle adds a flat +7% (annuals only;
-  // the flag is never set on a perennial). Cleared by the next harvest.
-  if (field.residueMulched) steps.push({ label: "Mulch", pct: 0.07 });
+  // Mulched crop residue from the previous cycle (annuals only; the flag is
+  // never set on a perennial). Cleared by the next harvest. Worth less when the
+  // residue was baled off first — only the stubble went back in (2026-07-23).
+  if (field.residueMulched) {
+    steps.push({
+      label: field.residueBaled ? "Mulch (baled)" : "Mulch",
+      pct: field.residueBaled ? gameConfig.mulchBonusBaledPct : gameConfig.mulchBonusPct,
+    });
+  }
   if (field.crop && field.lastCrop !== undefined && field.lastCrop !== field.crop) {
     steps.push({ label: "Rotation", pct: gameConfig.rotationBonusPct });
   }

@@ -60,11 +60,18 @@ function runUntil(save: SaveState, from: number, done: () => boolean, cap = 400_
 }
 
 describe("forage flags on the field lifecycle", () => {
-  it("harvesting a forage crop (corn) flags the field for rake + bale", () => {
-    const field: Field = { id: "f", parcelId: "p", boundary, status: "ready", crop: "corn", trueYieldTonsPerAcre: 5 };
+  it("harvesting a forage crop (wheat) flags the field for baling", () => {
+    const field: Field = { id: "f", parcelId: "p", boundary, status: "ready", crop: "wheat", trueYieldTonsPerAcre: 3 };
     applyHarvestDone(field);
     expect(field.status).toBe("harvested");
     expect(field.forageReady).toBe(true);
+  });
+
+  it("corn no longer leaves balable residue (2026-07-23)", () => {
+    const field: Field = { id: "f", parcelId: "p", boundary, status: "ready", crop: "corn", trueYieldTonsPerAcre: 5 };
+    applyHarvestDone(field);
+    expect(field.status).toBe("harvested");
+    expect(field.forageReady).toBeFalsy();
   });
 
   it("harvesting a NON-forage crop (soybeans) leaves no forage to bale", () => {
@@ -247,25 +254,57 @@ describe("the baler drops bales as it works", () => {
 });
 
 describe("auto-managed forage loop end to end", () => {
-  it("a geared, auto-managed corn field harvests → rakes → bales → mulched → re-plows in winter", () => {
+  it("a geared, auto-managed oat field harvests → bales (no rake) → mulched → re-plows in winter", () => {
     const save = gameWithForageGear();
-    const field: Field = { id: "field-1", parcelId: "parcel-1", boundary, status: "tilled", autoManage: true };
+    const silo = buyBuildingAt(save, "silo", [-60, -60], "large");
+    assignSiloCrop(save, silo.id, "oats");
+    const field: Field = {
+      id: "field-1", parcelId: "parcel-1", boundary, status: "tilled", autoManage: true,
+      // Oats: a small grain, so its residue is STRAW — which since 2026-07-23
+      // goes straight to the baler with no raking pass. (Corn used to be this
+      // test's crop; it no longer produces forage at all.)
+      plans: [{ crop: "oats", bale: true }],
+    };
     save.fields.push(field);
 
-    // Auto-manage plants corn in the April window, grows it, harvests it, then
-    // runs the forage loop. Drive until the field is baled/mulched.
-    runUntil(save, APRIL_1, () => field.status === "mulched");
+    let sawRake = false;
+    runUntil(save, APRIL_1, () => {
+      if (save.tasks.some((t) => t.type === "rake")) sawRake = true;
+      return field.status === "mulched";
+    });
     expect(field.status).toBe("mulched");
-    expect(field.baleLocations).toHaveLength(EXPECTED_BALES);
+    expect(sawRake).toBe(false); // straw is baled straight out of the combine's windrow
+    const expectedStrawBales = Math.round(ACRES * gameConfig.baleProducts.straw.balesPerAcre);
+    expect(field.baleLocations).toHaveLength(expectedStrawBales);
     expect(field.forageReady).toBeFalsy();
     // Every bale sits on a real point inside the field (dropped along the path).
     for (const p of field.baleLocations!) expect(pointInPolygon(p, boundary)).toBe(true);
 
     // Bales persist as long as they're unsold; the mulched field then re-plows
     // once the winter plow window opens.
-    const end = runUntil(save, WINTER_1, () => field.status === "tilled");
+    runUntil(save, WINTER_1, () => field.status === "tilled");
     expect(field.status).toBe("tilled");
-    expect(field.baleLocations).toHaveLength(EXPECTED_BALES); // plowing under doesn't clear dropped bales
-    void end;
+    expect(field.baleLocations).toHaveLength(expectedStrawBales); // plowing under doesn't clear dropped bales
+  });
+
+  it("a hay crop still needs the rake before the baler", () => {
+    const save = gameWithForageGear();
+    const field: Field = {
+      id: "field-1", parcelId: "parcel-1", boundary, status: "harvested",
+      forageReady: true, lastCrop: "grass",
+    };
+    save.fields.push(field);
+    // No rake queued and not yet windrowed — the baler must refuse.
+    expect(() => enqueueTask(save, field, "bale", APRIL_1)).toThrow(/Rake/);
+  });
+
+  it("straw can be baled with no rake queued and no windrows", () => {
+    const save = gameWithForageGear();
+    const field: Field = {
+      id: "field-1", parcelId: "parcel-1", boundary, status: "harvested",
+      forageReady: true, lastCrop: "wheat",
+    };
+    save.fields.push(field);
+    expect(() => enqueueTask(save, field, "bale", APRIL_1)).not.toThrow();
   });
 });

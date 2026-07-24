@@ -44,6 +44,12 @@ export function borrowOpen(save: SaveState, amount: number): void {
   if (amount <= 0) return;
   save.finance.pendingPrincipal += amount;
   save.money += amount;
+  // Borrowing is real cash IN and was previously invisible to the cashflow
+  // ledger — only scheduled interest/principal ever booked, so the Loan
+  // Expenses row showed the repayments with no sign of the money that created
+  // them, and the Net column silently disagreed with the actual bank balance
+  // (maintainer request, 2026-07-23).
+  recordCash(save, "loanExpenses", "Loans taken", amount);
 }
 
 /** Pay down this year's OPEN balance before it locks in (changed your mind
@@ -57,6 +63,7 @@ export function paydownOpen(save: SaveState, amount: number): void {
   }
   save.finance.pendingPrincipal -= pay;
   save.money -= pay;
+  recordCash(save, "loanExpenses", "Loans repaid", -pay);
 }
 
 /** Pay down a LOCKED loan's principal directly. Doesn't touch the monthly
@@ -71,7 +78,7 @@ export function paydownLoan(save: SaveState, loanId: string, amount: number): vo
     throw new Error(`That's $${Math.round(pay).toLocaleString()} — not enough cash`);
   }
   save.money -= pay;
-  recordCash(save, "loanExpenses", "Extra principal payments", -pay);
+  recordCash(save, "loanExpenses", "Loans repaid", -pay);
   loan.principal -= pay;
   if (loan.principal <= 0.01) {
     save.finance.loans.splice(save.finance.loans.indexOf(loan), 1);

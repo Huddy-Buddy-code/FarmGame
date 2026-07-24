@@ -128,6 +128,16 @@ export interface GameConfig {
    * acre (2026-07-21). Optional post-harvest pass — see the mulcher implement
    * and the `mulch` task (sim/tasks.ts). */
   mulchCostPerAcre: number;
+  /** Cost to harvest, per acre — fuel + labor for the combine (2026-07-23).
+   * The priciest fieldwork pass in the game: a combine burns more fuel and
+   * costs more per hour to run than any tractor pass. */
+  harvestCostPerAcre: number;
+  /** Yield bonus the NEXT crop gets from a mulch pass (`Field.residueMulched`).
+   * Two rates (maintainer spec, 2026-07-23): the full rate when the residue was
+   * shredded back in whole, and a reduced one when the bulk of it was baled off
+   * the field first and only the stubble got worked in. */
+  mulchBonusPct: number;
+  mulchBonusBaledPct: number;
 
   /** Fieldwork pacing (brief §9–§10). PHYSICAL model (design decision 2026-07-10):
    * a machine drives a back-and-forth coverage path at `fieldSpeedKmh`, so a
@@ -361,8 +371,9 @@ export const gameConfig: GameConfig = {
       plantMonths: [3, 4], // Apr–May
       growMonths: 4, // whole months → planted in Apr, ready the 1st of Aug
       sellPricePerTon: 180,
-      producesForage: true, // corn stover → rake + bale before re-plowing
-      baleProduct: "cornStover",
+      // Corn no longer bales (maintainer decision, 2026-07-23) — its residue is
+      // mulched back in or plowed under. `cornStover` stays in `baleProducts`
+      // below so stover already sitting in a save still prices and sells.
     },
     soybeans: {
       name: "Soybeans",
@@ -504,6 +515,9 @@ export const gameConfig: GameConfig = {
   weedCostPerAcre: 15,
   mowCostPerAcre: 12,
   mulchCostPerAcre: 8,
+  harvestCostPerAcre: 30,
+  mulchBonusPct: 0.07,
+  mulchBonusBaledPct: 0.03,
   work: {
     // Slower than road travel: a working pass is deliberate. Tuned so a medium
     // (10 ft) plow on a ~30-acre field takes a few sim-hours — in the ballpark
@@ -601,7 +615,8 @@ export const gameConfig: GameConfig = {
     baleFillVariance: 0.3, // each bale fills at 70–130% of a nominal bale
   },
   baleProducts: {
-    // Corn residue — mirrors the legacy forage numbers so corn is unchanged.
+    // LEGACY (2026-07-23): corn no longer produces forage, so no new stover is
+    // ever made. Kept so bales already in a save keep a name, price and tint.
     cornStover: { name: "Corn Stover", pricePerBale: 45, balesPerAcre: 2.5, color: "hay" },
     // Grass hay: ~1.5 t/ac/cutting, round bale ≈ 1 t, ~$65/bale (2025 markets).
     hay: { name: "Grass Hay", pricePerBale: 65, balesPerAcre: 1.5, color: "hay" },

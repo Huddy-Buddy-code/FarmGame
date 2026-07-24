@@ -5,7 +5,7 @@ import { recordCash, categoryTotal, netCashflow, ledgerYears } from "../src/sim/
 import { buyAgent, sellAgent, buyImplement, ensureAgents } from "../src/sim/tasks";
 import { buyBuildingAt, sellBuilding } from "../src/sim/buildings";
 import { sellGrain } from "../src/sim/economy";
-import { borrowOpen, tickLoans } from "../src/sim/finance";
+import { borrowOpen, paydownOpen, tickLoans } from "../src/sim/finance";
 import { minutesPerMonth, MONTHS_PER_YEAR } from "../src/sim/calendar";
 import { gameConfig } from "../src/config/gameConfig";
 
@@ -42,10 +42,33 @@ describe("cashflow ledger (maintainer request, 2026-07-12)", () => {
     expect(categoryTotal(y1, "landEquipment")).toBe(0); // silo bought + sold back
     expect(y1.cropRevenue?.["Corn"]).toBe(Math.round(50 * gameConfig.crops.corn.sellPricePerTon));
 
+    // Borrowing books as money IN under Loan Expenses (2026-07-23) — before
+    // this, the ledger showed repayments with no sign of the money that
+    // created them, so the Net column disagreed with the actual bank balance.
+    expect(y1.loanExpenses?.["Loans taken"]).toBe(100_000);
+
     const y2 = save.ledger![2]!;
     expect(y2.loanExpenses?.["Interest"]).toBeLessThan(0);
     expect(y2.loanExpenses?.["Principal (scheduled)"]).toBeLessThan(0);
     expect(netCashflow(y2)).toBeCloseTo(categoryTotal(y2, "loanExpenses"), 6);
+  });
+
+  it("loans taken are positive, loans repaid negative, and they net out", () => {
+    const save = newGame();
+    borrowOpen(save, 80_000);
+    paydownOpen(save, 30_000);
+    const y1 = save.ledger![1]!;
+    expect(y1.loanExpenses?.["Loans taken"]).toBe(80_000);
+    expect(y1.loanExpenses?.["Loans repaid"]).toBe(-30_000);
+    expect(categoryTotal(y1, "loanExpenses")).toBe(50_000); // matches the cash actually kept
+  });
+
+  it("the ledger's loan total tracks the real change in cash", () => {
+    const save = newGame();
+    const before = save.money;
+    borrowOpen(save, 120_000);
+    paydownOpen(save, 45_000);
+    expect(save.money - before).toBe(categoryTotal(save.ledger![1]!, "loanExpenses"));
   });
 
   it("keeps only the most recent five years, current year always listed first", () => {

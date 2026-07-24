@@ -4,7 +4,8 @@ import type { Meters } from "../src/geo/coords";
 import { newGame } from "../src/state/saveState";
 import type { Field, FarmTask, SaveState } from "../src/state/saveState";
 import { tickFarming, productivityMultiplier, applyHarvestDone } from "../src/sim/farming";
-import { ensureAgents, buyImplement, tickTasks, autoManageAll, canMulch, taskCost } from "../src/sim/tasks";
+import { ensureAgents, buyImplement, tickTasks, autoManageAll, canMulch, taskCost, enqueueTask } from "../src/sim/tasks";
+import { gameConfig } from "../src/config/gameConfig";
 import { legalMonthsFor } from "../src/sim/schedule";
 import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
 import { minutesPerMonth } from "../src/sim/calendar";
@@ -79,6 +80,87 @@ describe("legalMonthsFor mulch — the months following harvest", () => {
 describe("mulch task cost", () => {
   it("charges mulchCostPerAcre × acres", () => {
     expect(taskCost(harvestedAnnual(), "mulch")).toBe(800); // 100 acres × $8
+  });
+});
+
+describe("harvest cost (2026-07-23 — was free)", () => {
+  it("charges harvestCostPerAcre × acres", () => {
+    const ready: Field = { id: "f", parcelId: "p", boundary, status: "ready", crop: "corn" };
+    expect(taskCost(ready, "harvest")).toBe(100 * gameConfig.harvestCostPerAcre);
+  });
+
+  it("is the priciest per-acre fieldwork pass", () => {
+    const f = harvestedAnnual();
+    const others = [
+      taskCost(f, "plow"), taskCost(f, "mulch"), taskCost(f, "mow"),
+      taskCost(f, "weed"), taskCost(f, "rake"), taskCost(f, "bale"),
+    ];
+    for (const c of others) expect(taskCost({ ...f, status: "ready", crop: "corn" }, "harvest")).toBeGreaterThan(c);
+  });
+
+  it("books to the field ledger under Harvesting", () => {
+    const save = newGame();
+    const field: Field = { id: "field-1", parcelId: "p", boundary, status: "ready", crop: "corn", trueYieldTonsPerAcre: 5 };
+    save.fields.push(field);
+    const before = save.money;
+    enqueueTask(save, field, "harvest", APRIL_1);
+    expect(save.money).toBe(before - 100 * gameConfig.harvestCostPerAcre);
+    expect(save.ledger?.[1]?.fieldExpenses?.["Harvesting"]).toBe(-100 * gameConfig.harvestCostPerAcre);
+  });
+});
+
+describe("mulch bonus splits by whether the residue was baled off", () => {
+  it("full rate when the residue went back in whole", () => {
+    const f: Field = { ...harvestedAnnual(), status: "growing", crop: "soybeans", lastCrop: "soybeans", residueMulched: true };
+    // lastCrop === crop, so no rotation bonus muddies the number.
+    expect(productivityMultiplier(f, APRIL_1)).toBeCloseTo(1 + gameConfig.mulchBonusPct, 6);
+  });
+
+  it("reduced rate when it was baled off first", () => {
+    const f: Field = {
+      ...harvestedAnnual(), status: "growing", crop: "soybeans", lastCrop: "soybeans",
+      residueMulched: true, residueBaled: true,
+    };
+    expect(productivityMultiplier(f, APRIL_1)).toBeCloseTo(1 + gameConfig.mulchBonusBaledPct, 6);
+  });
+
+  it("residueBaled alone (never mulched) is worth nothing", () => {
+    const f: Field = { ...harvestedAnnual(), status: "growing", crop: "soybeans", lastCrop: "soybeans", residueBaled: true };
+    expect(productivityMultiplier(f, APRIL_1)).toBeCloseTo(1, 6);
+  });
+
+  it("harvest consumes BOTH flags, so the next mulch isn't wrongly downgraded", () => {
+    const f: Field = {
+      id: "f", parcelId: "p", boundary, status: "ready", crop: "soybeans",
+      residueMulched: true, residueBaled: true,
+    };
+    applyHarvestDone(f);
+    expect(f.residueMulched).toBeUndefined();
+    expect(f.residueBaled).toBeUndefined();
+  });
+});
+
+describe("canMulch — every annual, baled or not", () => {
+  it("allows a field left 'mulched' by a bale run (stubble still works in)", () => {
+    const save = newGame();
+    const f = harvestedAnnual({ status: "mulched", residueBaled: true });
+    save.fields.push(f);
+    expect(canMulch(save, f)).toBe(true);
+  });
+
+  it("still refuses while a bale task is queued — mulching would cancel it", () => {
+    const save = newGame();
+    const f = harvestedAnnual({ forageReady: true, lastCrop: "wheat" });
+    save.fields.push(f);
+    enqueueTask(save, f, "bale", APRIL_1);
+    expect(canMulch(save, f)).toBe(false);
+  });
+
+  it("refuses a field already mulched this cycle", () => {
+    const save = newGame();
+    const f = harvestedAnnual({ status: "mulched", residueMulched: true });
+    save.fields.push(f);
+    expect(canMulch(save, f)).toBe(false);
   });
 });
 

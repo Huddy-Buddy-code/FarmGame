@@ -30,7 +30,7 @@ import type { Meters } from "../geo/coords";
 import {
   inPlantingWindow, canPlow, applyPlow, applyPlant, applyHarvestDone, applyBaleDone,
   applyMowDone, inPlowWindow, hasStandingCrop, inWeedingWindow, canFertilizeNow,
-  isPerennial, balesPerAcreForField, canSeedPerennial, productivityMultiplier,
+  isPerennial, balesPerAcreForField, canSeedPerennial, productivityMultiplier, baleProductForField,
 } from "./farming";
 import { buildCoveragePath, buildHeadlandCoveragePath, sampleAt, workDoneAt, distanceAtWork, TASK_HEADLANDS } from "./coverage";
 import type { CoveragePath } from "./coverage";
@@ -90,7 +90,7 @@ const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Med
  * Finance tab's cashflow table). */
 const FIELD_EXPENSE_ITEM: Partial<Record<TaskType, string>> = {
   plow: "Plowing", plant: "Planting", mow: "Mowing", mulch: "Mulching", weed: "Weeding", fertilize: "Fertilizing",
-  rake: "Raking", bale: "Baling",
+  rake: "Raking", bale: "Baling", harvest: "Harvesting",
 };
 
 /** Which implement kind a task type needs (undefined = none, e.g. harvest).
@@ -411,25 +411,50 @@ export function isFieldHarvesting(save: SaveState, fieldId: string): boolean {
  * is only *required* before re-plowing when the player can actually do it; a
  * farm with no baler just plows the residue under (so auto-manage never traps). */
 export function forageEquipped(save: SaveState): boolean {
-  return save.implements.some((i) => i.kind === "rake") && save.implements.some((i) => i.kind === "bailer");
+  const baler = save.implements.some((i) => i.kind === "bailer");
+  return baler && save.implements.some((i) => i.kind === "rake");
+}
+
+/**
+ * Does this field's residue have to be RAKED into windrows before the baler can
+ * run? True for hay crops; false for small-grain STRAW (maintainer decision,
+ * 2026-07-23) — a combine already drops straw in a windrow behind it, so a
+ * separate raking pass is redundant, which is also how it works in reality.
+ */
+export function needsRakeBeforeBaling(field: Field): boolean {
+  return baleProductForField(field) !== "straw";
+}
+
+/** The gear needed to bale THIS field: always a baler, plus a rake unless the
+ * field's residue is straw. Used so a straw-only farm isn't told it can't bale
+ * for want of a rake it will never use. */
+export function baleEquippedFor(save: SaveState, field: Field): boolean {
+  if (!save.implements.some((i) => i.kind === "bailer")) return false;
+  return !needsRakeBeforeBaling(field) || save.implements.some((i) => i.kind === "rake");
 }
 
 /** Does this field still owe a rake + bale before it can be re-plowed? True only
  * for a harvested forage field on a farm that owns the baling gear. */
 export function forageDue(save: SaveState, field: Field): boolean {
-  return field.status === "harvested" && !!field.forageReady && forageEquipped(save);
+  return field.status === "harvested" && !!field.forageReady && baleEquippedFor(save, field);
 }
 
 /**
- * Can this field take an (optional) mulch pass right now? Annual residue only,
- * while the field is freshly harvested and NOT being baled — a mulcher shreds
- * the residue back in as an alternative to baling it off. Excludes perennials
- * (grass/alfalfa keep their stand — `field.crop` stays set), already-mulched
- * fields, and any field with a rake/bale lined up (it's headed for baling).
+ * Can this field take an (optional) mulch pass right now?
+ *
+ * Every ANNUAL crop is mulchable (maintainer request, 2026-07-23), in either of
+ * two states: freshly `harvested` with its residue still down (the full
+ * `mulchBonusPct`), or `mulched` — the clean surface a bale run leaves — where
+ * only the stubble is left to work in (the reduced `mulchBonusBaledPct`, via
+ * `Field.residueBaled`).
+ *
+ * Still refuses while a rake or bale is QUEUED: mulching clears `forageReady`/
+ * `windrowed`, so running it first would quietly cancel the baling the player
+ * already paid for. Perennials are excluded outright — they keep their stand.
  */
 export function canMulch(save: SaveState, field: Field): boolean {
   return (
-    field.status === "harvested" &&
+    (field.status === "harvested" || field.status === "mulched") &&
     !isPerennial(field.crop) &&
     !isPerennial(field.lastCrop) &&
     !field.residueMulched &&
@@ -467,7 +492,8 @@ export function taskCost(field: Field, type: TaskType, crop?: CropId): number {
   if (type === "fertilize") return Math.round(acres * gameConfig.crops[crop ?? field.crop!].fertilizeCostPerAcre);
   if (type === "rake") return Math.round(acres * gameConfig.forage.rakeCostPerAcre);
   if (type === "bale") return Math.round(acres * gameConfig.forage.baleCostPerAcre);
-  return 0; // harvest: fuel/wages arrive with the cost-model slice (brief §8)
+  if (type === "harvest") return Math.round(acres * gameConfig.harvestCostPerAcre);
+  return 0; // unloadHarvester/haulBales: relays, charged via their own field work
 }
 
 /**
@@ -518,9 +544,11 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
     if (isPerennial(field.crop) || isPerennial(field.lastCrop)) {
       throw new Error(`${field.id} is a perennial stand — mulching is for annual residue`);
     }
-    if (field.status !== "harvested") throw new Error(`${field.id} has no residue to mulch (status: ${field.status})`);
+    if (field.status !== "harvested" && field.status !== "mulched") {
+      throw new Error(`${field.id} has no residue to mulch (status: ${field.status})`);
+    }
     if (field.residueMulched) throw new Error(`${field.id} is already mulched`);
-    throw new Error(`${field.id} is being baled — mulch is for residue you aren't baling`);
+    throw new Error(`${field.id} has baling queued — mulch it once the baler is done`);
   }
   if (type === "weed") {
     if (!hasStandingCrop(field.status)) throw new Error(`${field.id} has nothing to weed (status: ${field.status})`);
@@ -541,7 +569,8 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
     }
     // The baler follows the rake — it can start once raking has begun, so a rake
     // must at least be queued/underway (or already done, i.e. windrowed).
-    if (!field.windrowed && tasksFor(save, field.id, "rake").length === 0) {
+    // Straw skips this entirely: the combine already left it in a windrow.
+    if (needsRakeBeforeBaling(field) && !field.windrowed && tasksFor(save, field.id, "rake").length === 0) {
       throw new Error(`Rake ${field.id} first — the baler follows the rake`);
     }
   }
@@ -702,15 +731,19 @@ function isStartable(task: FarmTask, field: Field): boolean {
     return perennial ? canSeedPerennial(field.status) : field.status === "tilled";
   }
   if (task.type === "mow") return field.status === "ready"; // perennial cut
-  if (task.type === "mulch") return field.status === "harvested"; // post-harvest residue
+  // Post-harvest residue, or the stubble left behind by a bale run ("mulched").
+  if (task.type === "mulch") return field.status === "harvested" || field.status === "mulched";
   // Both only ever queue once the crop is already growing (see enqueueTask's
   // window checks) — require it still be growing when picked up too, rather
   // than the looser hasStandingCrop (which also allows "planted").
   if (task.type === "weed" || task.type === "fertilize") return field.status === "growing";
   if (task.type === "rake") return field.status === "harvested" && !!field.forageReady;
   // Baler follows the rake: startable once raking has begun (windrowed) and the
-  // field hasn't been baled yet (still "harvested").
-  if (task.type === "bale") return field.status === "harvested" && !!field.windrowed;
+  // field hasn't been baled yet (still "harvested"). Straw needs no rake, so it
+  // only waits on the field still being un-baled.
+  if (task.type === "bale") {
+    return field.status === "harvested" && (!!field.windrowed || !needsRakeBeforeBaling(field));
+  }
   // Haul Bales: startable while the field still has bales on the ground —
   // field STATUS doesn't matter (bales sit on a mulched/re-plowed field the
   // same way). If they're all gone (sold, or already hauled), it's moot.
@@ -2572,8 +2605,27 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
   }
 
   switch (field.status) {
-    case "stubble":
     case "mulched":
+      // "mulched" = the clean surface a bale run leaves. The residue is gone,
+      // but the stubble can still be worked in for the reduced bonus, so try
+      // that before falling through to plowing (2026-07-23).
+      if (
+        plan.mulch &&
+        !field.autoMulchDone &&
+        canMulch(save, field) &&
+        !inPlowWindow(now) &&
+        monthMatches(now, plan.schedule?.mulch)
+      ) {
+        try {
+          enqueueTask(save, field, "mulch", now);
+          field.autoMulchDone = true;
+          break;
+        } catch {
+          /* no mulcher / unaffordable — fall through to plowing */
+        }
+      }
+    // falls through to the plow branch
+    case "stubble":
       // Auto-manage (unlike the manual Queue Plow button) still waits for
       // winter — enqueueTask itself no longer season-gates plowing. The plow
       // is ground prep for the UPCOMING crop, so it reads that step's schedule.
@@ -2589,11 +2641,13 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       if (forageDue(save, field) && plan.bale) {
         // The forage loop: rake then bale (queued together — the baler waits in
         // the queue until the rake has started). Once baled the field is
-        // "mulched" and comes back around to plowing.
-        try {
-          enqueueTask(save, field, "rake", now);
-        } catch {
-          /* can't afford it yet — retry next tick */
+        // "mulched" and comes back around to plowing. Straw needs no rake pass.
+        if (needsRakeBeforeBaling(field)) {
+          try {
+            enqueueTask(save, field, "rake", now);
+          } catch {
+            /* can't afford it yet — retry next tick */
+          }
         }
         try {
           enqueueTask(save, field, "bale", now);

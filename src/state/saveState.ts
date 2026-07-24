@@ -175,12 +175,18 @@ export interface Field {
    * `crop` for the rotation yield bonus (`productivityMultiplier`, farming.ts).
    * Undefined on a field's first-ever crop — no bonus, nothing to rotate from. */
   lastCrop?: CropId;
-  /** A mulching pass has shredded this field's residue back in — adds +7% to
-   * the NEXT crop's yield (`productivityMultiplier`, farming.ts). Set when the
+  /** A mulching pass has shredded this field's residue back in — boosts the
+   * NEXT crop's yield (`productivityMultiplier`, farming.ts). Set when the
    * mulch task completes (after the current harvest); consumed/cleared by the
    * next harvest (`applyHarvestDone`). Independent of the "mulched" FieldStatus,
    * which means a clean baled surface — a name collision, not the same thing. */
   residueMulched?: boolean;
+  /** This cycle's residue was BALED off the field before any mulch pass, so a
+   * mulch only worked the leftover stubble in — worth the reduced
+   * `mulchBonusBaledPct` rather than the full `mulchBonusPct` (2026-07-23).
+   * Set when a bale run finishes on an annual; cleared with `residueMulched`
+   * by the next harvest. Meaningless unless `residueMulched` is also set. */
+  residueBaled?: boolean;
 }
 
 /** On-farm grain bin, tons per crop. Unlimited in this slice; storage limits and
