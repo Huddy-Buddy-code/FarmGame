@@ -4250,8 +4250,9 @@ function seasonOfMonth(m: number): ScheduleSeason {
 const SCHEDULE_SEASON_ICON: Record<ScheduleSeason, string> = { spring: "🌱", summer: "☀️", fall: "🍂", winter: "❄️" };
 
 /** One task COLUMN in the vertical calendar. A `type` marks a draggable/
- * overridable task (plow/plant/weed/fertilize/harvest); its absence marks an
- * auto-positioned column (mow/rake-bale/perennial fertilize). */
+ * overridable task (plow/plant/weed/fertilize/harvest); its absence marks a
+ * fixed-timing column (mow/rake-bale/perennial fertilize) — rendered the same
+ * as a scheduled cell but with no Available months to move to. */
 interface ScheduleColumn {
   icon: string;
   label: string;
@@ -4310,9 +4311,6 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
   const autoCol = (icon: string, label: string, months: number[], toggleProp?: "fertilize" | "bale"): void => {
     cols.push({ icon, label, legal: new Set(), active: new Set(months), toggleProp, on: toggleProp ? !!plan[toggleProp] : true });
   };
-  // Plow's window is derived from the crop's own cycle now (2026-07-23), so it
-  // needs the plant month like every other derived row.
-  taskCol("🚜", "Plow", "plow", plantMonth);
   taskCol("🌱", "Plant", "plant", undefined);
   if (perennialField) {
     const cfg = gameConfig.crops[plan.crop];
@@ -4339,6 +4337,15 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
       autoCol("📦", "Rake / Bale", harvestEff !== undefined ? [harvestEff] : [], "bale");
     }
   }
+  // Plow LAST (maintainer request, 2026-07-23 — moved to the far-right column).
+  // It's the hand-off to the next crop, so it reads naturally at the end of the
+  // row even though its window is derived from the crop's own cycle like the
+  // other rows, and so needs the plant month.
+  //
+  // Hidden for a PERENNIAL stand (grass/alfalfa): it's plowed only once to
+  // establish and never re-plowed, so there's no recurring plow for the player
+  // to schedule. Auto-manage still does the one establishing plow on its own.
+  if (!perennialField) taskCol("🚜", "Plow", "plow", plantMonth);
 
   // --- Legend + vertical grid (months down the rows, tasks across the cols) ---
   host.innerHTML = "";
@@ -4347,7 +4354,6 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
     `<div class="fp-cal-legend">
       <span><i class="lg-sched"></i>Scheduled — drag/click</span>
       <span><i class="lg-legal"></i>Available</span>
-      <span><i class="lg-auto"></i>Automatic</span>
     </div>`,
   );
   const grid = document.createElement("div");
@@ -4447,15 +4453,19 @@ function scheduleCell(c: ScheduleColumn, m: number, plan: FieldPlan, msg: HTMLEl
     return cell;
   }
 
-  // Auto-positioned (mow/rake-bale/perennial fertilize) — not draggable.
+  // Fixed-timing tasks (mow/rake-bale/perennial fertilize) — mow follows the
+  // perennial's cutting windows, baling follows harvest, so there's no other
+  // month to drag them to. They render the SAME as any scheduled task now
+  // (2026-07-23 — the separate "Automatic" state was dropped); they simply
+  // have no Available cells to move to, and the optional ones stay toggleable.
   if (isActive) {
-    cell.className = "fp-cal-cell auto";
+    cell.className = "fp-cal-cell scheduled";
     if (c.toggleProp) {
-      cell.style.cursor = "pointer";
-      cell.title = "Automatic — click to turn off";
+      cell.title = "Runs after harvest/mow — click to turn off";
       cell.addEventListener("click", toggleOnOff);
     } else {
-      cell.title = "Automatic — runs right after harvest/mow, no scheduling";
+      cell.style.cursor = "default";
+      cell.title = "Runs after harvest/mow";
     }
     return cell;
   }
