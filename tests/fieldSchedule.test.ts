@@ -46,13 +46,24 @@ describe("legalMonthsFor", () => {
     expect(legalMonthsFor("fertilize", "corn", 3)).toEqual([4, 5, 6]); // plantMonth+1 .. plantMonth+growMonths-1
   });
 
-  it("harvest: delay-only, from the natural ready month, wrapping past December", () => {
-    // Corn planted month 3 (Apr), growMonths 4 -> ready month 7 (Aug), then up
-    // to `schedule.harvestDelayMaxMonths` (6) further out.
-    expect(legalMonthsFor("harvest", "corn", 3)).toEqual([7, 8, 9, 10, 11, 0, 1]);
-    // A cycle that ripens after December used to produce an EMPTY set (the old
-    // December clamp) — the bug that left Winter Wheat's Harvest row blank.
-    expect(legalMonthsFor("harvest", "corn", 10)).toEqual([2, 3, 4, 5, 6, 7, 8]);
+  it("harvest: delay-only, bounded by the crop's harvest WINDOW", () => {
+    // Corn planted month 3 (Apr), growMonths 4 -> ready month 7 (Aug). The
+    // window is harvestWindowMonths (2) long, so Aug and Sep — past that the
+    // crop withers, so no later month may be offered (2026-07-23).
+    expect(legalMonthsFor("harvest", "corn", 3)).toEqual([7, 8]);
+    // Wraps past December rather than clamping there (the old December clamp
+    // is what left Winter Wheat's Harvest row blank).
+    expect(legalMonthsFor("harvest", "corn", 10)).toEqual([2, 3]);
+  });
+
+  it("the harvest window never offers a month the crop would already have died in", () => {
+    // The Schedule tab must not hand the player a way to destroy their own
+    // crop: every legal month has to fall inside the window that
+    // harvestWindowClosed() enforces in the sim.
+    for (const crop of ["corn", "soybeans", "wheat", "potatoes", "sunflowers"] as const) {
+      const pm = gameConfig.crops[crop].plantMonths[0]!;
+      expect(legalMonthsFor("harvest", crop, pm)).toHaveLength(gameConfig.harvestWindowMonths);
+    }
   });
 
   it("Winter Wheat's harvest/mulch rows are populated (regression: the blank-row bug)", () => {

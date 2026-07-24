@@ -442,11 +442,12 @@ export function forageDue(save: SaveState, field: Field): boolean {
 /**
  * Can this field take an (optional) mulch pass right now?
  *
- * Every ANNUAL crop is mulchable (maintainer request, 2026-07-23), in either of
- * two states: freshly `harvested` with its residue still down (the full
- * `mulchBonusPct`), or `mulched` — the clean surface a bale run leaves — where
+ * Every ANNUAL crop is mulchable (maintainer request, 2026-07-23), in any of
+ * three states: freshly `harvested` with its residue still down (the full
+ * `mulchBonusPct`), `mulched` — the clean surface a bale run leaves — where
  * only the stubble is left to work in (the reduced `mulchBonusBaledPct`, via
- * `Field.residueBaled`).
+ * `Field.residueBaled`), or `withered`, where a whole lost crop goes back into
+ * the ground and is worth the full rate (the one salvage from a missed window).
  *
  * Still refuses while a rake or bale is QUEUED: mulching clears `forageReady`/
  * `windrowed`, so running it first would quietly cancel the baling the player
@@ -454,7 +455,7 @@ export function forageDue(save: SaveState, field: Field): boolean {
  */
 export function canMulch(save: SaveState, field: Field): boolean {
   return (
-    (field.status === "harvested" || field.status === "mulched") &&
+    (field.status === "harvested" || field.status === "mulched" || field.status === "withered") &&
     !isPerennial(field.crop) &&
     !isPerennial(field.lastCrop) &&
     !field.residueMulched &&
@@ -544,7 +545,7 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
     if (isPerennial(field.crop) || isPerennial(field.lastCrop)) {
       throw new Error(`${field.id} is a perennial stand — mulching is for annual residue`);
     }
-    if (field.status !== "harvested" && field.status !== "mulched") {
+    if (field.status !== "harvested" && field.status !== "mulched" && field.status !== "withered") {
       throw new Error(`${field.id} has no residue to mulch (status: ${field.status})`);
     }
     if (field.residueMulched) throw new Error(`${field.id} is already mulched`);
@@ -731,8 +732,11 @@ function isStartable(task: FarmTask, field: Field): boolean {
     return perennial ? canSeedPerennial(field.status) : field.status === "tilled";
   }
   if (task.type === "mow") return field.status === "ready"; // perennial cut
-  // Post-harvest residue, or the stubble left behind by a bale run ("mulched").
-  if (task.type === "mulch") return field.status === "harvested" || field.status === "mulched";
+  // Post-harvest residue, the stubble left by a bale run ("mulched"), or a
+  // whole lost crop ("withered").
+  if (task.type === "mulch") {
+    return field.status === "harvested" || field.status === "mulched" || field.status === "withered";
+  }
   // Both only ever queue once the crop is already growing (see enqueueTask's
   // window checks) — require it still be growing when picked up too, rather
   // than the looser hasStandingCrop (which also allows "planted").
@@ -857,6 +861,7 @@ export interface TasksTickResult {
 export function tickTasks(save: SaveState, now: SimTime, dtMinutes: number, rand: () => number = Math.random): TasksTickResult {
   const changed: Field[] = [];
   const events: TaskEvent[] = [];
+  dropStrandedHarvests(save);
   // Before anyone picks their next job: make sure every combine that's sitting
   // with grain has an unload trip AND crew it with a free tractor — so a free
   // tractor rescues the combine instead of starting queued field work
@@ -877,6 +882,27 @@ export function tickTasks(save: SaveState, now: SimTime, dtMinutes: number, rand
     tickAgent(save, agent, now, dtMinutes, changed, events, rand);
   }
   return { changed, events };
+}
+
+/**
+ * Cancel queued harvests on fields that have nothing left to harvest.
+ *
+ * A crop that withers (missed its harvest window, 2026-07-23) takes any queued
+ * harvest down with it: `isStartable` requires status "ready", so the task
+ * would otherwise sit in the Work Queue forever, un-startable and blocking the
+ * player's read of what's actually pending. Refunded via the normal
+ * `cancelTask` path so the money and both ledgers stay consistent — no work was
+ * ever done, and the player is already paying for the miss with the whole crop.
+ *
+ * Only touches QUEUED tasks; an active harvest is never interrupted (and
+ * `tickFarming` won't wither a field that has one running).
+ */
+function dropStrandedHarvests(save: SaveState): void {
+  for (const task of [...save.tasks]) {
+    if (task.type !== "harvest" || task.status !== "queued") continue;
+    const field = save.fields.find((f) => f.id === task.fieldId);
+    if (field && field.status === "withered") cancelTask(save, task.id);
+  }
 }
 
 /** Two points count as "the same spot" (an agent parked there) within a
@@ -2605,10 +2631,11 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
   }
 
   switch (field.status) {
+    case "withered":
     case "mulched":
-      // "mulched" = the clean surface a bale run leaves. The residue is gone,
-      // but the stubble can still be worked in for the reduced bonus, so try
-      // that before falling through to plowing (2026-07-23).
+      // "mulched" = the clean surface a bale run leaves; "withered" = a crop
+      // lost to a missed harvest window. Both can still take a mulch pass
+      // before falling through to plowing (2026-07-23).
       if (
         plan.mulch &&
         !field.autoMulchDone &&

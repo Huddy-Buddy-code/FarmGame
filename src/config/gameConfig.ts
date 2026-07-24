@@ -295,14 +295,21 @@ export interface GameConfig {
     seasonalBonusByDistance: Record<number, number>;
   };
 
+  /**
+   * How many months an annual crop stays harvestable, counted from the month it
+   * ripens (maintainer decision, 2026-07-23). 2 = ready in August means August
+   * and September; come October it WITHERS and the crop is a total loss.
+   *
+   * This is the game's main time-pressure lever: it caps how far a harvest can
+   * be delayed toward the December price peak, and it's what makes combine
+   * capacity and crew size matter. Perennials are unaffected — a missed cutting
+   * window is simply skipped and the stand regrows.
+   */
+  harvestWindowMonths: number;
+
   /** Field Schedule tab windows (`sim/schedule.ts`). How far a player may shift
-   * an auto-managed step from its natural month — balance, because a longer
-   * harvest delay is a stronger price-timing tool. */
+   * an auto-managed step from its natural month. */
   schedule: {
-    /** Months past the natural ready month a harvest may be delayed to. Wide
-     * enough to reach the December price peak from any realistic ready month
-     * (Winter Wheat is ready in June — the furthest out any crop starts). */
-    harvestDelayMaxMonths: number;
     /** How many months after harvest the optional mulch pass stays legal. */
     mulchWindowMonths: number;
   };
@@ -651,8 +658,8 @@ export const gameConfig: GameConfig = {
     peakMonth: 11, // December
     seasonalBonusByDistance: { 0: 0.25, 1: 0.15, 2: 0.1 },
   },
+  harvestWindowMonths: 2,
   schedule: {
-    harvestDelayMaxMonths: 6, // June-ready Winter Wheat can still reach the Dec peak
     mulchWindowMonths: 3,
   },
   loan: {

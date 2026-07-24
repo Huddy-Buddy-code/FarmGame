@@ -207,6 +207,25 @@ export function drawFieldTexture(
         rows(ctx, w, h, angle, 5, "#aebd88", 0.7, 0.18, 2.5); // lit mown edges
         passStripes(ctx, w, h, angle, passPx, 0.05); // baling/mowing passes, at implement swath
         break;
+
+      case "withered":
+        // A crop that DIED STANDING (2026-07-23). The distinction that has to
+        // read at a glance is against `stubble`: both are drab, but stubble was
+        // cut — even rows, no canopy — whereas this still has its full standing
+        // crop, just dead. So: the original planted rows are still there but
+        // drained of colour, the canopy is blotchy with die-back, whole patches
+        // have collapsed (lodged) where the stalks gave way, and weeds are
+        // taking the field back. Deliberately NO pass stripes: nothing ever
+        // drove this field, and that absence is part of the read.
+        canopyMottle(ctx, w, h, seed + 7, dark, light, 1.3, areaScale);
+        rows(ctx, w, h, angle, 1.6, dark, 0.7, 0.24);
+        rows(ctx, w, h, angle, 1.6, light, 0.4, 0.12, 0.6); // bleached highlights
+        // Twice, at different seeds — heavier collapse than a ripe crop's.
+        lodgingPatches(ctx, w, h, seed + 17, angle, dark, light, areaScale);
+        lodgingPatches(ctx, w, h, seed + 41, angle, dark, light, areaScale);
+        weedPatches(ctx, w, h, seed + 23, 0.55 * areaScale, "#6b6f43", "#828656");
+        tramlines(ctx, w, h, angle, dark, 0.18); // last spray pass, still faintly there
+        break;
     }
     };
 
@@ -348,6 +367,14 @@ function palette(p: FieldPaintParams): { base: string; dark: string; light: stri
     case "mulched":
       // Greener than stubble — grass retained under a clean, mown/baled surface.
       return { base: "#9aa771", dark: "#84925f", light: "#adba8b" };
+    case "withered":
+      // A crop lost to a missed harvest window (2026-07-23): grey-brown, dead
+      // and sun-bleached. Deliberately the most desaturated palette in the
+      // game — every other status sits somewhere on the soil-brown to
+      // crop-green range, so a field that reads as drained of colour is
+      // recognisable as "something went wrong here" at a glance, without
+      // needing to be a jarring colour that fights the imagery.
+      return { base: "#8f8264", dark: "#75694e", light: "#a3977c" };
   }
 }
 
@@ -377,6 +404,10 @@ function headlandLapsForStatus(status: FieldStatus, crop: CropId | undefined): n
       // `ready` case above) — nothing for a frame to distinguish.
       if (crop === "grass" || crop === "alfalfa") return 0;
       return TASK_HEADLANDS.plant?.laps ?? 0;
+    case "withered":
+      // The crop died where it was PLANTED and nothing has driven the field
+      // since, so it still wears the planter's headland frame.
+      return TASK_HEADLANDS.plant?.laps ?? 0;
     case "harvested":
     case "mulched":
       // mow/rake/bale/harvest all share the same {laps: 3, order: "first"}
@@ -397,6 +428,7 @@ function defaultSwathM(status: FieldStatus, crop: CropId | undefined): number {
       case "planted":
       case "growing":
       case "ready":
+      case "withered": // frame was laid by the planter — see headlandLapsForStatus
         return gameConfig.equipment.planter.medium.widthFt;
       case "harvested":
       case "mulched":

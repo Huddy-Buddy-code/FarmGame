@@ -28,7 +28,13 @@ export type FieldStatus =
   | "harvested"
   /** Raked + baled: clean, organized surface, bales sitting in the field. Set
    * when a baler finishes; re-plowable in the winter window. */
-  | "mulched";
+  | "mulched"
+  /** Left standing past its harvest window (`gameConfig.harvestWindowMonths`)
+   * and lost — dead, collapsed growth with no grain and no balable residue
+   * (2026-07-23). A dead end for the crop, but not for the field: it must be
+   * plowed or mulched to clear before anything else can be planted, and
+   * mulching it in still earns the usual residue bonus. */
+  | "withered";
 
 export interface Parcel {
   id: string;

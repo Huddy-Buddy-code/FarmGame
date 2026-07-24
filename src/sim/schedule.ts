@@ -70,12 +70,14 @@ export function legalMonthsFor(type: ScheduleTaskType, crop: CropId, plantMonth?
   const span = gameConfig.crops[crop].growMonths;
   if (type === "weed") return rangeWrapped(plantMonth + 2, plantMonth + span - 1);
   if (type === "fertilize") return rangeWrapped(plantMonth + 1, plantMonth + span - 1);
-  // Harvest is DELAY-ONLY: from the natural ready month (plant+grow) forward,
-  // bounded so holding a crop in the field can't run into the next step's own
-  // planting. The bound is wide enough to reach the December price peak from
-  // any realistic ready month.
+  // Harvest is DELAY-ONLY, and now bounded by the crop's real HARVEST WINDOW
+  // (2026-07-23): from the month it ripens through `harvestWindowMonths`. This
+  // is not just a UI limit — a crop still standing when the window closes
+  // withers and is lost (`harvestWindowClosed`/`applyWither`, farming.ts), so
+  // offering a later month here would be offering the player a way to destroy
+  // their own crop.
   if (type === "harvest") {
-    return rangeWrappedCapped(plantMonth + span, plantMonth + span + gameConfig.schedule.harvestDelayMaxMonths);
+    return rangeWrappedCapped(plantMonth + span, plantMonth + span + gameConfig.harvestWindowMonths - 1);
   }
   // Mulch: the months following the natural harvest. An annual residue pass.
   if (type === "mulch") {

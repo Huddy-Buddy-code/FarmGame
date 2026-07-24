@@ -80,7 +80,7 @@ export function inPlantingWindow(crop: CropId, t: SimTime): boolean {
  * field that still owes forage (rake + bale) is gated separately — see
  * `forageDue` in tasks.ts — so this being true isn't the whole story. */
 export function canPlow(status: FieldStatus): boolean {
-  return status === "stubble" || status === "harvested" || status === "mulched";
+  return status === "stubble" || status === "harvested" || status === "mulched" || status === "withered";
 }
 
 /** Is `t` inside the plowing season (winter, `gameConfig.plowMonths`)?
@@ -340,6 +340,73 @@ export function yieldRange(field: Field, now: SimTime): { low: number; high: num
   return { low, high };
 }
 
+/**
+ * Whole months elapsed since the START of the planting month — the same origin
+ * `growthProgress` measures from, so "ripe at growMonths" and "withered at
+ * growMonths + harvestWindowMonths" are counted off one consistent clock.
+ */
+function monthsSincePlantMonthStart(field: Field, now: SimTime): number | null {
+  if (field.plantedAt === undefined || !field.crop) return null;
+  const mpm = minutesPerMonth();
+  return (now - Math.floor(field.plantedAt / mpm) * mpm) / mpm;
+}
+
+/**
+ * Has a ripe annual crop stood unharvested past the end of its harvest window
+ * (2026-07-23)? The window opens the month the crop ripens and runs
+ * `gameConfig.harvestWindowMonths` months; once it closes the crop is lost.
+ * Perennials never wither — a missed cutting is just skipped.
+ */
+export function harvestWindowClosed(field: Field, now: SimTime): boolean {
+  if (!field.crop || isPerennial(field.crop)) return false;
+  const elapsed = monthsSincePlantMonthStart(field, now);
+  if (elapsed === null) return false;
+  const cfg = gameConfig.crops[field.crop];
+  return elapsed >= cfg.growMonths + gameConfig.harvestWindowMonths;
+}
+
+/**
+ * Whole months of harvest window left on a ripe crop (0 = this is the last
+ * month, it withers at the month turn). Null when the crop isn't ripe yet, has
+ * already withered, or is a perennial. Drives the field panel's countdown
+ * warning — a total-loss mechanic needs to be visible BEFORE it fires.
+ */
+export function harvestMonthsRemaining(field: Field, now: SimTime): number | null {
+  if (!field.crop || isPerennial(field.crop)) return null;
+  const elapsed = monthsSincePlantMonthStart(field, now);
+  if (elapsed === null) return null;
+  const cfg = gameConfig.crops[field.crop];
+  const monthsIn = elapsed - cfg.growMonths;
+  if (monthsIn < 0) return null; // not ripe yet
+  const left = Math.ceil(gameConfig.harvestWindowMonths - monthsIn) - 1;
+  return Math.max(0, left);
+}
+
+/**
+ * Kill a crop left standing past its harvest window: a TOTAL loss (maintainer
+ * spec, 2026-07-23) — no grain, no bales, no revenue.
+ *
+ * The field is left "withered" rather than cleared, so the loss is visible on
+ * the map and still costs a pass to deal with. `lastCrop` is set exactly as it
+ * would be at harvest: the field really did grow that crop, so the next
+ * planting still earns its rotation bonus. Deliberately does NOT set
+ * `forageReady` — dead collapsed growth isn't worth baling — but the field
+ * stays mulchable, which is the one salvage path.
+ */
+export function applyWither(field: Field): void {
+  field.status = "withered";
+  field.lastCrop = field.crop;
+  field.crop = undefined;
+  field.plantedAt = undefined;
+  field.trueYieldTonsPerAcre = undefined;
+  field.harvestedAcres = undefined;
+  field.fertilized = undefined;
+  field.weedy = undefined;
+  // The mulch bonus was spent on the crop that just died, same as at harvest.
+  field.residueMulched = undefined;
+  field.residueBaled = undefined;
+}
+
 /** Field status as derived from growth/harvest state. Pure function of the field. */
 export function deriveStatus(field: Field, now: SimTime): FieldStatus {
   if (!field.crop || field.plantedAt === undefined) return field.status;
@@ -392,6 +459,21 @@ export function tickFarming(save: SaveState, now: SimTime): TickResult {
       field.autoFertDone = undefined;
     }
     const before = field.status;
+    // Withering (2026-07-23) is a destructive EVENT, not a derived status: it
+    // destroys the crop, so it has to happen once rather than be recomputed.
+    // Runs before deriveStatus, which then sees no crop and holds "withered".
+    //
+    // A combine already working the field is never cut off mid-job — losing a
+    // part-harvested crop to the calendar would be indistinguishable from a bug,
+    // and would strand the active task on a field with nothing left to cut.
+    // Checked inline rather than via tasks.ts's isFieldHarvesting: farming.ts is
+    // imported BY tasks.ts, so importing back would be circular.
+    if (harvestWindowClosed(field, now)) {
+      const beingHarvested = save.tasks.some(
+        (t) => t.fieldId === field.id && (t.type === "harvest" || t.type === "mow") && t.status === "active",
+      );
+      if (!beingHarvested) applyWither(field);
+    }
     field.status = deriveStatus(field, now);
     let dirty = field.status !== before;
     // Weed flush: once the weeding window opens (growing, 2 months after

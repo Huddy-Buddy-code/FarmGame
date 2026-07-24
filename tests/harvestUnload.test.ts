@@ -24,10 +24,15 @@ function readyField(acres: number, tonsPerAcre = 6): Field {
   const side = Math.sqrt(acres * 4046.8564224);
   const boundary: Meters[] = [[0, 0], [side, 0], [side, side], [0, side]];
   return {
-    // plantedAt way in the past so tickFarming's growth-derived status (which
-    // would otherwise overwrite "ready" back to "growing") clamps at ready.
+    // Planted exactly growMonths before APRIL_1, so the crop is ripe on the
+    // dot at the moment every test starts. This used to be plantedAt:
+    // -1_000_000 ("way in the past"), which stopped working when crops gained
+    // a harvest WINDOW (2026-07-23): a crop that ripened years ago is long
+    // withered, so the fixture has to sit at the START of its window, not
+    // somewhere unboundedly past it.
     id: "field-1", parcelId: "parcel-1", boundary,
-    status: "ready", crop: "corn", plantedAt: -1_000_000, trueYieldTonsPerAcre: tonsPerAcre,
+    status: "ready", crop: "corn", trueYieldTonsPerAcre: tonsPerAcre,
+    plantedAt: APRIL_1 - gameConfig.crops.corn.growMonths * minutesPerMonth(),
   };
 }
 

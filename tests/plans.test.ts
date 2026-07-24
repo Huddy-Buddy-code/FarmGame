@@ -278,19 +278,20 @@ describe("auto-manage runs the field's rotation plan", () => {
     const field: Field = {
       id: "field-1", parcelId: "p", boundary, status: "tilled", autoManage: true,
       // Corn planted in April, growMonths 4 -> naturally ready in August (month
-      // 7). Delay the harvest to October (month 9) instead.
-      plans: [{ crop: "corn", schedule: { harvest: 9 } }],
+      // 7). Delay to September (month 8) — the last month of the 2-month
+      // harvest window. Anything later would wither the crop, and
+      // legalMonthsFor no longer offers it (2026-07-23).
+      plans: [{ crop: "corn", schedule: { harvest: 8 } }],
     };
     save.fields.push(field);
 
     const afterPlant = runUntil(save, APRIL_1, () => field.status === "ready");
     expect(field.status).toBe("ready");
-    // Ready, but not yet harvested — run through Aug/Sep without ever
-    // satisfying `done`, well past the natural ready point.
-    const afterWait = runUntil(save, afterPlant, () => false, 2 * minutesPerMonth() - 1);
+    // Ready, but held through the rest of August without harvesting.
+    const afterWait = runUntil(save, afterPlant, () => false, minutesPerMonth() - 1);
     expect(field.status).toBe("ready"); // still waiting on the override month
     runUntil(save, afterWait, () => field.status === "harvested");
-    expect(field.status).toBe("harvested"); // fires once October arrives
+    expect(field.status).toBe("harvested"); // fires once September arrives
   });
 
   it("a weed override still fires later in the legal window if it's scheduled at its LAST legal month, not just the first tick checked", () => {

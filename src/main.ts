@@ -55,7 +55,7 @@ import {
 import {
   tickFarming, growthProgress, yieldRange, productivityMultiplier, yieldModifierSteps, inPlantingWindow, canPlow,
   hasStandingCrop, inWeedingWindow, canFertilizeNow, isPerennial, canSeedPerennial,
-  isPerennialDormant,
+  isPerennialDormant, harvestMonthsRemaining,
 } from "./sim/farming";
 import {
   ensureAgents, initTaskIds, enqueueTask, cancelTask, taskCost, tasksFor,
@@ -2987,13 +2987,20 @@ function rebuildCropCalendarGrid() {
         bands += band("harv", disp(mo), 1);
       }
     } else {
-      // Annual: harvest opens a grow-time after planting, as wide as the
-      // window — modulo a full year so an overwintering crop lands back
-      // inside the display year instead of off the right edge.
+      // Annual: harvest opens a grow-time after planting and runs for the real
+      // HARVEST WINDOW (2026-07-23) — modulo a full year so an overwintering
+      // crop lands back inside the display year instead of off the right edge.
+      // This band is now load-bearing rather than decorative: past its right
+      // edge the crop withers, so it has to match `gameConfig.harvestWindowMonths`.
       const harvStart = disp((cfg.plantMonths[0]! + cfg.growMonths) % MONTHS_PER_YEAR);
-      bands += band("harv", harvStart, plantLen);
+      bands += band("harv", harvStart, gameConfig.harvestWindowMonths);
     }
-    html += `<div class="crop">${cfg.emoji} ${cfg.name}</div>
+    // A bale marker after the name for crops whose residue can be baled
+    // (maintainer request, 2026-07-23), tinted by the product it makes.
+    const baleMark = cfg.producesForage
+      ? baleIconSvg(12, gameConfig.baleProducts[cfg.baleProduct ?? "straw"].color)
+      : "";
+    html += `<div class="crop">${cfg.emoji} ${cfg.name}${baleMark ? `<span class="cal-bale" title="Leaves balable residue">${baleMark}</span>` : ""}</div>
       <div class="lane">${bands}</div>`;
   }
   grid.innerHTML = html;
@@ -3942,6 +3949,21 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
     body.insertAdjacentHTML("beforeend", `<div class="small">${windows}</div>`);
   }
 
+  // --- Withered: the crop was lost to a missed harvest window (2026-07-23).
+  // A total loss needs an explicit explanation, or a field that quietly went
+  // grey and empty just reads as a bug.
+  if (field.status === "withered") {
+    const lost = field.lastCrop ? gameConfig.crops[field.lastCrop] : undefined;
+    body.insertAdjacentHTML(
+      "beforeend",
+      `<div class="withered-note">
+         <b>💀 ${lost ? `${lost.emoji} ${lost.name}` : "The crop"} withered</b>
+         <div class="small">It stood past its ${gameConfig.harvestWindowMonths}-month harvest window and was lost — no grain, no bales.
+         Mulch it back in (worth ${Math.round(gameConfig.mulchBonusPct * 100)}% on the next crop) or plow it under to clear the field.</div>
+       </div>`,
+    );
+  }
+
   if (field.crop) {
     // --- Growing / ready / harvesting ---
     const cfg = gameConfig.crops[field.crop];
@@ -3951,6 +3973,15 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
     let html = `<div style="margin-top:8px">${cfg.emoji} <b>${cfg.name}</b></div>`;
     if (field.weedy) {
       html += `<div class="small" style="color:var(--red)">🌿 Weeds are spreading — a weeding pass clears them</div>`;
+    }
+    // Countdown on a ripe crop — the last chance to act before a total loss.
+    const monthsLeft = harvestMonthsRemaining(field, now);
+    if (monthsLeft !== null && !harvestingNow) {
+      html += `<div class="small harvest-window${monthsLeft === 0 ? " urgent" : ""}">${
+        monthsLeft === 0
+          ? "⚠️ Last month to harvest — the crop withers at the month's end"
+          : `⏳ ${monthsLeft} more month${monthsLeft === 1 ? "" : "s"} to harvest before it withers`
+      }</div>`;
     }
     if (isPerennial(field.crop)) {
       // Perennial: no grain yield / single-ripen growth — show the 3-cut
