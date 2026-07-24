@@ -224,6 +224,13 @@ export interface GameConfig {
      * a nearly-full cart would have almost no room at the combine's next
      * stop (maintainer request, 2026-07-13). */
     cartSiloRunFraction: number;
+    /** How many rigs may work one hauling job at once — grain carts servicing a
+     * single combine, or bale haulers clearing a single field (maintainer
+     * request, 2026-07-23). Crews are parallel TASKS rather than one task with
+     * several machines on it, so each rig keeps its own independent brain; this
+     * just caps how many get spawned, so a big fleet doesn't pile onto one
+     * field and starve everything else. */
+    maxCrewSize: number;
   };
 
   /** Forage baling (maintainer request, 2026-07-11). After a forage crop is
@@ -609,6 +616,7 @@ export const gameConfig: GameConfig = {
     loadMinutes: 0.17, // ≈ 10 s at 1×
     dumpMinutes: 0.17,
     cartSiloRunFraction: 0.75,
+    maxCrewSize: 3,
   },
   forage: {
     rakeSpeedKmh: 13, // slightly faster than the baler

@@ -385,6 +385,58 @@ function tractorCanUse(save: SaveState, tractor: Agent, kind: ImplementKind): bo
   return !!attachedImplement(save, tractor.id, kind) || !!availableImplementFor(save, tractor, kind);
 }
 
+/** A tractor free to be given a new job right now. */
+function isFreeTractor(a: Agent): boolean {
+  return a.kind === "tractor" && a.state === "idle" && !a.taskId && !!a.size;
+}
+
+/**
+ * Which tractor SHOULD take a job needing `kind`: the one that can pull the
+ * biggest implement available for it, and among those, the smallest tractor
+ * that can manage it (maintainer request, 2026-07-23).
+ *
+ * The old behavior fell out of processing agents smallest-first: the smallest
+ * idle tractor grabbed the job and then hitched the largest implement IT could
+ * pull. So a farm with a small tractor idle would do a 400-acre field with a
+ * 5-foot plow while a large tractor and a 20-foot plow both sat in the yard.
+ * Picking the implement FIRST inverts that — take the widest tool on the farm,
+ * then the smallest power unit that can actually pull it, which keeps the big
+ * tractors free for the jobs only they can do.
+ *
+ * Returns null when no rig exists (caller then leaves assignment alone, so
+ * combines and other implement-less work are unaffected).
+ */
+function preferredTractorFor(save: SaveState, kind: ImplementKind): Agent | null {
+  const free = save.agents.filter(isFreeTractor);
+  if (free.length === 0) return null;
+  // Candidate implements: unhitched ones (anybody can take them), plus ones
+  // already hitched to a free tractor — those come with their tractor fixed,
+  // which mirrors what `availableImplementFor` will actually do at hitch time.
+  const candidates: Array<{ impl: Implement; only?: Agent }> = [];
+  for (const impl of save.implements) {
+    if (impl.kind !== kind) continue;
+    if (!impl.attachedTo) candidates.push({ impl });
+    else {
+      const host = free.find((a) => a.id === impl.attachedTo);
+      if (host) candidates.push({ impl, only: host });
+    }
+  }
+  if (candidates.length === 0) return null;
+  // Widest tool first; for each, the smallest tractor that can pull it.
+  candidates.sort((a, b) => SIZE_RANK[b.impl.size] - SIZE_RANK[a.impl.size]);
+  for (const { impl, only } of candidates) {
+    if (only) {
+      if (canPull(only.size!, impl.size)) return only;
+      continue;
+    }
+    const puller = free
+      .filter((a) => canPull(a.size!, impl.size))
+      .sort((a, b) => SIZE_RANK[a.size!] - SIZE_RANK[b.size!])[0];
+    if (puller) return puller;
+  }
+  return null;
+}
+
 /** Can this tractor take a plow task right now — does it have (or can it hitch) a
  * plow? Used both for task assignment and UI hints. */
 export function tractorCanPlow(save: SaveState, tractor: Agent): boolean {
@@ -395,6 +447,20 @@ export function tractorCanPlow(save: SaveState, tractor: Agent): boolean {
  * a planter? Used both for task assignment and UI hints. */
 export function tractorCanPlant(save: SaveState, tractor: Agent): boolean {
   return tractorCanUse(save, tractor, "planter");
+}
+
+/**
+ * Couldn't afford a task. A distinct error TYPE rather than a message string so
+ * auto-manage can tell "you're broke" (worth telling the player about — it will
+ * never resolve on its own) apart from the many benign reasons an enqueue is
+ * refused mid-tick, like being out of season (2026-07-23). Its message is still
+ * player-facing — the manual queue buttons show it as-is.
+ */
+export class InsufficientFundsError extends Error {
+  constructor(readonly cost: number, readonly available: number) {
+    super(`That costs $${Math.round(cost).toLocaleString()} — not enough cash`);
+    this.name = "InsufficientFundsError";
+  }
 }
 
 /** All not-yet-finished tasks for a field (optionally of one type). */
@@ -577,7 +643,7 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
   }
   const cost = taskCost(field, type, crop);
   if (cost > save.money) {
-    throw new Error(`That costs $${cost.toLocaleString()} — not enough cash`);
+    throw new InsufficientFundsError(cost, save.money);
   }
   save.money -= cost;
   recordCash(save, "fieldExpenses", FIELD_EXPENSE_ITEM[type] ?? "Other", -cost);
@@ -1119,8 +1185,23 @@ function guessLeftoverCrop(save: SaveState): CropId | undefined {
  * itself completes — the trailer for the last, still-in-the-hopper load
  * would otherwise have no idea what it's hauling by the time it arrives. */
 function ensureUnloadTask(save: SaveState, harvester: Agent, fieldId: string, crop: CropId, events?: TaskEvent[]): void {
-  let task = save.tasks.find((t) => t.type === "unloadHarvester" && t.harvesterAgentId === harvester.id);
-  if (!task) {
+  const trips = save.tasks.filter((t) => t.type === "unloadHarvester" && t.harvesterAgentId === harvester.id);
+  // A CREW of carts, not just one (maintainer request, 2026-07-23): while one
+  // cart is away at the silo, another can already be alongside the combine, so
+  // a big harvest isn't paced by a single trailer's round trip.
+  //
+  // Another trip is only spawned once every existing one is actually CREWED —
+  // otherwise this would create maxCrewSize empty tasks on the first tick and
+  // they'd just sit there looking like a stuck queue.
+  let task = trips.find((t) => !t.agentId);
+  // The FIRST trip is always created even with nothing free to crew it — a
+  // combine with grain needs a pending trip so a tractor bought (or freed up)
+  // later has something to pick up, and the "no cart yet" wait is a state the
+  // UI already reports. EXTRA trips are different: spawning one with no free
+  // rig just parks a permanently uncrewed task in the queue, which reads as
+  // stuck. So a crew only grows when there's actually someone to join it.
+  const canGrow = trips.length === 0 || (trips.length < gameConfig.hauling.maxCrewSize && hasFreeCartTractor(save));
+  if (!task && canGrow) {
     task = {
       id: `task-${++taskSeq}`,
       type: "unloadHarvester",
@@ -1138,14 +1219,28 @@ function ensureUnloadTask(save: SaveState, harvester: Agent, fieldId: string, cr
   // Proactively crew it the same tick it's created, so a free tractor is claimed
   // for the combine before it can start queued field work (maintainer request,
   // 2026-07-20). No-op if already crewed or nothing's free.
-  if (events) assignGrainCart(save, task, events);
+  if (task && events) assignGrainCart(save, task, events);
 }
 
-/** Does `field` have loose bales worth hauling — bales on the ground and no
- * haul job already covering it? */
+/**
+ * Could another bale hauler usefully be put on this field? Bales on the ground,
+ * and room in the crew for one more (`gameConfig.hauling.maxCrewSize`).
+ *
+ * Shared by the auto-queue hook after baling and by the field panel's "Haul to
+ * Storage" button, so the button is never offered when `queueHaulBales` would
+ * just decline — the two must agree or the button silently does nothing.
+ */
 export function fieldHasLooseBales(save: SaveState, fieldId: string): boolean {
   const field = save.fields.find((f) => f.id === fieldId);
-  return (field?.baleLocations?.length ?? 0) > 0 && !save.tasks.some((t) => t.type === "haulBales" && t.fieldId === fieldId);
+  const bales = field?.baleLocations?.length ?? 0;
+  if (bales <= 0) return false;
+  const existing = save.tasks.filter((t) => t.type === "haulBales" && t.fieldId === fieldId);
+  if (existing.length === 0) return true;
+  return (
+    existing.length < gameConfig.hauling.maxCrewSize &&
+    existing.every((t) => !!t.agentId) &&
+    bales > existing.length
+  );
 }
 
 /** Queue a "Haul Bales" job for a field's loose bales, if one isn't already
@@ -1156,8 +1251,26 @@ export function fieldHasLooseBales(save: SaveState, fieldId: string): boolean {
  * there was nothing to haul / one's already going. */
 export function queueHaulBales(save: SaveState, fieldId: string): FarmTask | undefined {
   const field = save.fields.find((f) => f.id === fieldId);
-  if (!field || (field.baleLocations?.length ?? 0) <= 0) return undefined;
-  if (save.tasks.some((t) => t.type === "haulBales" && t.fieldId === fieldId)) return undefined;
+  const bales = field?.baleLocations?.length ?? 0;
+  if (!field || bales <= 0) return undefined;
+  // A CREW of haulers on one field (maintainer request, 2026-07-23), spawned as
+  // parallel tasks so each keeps its own independent collect/haul brain rather
+  // than one task juggling several machines. Three gates, all of which have to
+  // hold before another hauler is worth adding:
+  //   - the crew cap,
+  //   - every existing hauler is already crewed (else we'd spawn empty tasks
+  //     that just sit in the queue looking stuck),
+  //   - and there are actually more bales down than haulers already on it —
+  //     no sending a second tractor out for one bale.
+  const existing = save.tasks.filter((t) => t.type === "haulBales" && t.fieldId === fieldId);
+  if (existing.length > 0) {
+    if (existing.length >= gameConfig.hauling.maxCrewSize) return undefined;
+    if (existing.some((t) => !t.agentId)) return undefined;
+    if (bales <= existing.length) return undefined;
+    // Same rule as the grain-cart crew: don't park an uncrewed extra task in
+    // the queue when there's no free tractor to ever pick it up.
+    if (!save.agents.some(isFreeTractor)) return undefined;
+  }
   const task: FarmTask = {
     id: `task-${++taskSeq}`,
     type: "haulBales",
@@ -1355,6 +1468,14 @@ function finishUnload(save: SaveState, task: FarmTask, agent: Agent, events: Tas
  * request, 2026-07-20 — "same join-mid-job idea as the baler"). Auto-hitches a
  * loose Grain Trailer if the spare tractor has none. No-op when the task's
  * already crewed, the combine's empty, or nothing's free. */
+/** Is there an idle tractor that could take a Grain Trailer right now? Gates
+ * growing a cart crew — see `ensureUnloadTask`. */
+function hasFreeCartTractor(save: SaveState): boolean {
+  return save.agents.some(
+    (a) => isFreeTractor(a) && (!!attachedImplement(save, a.id, "grainTrailer") || !!availableImplementFor(save, a, "grainTrailer")),
+  );
+}
+
 function assignGrainCart(save: SaveState, task: FarmTask, events: TaskEvent[]): void {
   if (task.status !== "queued") return;
   const harvester = save.agents.find((a) => a.id === task.harvesterAgentId);
@@ -1444,6 +1565,15 @@ function tickAgent(
           t.status === "queued" &&
           TASK_AGENT_KIND[t.type] === agent.kind &&
           (!TASK_IMPLEMENT[t.type] || tractorCanUse(save, agent, TASK_IMPLEMENT[t.type]!)) &&
+          // Biggest implement available, pulled by the smallest tractor that
+          // can manage it (2026-07-23). A tractor that isn't the preferred rig
+          // for this job stands down and lets the right one take it; the loop
+          // re-evaluates every tick, so if the preferred tractor gets claimed
+          // elsewhere first, whoever's best next simply picks the job up.
+          // No preferred rig at all (no implement of the kind exists, or the
+          // task needs none) falls back to the old any-capable-agent rule.
+          (!TASK_IMPLEMENT[t.type] ||
+            (preferredTractorFor(save, TASK_IMPLEMENT[t.type]!)?.id ?? agent.id) === agent.id) &&
           // unloadHarvester's fieldId is display-only (may be a legacy/
           // unknown "" for a recovered leftover hopper) — doesn't need the
           // field to actually exist, unlike every other task type.
@@ -2516,6 +2646,92 @@ export function planToPlant(field: Field): FieldPlan {
   return virgin ? activePlan(field) : nextPlan(field);
 }
 
+// --- Blocked work (maintainer request, 2026-07-23) --------------------------
+/**
+ * Work the farm WANTS to do but can't. Surfaced in the Work Queue with a ⚠️ so
+ * a field that has quietly stopped progressing explains itself, instead of the
+ * player having to notice an absence.
+ *
+ * Deliberately narrow: only blockers the player can actually act on. Being out
+ * of season, or waiting on an earlier step, resolves itself and would sit there
+ * as a permanent warning — those stay silent.
+ */
+export interface BlockedWork {
+  fieldId: string;
+  type: TaskType;
+  /** Player-facing, already specific ("No mulcher owned", "Needs $4,200 — you have $900"). */
+  reason: string;
+}
+
+/**
+ * Auto-manage's cash refusals for this tick, keyed field+task.
+ *
+ * Runtime-only and rebuilt every `autoManageAll` pass, exactly like the
+ * coverage-path caches: it's a snapshot of "what did the manager just try and
+ * fail to do", which is meaningless to persist and wrong to keep across ticks
+ * (the player might have sold something in between).
+ */
+const blockedByCash = new Map<string, BlockedWork>();
+
+/** Record an auto-manage enqueue failure, but only if it's worth showing. */
+function noteBlocked(field: Field, type: TaskType, err: unknown): void {
+  if (!(err instanceof InsufficientFundsError)) return; // out of season etc. — self-resolving
+  blockedByCash.set(`${field.id}:${type}`, {
+    fieldId: field.id,
+    type,
+    reason: `Needs $${Math.round(err.cost).toLocaleString()} — you have $${Math.round(err.available).toLocaleString()}`,
+  });
+}
+
+/** Enqueue for auto-manage: swallows the expected refusals exactly as the bare
+ * try/catch blocks used to, but classifies them first. Returns the task, or
+ * undefined if it didn't happen. */
+function tryEnqueue(save: SaveState, field: Field, type: TaskType, now: SimTime, crop?: CropId): FarmTask | undefined {
+  try {
+    return enqueueTask(save, field, type, now, crop);
+  } catch (err) {
+    noteBlocked(field, type, err);
+    return undefined;
+  }
+}
+
+/**
+ * Everything currently blocked, for the Work Queue panel: auto-manage's cash
+ * refusals, plus any QUEUED task that no machine on the farm can perform.
+ *
+ * The second case can't come from a caught error — enqueueing succeeds fine, the
+ * task simply never gets picked up, so it would otherwise sit in the queue
+ * forever with no explanation. That's the single most confusing state in the
+ * game ("why isn't anything happening?"), and the one blocker guaranteed never
+ * to resolve on its own.
+ */
+export function blockedWork(save: SaveState): BlockedWork[] {
+  const out: BlockedWork[] = [...blockedByCash.values()].filter((b) =>
+    // Drop anything that has since been queued after all.
+    !save.tasks.some((t) => t.fieldId === b.fieldId && t.type === b.type),
+  );
+  for (const task of save.tasks) {
+    if (task.status !== "queued") continue;
+    const kind = TASK_IMPLEMENT[task.type];
+    const needed = TASK_AGENT_KIND[task.type];
+    const haveMachine = save.agents.some((a) => a.kind === needed);
+    if (!haveMachine) {
+      out.push({ fieldId: task.fieldId, type: task.type, reason: `No ${needed === "harvester" ? "combine" : needed} owned` });
+      continue;
+    }
+    if (kind && !save.implements.some((i) => i.kind === kind)) {
+      out.push({ fieldId: task.fieldId, type: task.type, reason: `No ${IMPLEMENT_NAME[kind]} owned` });
+      continue;
+    }
+    // Owned, but nothing that can pull it — a large-only implement on a
+    // small-only fleet is just as stuck as not owning one.
+    if (kind && !save.agents.some((a) => a.kind === "tractor" && a.size && save.implements.some((i) => i.kind === kind && canPull(a.size!, i.size)))) {
+      out.push({ fieldId: task.fieldId, type: task.type, reason: `No tractor big enough for the ${IMPLEMENT_NAME[kind]}` });
+    }
+  }
+  return out;
+}
+
 /** Field Schedule tab (2026-07-21): does the current month satisfy this
  * task's schedule override, if any? Undefined = no override set = today's
  * behavior (fire the moment the underlying gate opens). A set override
@@ -2552,20 +2768,13 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
   // retrying every tick same as the un-overridden case (soft-retry, per
   // maintainer request — never worse than today's behavior).
   if (plan.weed && !field.autoWeedDone && inWeedingWindow(field, now) && monthMatches(now, plan.schedule?.weed)) {
-    try {
-      enqueueTask(save, field, "weed", now);
-      field.autoWeedDone = true;
-    } catch {
-      /* no sprayer / cash yet — retry next tick */
-    }
+    // Only mark the pass done if it actually queued — a failed enqueue must
+    // stay retryable, or one broke tick would silently skip weeding for the
+    // whole crop cycle.
+    if (tryEnqueue(save, field, "weed", now)) field.autoWeedDone = true;
   }
   if (plan.fertilize && !field.autoFertDone && canFertilizeNow(field, now) && monthMatches(now, plan.schedule?.fertilize)) {
-    try {
-      enqueueTask(save, field, "fertilize", now);
-      field.autoFertDone = true;
-    } catch {
-      /* no sprayer / cash yet — retry next tick */
-    }
+    if (tryEnqueue(save, field, "fertilize", now)) field.autoFertDone = true;
   }
 
   const lifecycleBusy = save.tasks.some((t) => t.fieldId === field.id && LIFECYCLE_TASKS.has(t.type));
@@ -2583,20 +2792,12 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       // plant both read the UPCOMING step's schedule: they're prep for its crop.
       if (canPlow(field.status)) {
         if (inPlowWindow(now) && monthMatches(now, upcoming.schedule?.plow)) {
-          try {
-            enqueueTask(save, field, "plow", now);
-          } catch {
-            /* unaffordable — retry next tick */
-          }
+          tryEnqueue(save, field, "plow", now);
         }
       } else if (monthMatches(now, upcoming.schedule?.plant)) {
         // Tilled — establish the stand in its (March) planting window.
-        try {
-          const t = enqueueTask(save, field, "plant", now, upcoming.crop);
-          if (handoff) t.advancesRotation = true;
-        } catch {
-          /* out of the plant window / unaffordable — retry next tick */
-        }
+        const t = tryEnqueue(save, field, "plant", now, upcoming.crop);
+        if (t && handoff) t.advancesRotation = true;
       }
       return;
     }
@@ -2610,16 +2811,8 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
     }
     if (field.status === "harvested") {
       if (forageDue(save, field) && plan.bale) {
-        try {
-          enqueueTask(save, field, "rake", now);
-        } catch {
-          /* unaffordable — retry next tick */
-        }
-        try {
-          enqueueTask(save, field, "bale", now);
-        } catch {
-          /* rake not queued yet / unaffordable — retry next tick */
-        }
+        tryEnqueue(save, field, "rake", now);
+        tryEnqueue(save, field, "bale", now);
       } else if (field.forageReady) {
         // Not baling (opted out / no gear) — drop the cut forage; the stand
         // regrows for the next window (a perennial is never plowed under).
@@ -2643,12 +2836,9 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
         !inPlowWindow(now) &&
         monthMatches(now, plan.schedule?.mulch)
       ) {
-        try {
-          enqueueTask(save, field, "mulch", now);
+        if (tryEnqueue(save, field, "mulch", now)) {
           field.autoMulchDone = true;
           break;
-        } catch {
-          /* no mulcher / unaffordable — fall through to plowing */
         }
       }
     // falls through to the plow branch
@@ -2657,11 +2847,7 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       // winter — enqueueTask itself no longer season-gates plowing. The plow
       // is ground prep for the UPCOMING crop, so it reads that step's schedule.
       if (inPlowWindow(now) && monthMatches(now, upcoming.schedule?.plow)) {
-        try {
-          enqueueTask(save, field, "plow", now);
-        } catch {
-          /* can't afford it yet — retry next tick */
-        }
+        tryEnqueue(save, field, "plow", now);
       }
       break;
     case "harvested":
@@ -2670,17 +2856,9 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
         // the queue until the rake has started). Once baled the field is
         // "mulched" and comes back around to plowing. Straw needs no rake pass.
         if (needsRakeBeforeBaling(field)) {
-          try {
-            enqueueTask(save, field, "rake", now);
-          } catch {
-            /* can't afford it yet — retry next tick */
-          }
+          tryEnqueue(save, field, "rake", now);
         }
-        try {
-          enqueueTask(save, field, "bale", now);
-        } catch {
-          /* rake not queued yet / unaffordable — retry next tick */
-        }
+        tryEnqueue(save, field, "bale", now);
       } else if (
         plan.mulch &&
         !field.autoMulchDone &&
@@ -2693,22 +2871,13 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
         // opens. `!inPlowWindow` means a late harvest that lands in plow season
         // just skips straight to plowing. Completing it flips the field to
         // stubble, so next tick falls through to the plow branch.
-        try {
-          enqueueTask(save, field, "mulch", now);
-          field.autoMulchDone = true;
-        } catch {
-          /* no mulcher / unaffordable — retry next tick */
-        }
+        if (tryEnqueue(save, field, "mulch", now)) field.autoMulchDone = true;
       } else if (inPlowWindow(now) && monthMatches(now, upcoming.schedule?.plow)) {
         // Plow under — discard any un-baled forage so the plow isn't gated on it
         // (the plan opted out of baling, or there's no gear for it). Still
         // waits for winter, same as the stubble/mulched case above.
         if (field.forageReady) field.forageReady = undefined;
-        try {
-          enqueueTask(save, field, "plow", now);
-        } catch {
-          /* can't afford it yet — retry next tick */
-        }
+        tryEnqueue(save, field, "plow", now);
       }
       break;
     case "tilled":
@@ -2716,12 +2885,8 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       // task is what makes it "current" (`advancesRotation`) — queueing it
       // isn't, so a canceled plant leaves the sequence exactly where it was.
       if (monthMatches(now, upcoming.schedule?.plant)) {
-        try {
-          const t = enqueueTask(save, field, "plant", now, upcoming.crop);
-          if (handoff) t.advancesRotation = true;
-        } catch {
-          /* window closed or unaffordable — retry next tick */
-        }
+        const t = tryEnqueue(save, field, "plant", now, upcoming.crop);
+        if (t && handoff) t.advancesRotation = true;
       }
       break;
     case "ready":
@@ -2730,11 +2895,7 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       // retrying every tick until the chosen month arrives, same pattern as
       // everything else here).
       if (monthMatches(now, plan.schedule?.harvest)) {
-        try {
-          enqueueTask(save, field, "harvest", now);
-        } catch {
-          /* a harvest task already exists or similar — wait */
-        }
+        tryEnqueue(save, field, "harvest", now);
       }
       break;
   }
@@ -2743,6 +2904,9 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
 /** Run auto-management for every flagged field (call once per tick, before
  * tickTasks so freshly queued work can start the same tick). */
 export function autoManageAll(save: SaveState, now: SimTime): void {
+  // Blocked-work notes are a snapshot of THIS pass, not a running log — a
+  // shortfall from ten ticks ago may well have been resolved since.
+  blockedByCash.clear();
   for (const field of save.fields) {
     if (field.autoManage) autoManageField(save, field, now);
   }

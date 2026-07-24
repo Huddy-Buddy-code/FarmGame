@@ -62,10 +62,11 @@ import {
   isFieldHarvesting, effectiveStatus, tickTasks, autoManageAll, autoManageField,
   buyAgent, sellAgent, buyImplement, sellImplement, attachImplement, detachImplement,
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
-  reorderTask, estimateTaskHours, forageDue, canMulch, defaultPlan, forcePlow, removeRotationStep,
+  reorderTask, estimateTaskHours, forageDue, canMulch, defaultPlan, forcePlow, removeRotationStep, blockedWork,
   harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
   appendCompletedTask, haySpikesCapacityBales, baleTrailerCapacityBales, queueHaulBales, fieldHasLooseBales,
 } from "./sim/tasks";
+import type { BlockedWork } from "./sim/tasks";
 import { buildRoadNetwork } from "./sim/roadNet";
 import type { RoadNetwork } from "./sim/roadNet";
 import { defaultAccessPoints } from "./sim/access";
@@ -1199,12 +1200,18 @@ function refreshQueuePanel(): void {
       return `${t.id}:${t.status}:${t.agentId ?? ""}:${Math.round((t.doneAcres / t.totalAcres) * 100)}:${t.unloadPhase ?? ""}:${t.waitingForSilo ?? ""}:${cargoBucket}:${t.haulPhase ?? ""}:${t.trailerPhase ?? ""}:${t.waitingForStorage ?? ""}:${bales}`;
     })
     .join("|") + `#${completed.length}:${nowDate.year}:${nowDate.month}`;
-  if (key === lastQueueKey) return;
-  lastQueueKey = key;
+  // Blocked work is derived from state the task list alone doesn't capture
+  // (cash, what machines are owned), so it needs its own slice of the key or
+  // the ⚠️ rows would go stale — including never appearing when the ONLY
+  // thing to report is a block and the task list itself hasn't changed.
+  const blocked = blockedWork(save);
+  const fullKey = key + "#B" + blocked.map((b) => `${b.fieldId}:${b.type}:${b.reason}`).join(",");
+  if (fullKey === lastQueueKey) return;
+  lastQueueKey = fullKey;
 
   const rows = $("queue-rows");
   rows.innerHTML = "";
-  if (save.tasks.length === 0 && completed.length === 0) {
+  if (save.tasks.length === 0 && completed.length === 0 && blocked.length === 0) {
     rows.innerHTML = `<div class="queue-empty">No jobs queued — plow, plant, or harvest a field.</div>`;
     return;
   }
@@ -1242,10 +1249,46 @@ function refreshQueuePanel(): void {
     });
     rows.appendChild(tail);
   }
+  // Work the farm wants to do but can't (2026-07-23). Shown after live jobs so
+  // it never pushes them down the panel, but before Completed so it isn't
+  // buried under a month of history.
+  if (blocked.length > 0) {
+    rows.appendChild(sectionDivider("Blocked"));
+    for (const b of blocked) rows.appendChild(buildBlockedRow(b));
+  }
   if (completed.length > 0) {
     rows.appendChild(sectionDivider(`Completed — ${MONTH_SHORT[nowDate.month]}`));
     for (const ct of completed) rows.appendChild(buildCompletedRow(ct));
   }
+}
+
+/** Present-tense task names, for work that hasn't happened yet — the Completed
+ * feed's `TASK_PAST_VERB` ("Plowed") reads as a lie on a blocked row. */
+const TASK_NOUN: Record<TaskType, string> = {
+  plow: "Plow", plant: "Plant", harvest: "Harvest", mow: "Mow",
+  mulch: "Mulch", weed: "Weed", fertilize: "Fertilize", rake: "Rake", bale: "Bale",
+  unloadHarvester: "Haul grain", haulBales: "Haul bales",
+};
+
+/** A ⚠️ row for work that can't proceed — task + field, then why. Deliberately
+ * inert: there's no task to cancel or reorder, it's a diagnosis. Clicking it
+ * jumps to the field so the fix is one step away. */
+function buildBlockedRow(b: BlockedWork): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "queue-row blocked";
+  row.innerHTML = `
+    <span class="qr-info">
+      <div class="qr-name">⚠️ ${TASK_NOUN[b.type] ?? b.type} · ${prettyId(b.fieldId)}</div>
+      <div class="qr-sub">${escapeHtml(b.reason)}</div>
+    </span>`;
+  row.addEventListener("click", () => {
+    const field = save.fields.find((f) => f.id === b.fieldId);
+    if (field) {
+      openFieldPanel(field.id);
+      mapRef.flyTo({ center: toLngLat(centroidOf(field.boundary)), zoom: 15 });
+    }
+  });
+  return row;
 }
 
 const TASK_PAST_VERB: Record<TaskType, string> = {

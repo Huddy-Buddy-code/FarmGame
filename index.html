@@ -298,6 +298,15 @@
       }
       .switch input:checked + .slider { background: var(--green); }
       .switch input:checked + .slider::before { transform: translateX(17px); }
+      /* Blocked work (2026-07-23): a diagnosis, not a job — dashed and muted so
+         it never reads as something a machine is actually doing. */
+      .queue-row.blocked {
+        border-style: dashed; border-color: #b08a3c; background: rgba(176, 138, 60, 0.12);
+        cursor: pointer; opacity: 0.95;
+      }
+      .queue-row.blocked:hover { background: rgba(176, 138, 60, 0.2); }
+      .queue-row.blocked .qr-sub { color: #8a6a2e; font-weight: 600; }
+
       .auto-note { font-size: 12px; color: #8a7658; margin-top: 8px; }
       /* Withered crop (2026-07-23) — a total loss, so it gets a real callout
          rather than a quiet line of small text. */
