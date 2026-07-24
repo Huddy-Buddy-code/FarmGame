@@ -217,4 +217,53 @@ describe("auto-manage folds in a mulch pass after harvest", () => {
     runUntil(save, afterHarvest, () => field.status === "tilled");
     expect(field.residueMulched).toBeFalsy();
   });
+
+  it("the plow WAITS for a planned mulch — never turns the residue under first", () => {
+    // The regression this guards (maintainer request, 2026-07-23): mulch used
+    // to be gated behind `!plowDue`, so a plow whose month arrived first ran
+    // ahead of the mulch and silently cancelled it. Here the plow is forced
+    // EARLY — onto the harvest month itself — yet the mulch must still go first.
+    const save = gameWithAgents();
+    buyImplement(save, "mulcher", "medium");
+    // Start freshly HARVESTED (mid-cycle) so the only route to tilled is through
+    // the mulch — a field that started "tilled" would trip the check on its own
+    // initial state before any work ran.
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary, status: "harvested", lastCrop: "corn",
+      autoManage: true,
+      // Corn's plow window opens at its August harvest; force the plow there.
+      plans: [{ crop: "corn", mulch: true, bale: false, schedule: { plow: 7 } }],
+    };
+    save.fields.push(field);
+
+    // The field must reach "tilled" — but only THROUGH a completed mulch, never
+    // straight from harvested.
+    let sawMulched = false;
+    let plowedBeforeMulch = false;
+    const AUG = 7 * minutesPerMonth(); // in the plow window, so the plow is "due"
+    runUntil(save, AUG, () => {
+      if (field.residueMulched) sawMulched = true;
+      if (field.status === "tilled" && !sawMulched) plowedBeforeMulch = true;
+      return field.status === "tilled" && sawMulched;
+    });
+
+    expect(plowedBeforeMulch).toBe(false);
+    expect(field.residueMulched).toBe(true); // mulch bonus survived to the plow
+    expect(field.status).toBe("tilled"); // and the plow still happened after it
+  });
+
+  it("still plows on time when no mulch is planned", () => {
+    // The wait is specific to a PLANNED mulch — a field that isn't mulching
+    // must not be held back.
+    const save = gameWithAgents();
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary, status: "harvested", lastCrop: "corn",
+      autoManage: true, plans: [{ crop: "corn", mulch: false, bale: false }, { crop: "soybeans" }],
+    };
+    save.fields.push(field);
+
+    runUntil(save, APRIL_1, () => field.status === "tilled");
+    expect(field.status).toBe("tilled");
+    expect(field.residueMulched).toBeFalsy();
+  });
 });

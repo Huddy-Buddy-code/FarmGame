@@ -3044,6 +3044,20 @@ function plowDue(now: SimTime, upcoming: FieldPlan): boolean {
   return plowDueAt(upcoming.crop, dateOf(now).month, upcoming.schedule?.plow, plantMonth);
 }
 
+/**
+ * Is a planned mulch still OWED on this field — the plan asks for one, it hasn't
+ * run yet this cycle, and the field can still take it?
+ *
+ * The plow WAITS while this is true (maintainer request, 2026-07-23). Plowing
+ * turns the residue under, so a plow that ran ahead of a scheduled mulch would
+ * silently cancel it and its +7% yield bonus — the mulch has to go first.
+ * Perennials never mulch (canMulch is false for them), so this is always false
+ * there.
+ */
+function mulchPending(save: SaveState, field: Field, plan: FieldPlan): boolean {
+  return !!plan.mulch && !field.autoMulchDone && canMulch(save, field);
+}
+
 /** Field Schedule tab (2026-07-21): does the current month satisfy this
  * task's schedule override, if any? Undefined = no override set = today's
  * behavior (fire the moment the underlying gate opens). A set override
@@ -3142,24 +3156,21 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
     case "mulched":
       // "mulched" = the clean surface a bale run leaves; "withered" = a crop
       // lost to a missed harvest window. Both can still take a mulch pass
-      // before falling through to plowing (2026-07-23).
-      if (
-        plan.mulch &&
-        !field.autoMulchDone &&
-        canMulch(save, field) &&
-        !plowDue(now, upcoming) &&
-        monthMatches(now, plan.schedule?.mulch)
-      ) {
-        if (tryEnqueue(save, field, "mulch", now)) {
-          field.autoMulchDone = true;
-          break;
+      // before plowing (2026-07-23). While a mulch is owed the plow WAITS, so
+      // we never fall through to plowing this tick.
+      if (mulchPending(save, field, plan)) {
+        // Fire on the mulch's scheduled month, or right away if the plow's come
+        // due — either way the plow holds off until the mulch is done.
+        if (monthMatches(now, plan.schedule?.mulch) || plowDue(now, upcoming)) {
+          if (tryEnqueue(save, field, "mulch", now)) field.autoMulchDone = true;
         }
+        break;
       }
-    // falls through to the plow branch
+    // no mulch owed — fall through to the plow branch
     case "stubble":
-      // Auto-manage (unlike the manual Queue Plow button) still waits for
-      // winter — enqueueTask itself no longer season-gates plowing. The plow
-      // is ground prep for the UPCOMING crop, so it reads that step's schedule.
+      // The plow is ground prep for the UPCOMING crop, so it reads that step's
+      // schedule. (Reached from stubble directly, or after a mulch has settled a
+      // withered/mulched field — never while a mulch is still owed.)
       if (plowDue(now, upcoming)) {
         tryEnqueue(save, field, "plow", now);
       }
@@ -3173,23 +3184,20 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
           tryEnqueue(save, field, "rake", now);
         }
         tryEnqueue(save, field, "bale", now);
-      } else if (
-        plan.mulch &&
-        !field.autoMulchDone &&
-        canMulch(save, field) &&
-        !plowDue(now, upcoming) &&
-        monthMatches(now, plan.schedule?.mulch)
-      ) {
+      } else if (mulchPending(save, field, plan)) {
         // Optional residue pass (annuals we aren't baling): shred the residue
-        // back in the month(s) after harvest, before the winter plow window
-        // opens. `!plowDue` means a late harvest that lands on the plow month
-        // just skips straight to plowing. Completing it flips the field to
-        // stubble, so next tick falls through to the plow branch.
-        if (tryEnqueue(save, field, "mulch", now)) field.autoMulchDone = true;
+        // back in. It fires on its scheduled month, OR immediately once the plow
+        // has come due — because the plow WAITS for a planned mulch
+        // (maintainer request, 2026-07-23) rather than turning the residue under
+        // ahead of it. Completing it flips the field to stubble → next tick plows.
+        // While it's still owed but neither trigger has hit, we simply wait
+        // (the plow branch below is unreachable while a mulch is pending).
+        if (monthMatches(now, plan.schedule?.mulch) || plowDue(now, upcoming)) {
+          if (tryEnqueue(save, field, "mulch", now)) field.autoMulchDone = true;
+        }
       } else if (plowDue(now, upcoming)) {
-        // Plow under — discard any un-baled forage so the plow isn't gated on it
-        // (the plan opted out of baling, or there's no gear for it). Still
-        // waits for winter, same as the stubble/mulched case above.
+        // No mulch owed — plow under. Discard any un-baled forage so the plow
+        // isn't gated on it (the plan opted out of baling, or there's no gear).
         if (field.forageReady) field.forageReady = undefined;
         tryEnqueue(save, field, "plow", now);
       }
