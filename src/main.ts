@@ -166,8 +166,9 @@ let mapRef: maplibregl.Map;
 let roadNetRef: RoadNetwork | null = null;
 let selectedFieldId: string | null = null;
 /** Which side-tab of the Field panel is showing (maintainer request,
- * 2026-07-21): View / Schedule / Finances / Settings. Reset to "view" every
- * time a different field is selected — see openFieldPanel. */
+ * 2026-07-21): View / Schedule / Finances / Settings. STICKY across field
+ * selections since 2026-07-23 — clicking between fields keeps the tab you're
+ * on, so you can compare the same view field to field. */
 type FieldPanelTab = "view" | "schedule" | "finances" | "settings";
 const FIELD_PANEL_TABS: FieldPanelTab[] = ["view", "schedule", "finances", "settings"];
 let fieldPanelTab: FieldPanelTab = "view";
@@ -492,6 +493,7 @@ function taskVerb(task: FarmTask): string {
     return c ? `planting ${c.name.toLowerCase()}` : "planting";
   }
   if (task.type === "mow") return "mowing";
+  if (task.type === "mulch") return "mulching"; // fell through to "harvesting" before 2026-07-23
   if (task.type === "weed") return "weeding";
   if (task.type === "fertilize") return "fertilizing";
   if (task.type === "rake") return "raking";
@@ -1324,8 +1326,11 @@ function updateHud() {
   $("hud-date").textContent = formatDate(clock.time());
   $("hud-cash").textContent = "$" + round100(save.money).toLocaleString();
   $("hud-networth").textContent = "$" + round100(netWorth(save).total).toLocaleString();
-  const totalGrain = Object.values(save.grain).reduce((sum, t) => sum + t, 0);
-  $("hud-grain").textContent = totalGrain.toFixed(1) + " t";
+  // Total acres owned replaced the grain-bin total here (maintainer request,
+  // 2026-07-23) — inventory has its own tab; acreage is the farm's size at a
+  // glance and doesn't live anywhere else in the header.
+  const acres = save.fields.reduce((sum, f) => sum + areaAcres(f.boundary), 0);
+  $("hud-acres").textContent = acres.toFixed(0) + " ac";
 
   // Year-position marker: fraction of the display year (Mar → Feb) elapsed.
   const f = yearFraction(clock.time());
@@ -3327,11 +3332,16 @@ function wireFieldHover(map: maplibregl.Map) {
       const cropIcon = hit.crop ? gameConfig.crops[hit.crop].emoji : "🟫";
       const cropName = hit.crop ? gameConfig.crops[hit.crop].name : "No crop planted";
       const boost = Math.round(productivityMultiplier(hit, clock.time()) * 100);
+      // Acres beside the name, rotation name on its own line (maintainer
+      // request, 2026-07-23). The rotation line is omitted entirely when
+      // unnamed rather than shown empty — most fields won't have one.
+      const rot = hit.rotationName?.trim();
       badge.innerHTML = `
         <div class="fb-icon">${cropIcon}</div>
         <div class="fb-text">
-          <div class="fb-name">${fieldLabel(hit)}</div>
+          <div class="fb-name">${fieldLabel(hit)}<span class="fb-acres">${areaAcres(hit.boundary).toFixed(1)} ac</span></div>
           <div class="fb-crop">${cropName}</div>
+          ${rot ? `<div class="fb-rot">🔁 ${escapeHtml(rot)}</div>` : ""}
           <div class="fb-boost">⚡ ${boost}%</div>
         </div>`;
       badge.style.display = "flex";
@@ -3354,7 +3364,10 @@ function openFieldPanel(fieldId: string) {
   if (accessEditFieldId && accessEditFieldId !== fieldId) stopAccessEdit();
   selectedFieldId = fieldId;
   $("fieldpanel").style.display = "flex";
-  switchFieldPanelTab("view"); // always land on View for a freshly-selected field
+  // Stay on whichever tab is already open (maintainer request, 2026-07-23) —
+  // clicking between fields to compare their schedules or finances used to
+  // throw you back to View on every single click.
+  switchFieldPanelTab(fieldPanelTab);
 }
 
 function closeFieldPanel() {
