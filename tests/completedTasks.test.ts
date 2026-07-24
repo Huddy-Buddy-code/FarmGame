@@ -66,18 +66,79 @@ describe("completed-task log (maintainer request, 2026-07-14 — Work Queue 'Com
     expect(bale!.tons).toBeCloseTo(bale!.bales! * gameConfig.forage.baleTons, 5);
   });
 
-  it("appendCompletedTask logs a sale (no field/agent) and caps the log at 200 entries", () => {
+  it("appendCompletedTask logs a sale with no field/agent", () => {
     const save = newGame();
     appendCompletedTask(save, { id: "sale-1", type: "sellGrain", crop: "corn", label: "Corn", tons: 10, revenue: 1500, completedAt: 0 });
     expect(save.completedTasks!.length).toBe(1);
     expect(save.completedTasks![0]!.costPaid).toBeUndefined();
     expect(save.completedTasks![0]!.revenue).toBe(1500);
+  });
 
+  it("caps the log at 200 entries, dropping the oldest", () => {
+    const save = newGame();
+    // Field-work completions are never merged, so they still accumulate one
+    // row each — this is what the cap exists for.
+    appendCompletedTask(save, { id: "first", type: "plow", fieldId: "f", acres: 10, costPaid: 200, completedAt: 0 });
     for (let i = 0; i < 250; i++) {
-      appendCompletedTask(save, { id: `sale-${i}`, type: "sellBales", label: "Hay", bales: 1, revenue: 65, completedAt: i });
+      appendCompletedTask(save, { id: `plow-${i}`, type: "plow", fieldId: "f", acres: 10, costPaid: 200, completedAt: i });
     }
     expect(save.completedTasks!.length).toBe(200);
-    // Oldest entries were dropped — the very first sale is long gone.
-    expect(save.completedTasks!.some((t) => t.id === "sale-1")).toBe(false);
+    expect(save.completedTasks!.some((t) => t.id === "first")).toBe(false);
+  });
+
+  describe("sales accumulate into one row per product (maintainer request, 2026-07-23)", () => {
+    it("folds repeat deliveries of the same crop into a single running total", () => {
+      const save = newGame();
+      // Three trips of a 150 t sell run, all in the same month.
+      for (const tons of [60, 60, 30]) {
+        appendCompletedTask(save, {
+          id: `sale-${tons}`, type: "sellGrain", crop: "corn", label: "Corn",
+          tons, revenue: tons * 180, completedAt: 100,
+        });
+      }
+      const sales = save.completedTasks!.filter((c) => c.type === "sellGrain");
+      expect(sales).toHaveLength(1);
+      expect(sales[0]!.tons).toBe(150);
+      expect(sales[0]!.revenue).toBe(150 * 180);
+    });
+
+    it("keeps different products apart", () => {
+      const save = newGame();
+      appendCompletedTask(save, { id: "a", type: "sellGrain", crop: "corn", label: "Corn", tons: 10, revenue: 1800, completedAt: 0 });
+      appendCompletedTask(save, { id: "b", type: "sellGrain", crop: "wheat", label: "Winter Wheat", tons: 10, revenue: 2100, completedAt: 0 });
+      appendCompletedTask(save, { id: "c", type: "sellBales", label: "Hay", bales: 5, revenue: 325, completedAt: 0 });
+      expect(save.completedTasks).toHaveLength(3);
+    });
+
+    it("starts a fresh row in a new month — the panel only shows this month", () => {
+      const save = newGame();
+      const MPM = minutesPerMonth();
+      appendCompletedTask(save, { id: "a", type: "sellGrain", crop: "corn", label: "Corn", tons: 10, revenue: 1800, completedAt: 0 });
+      appendCompletedTask(save, { id: "b", type: "sellGrain", crop: "corn", label: "Corn", tons: 10, revenue: 1800, completedAt: 4 * MPM });
+      expect(save.completedTasks).toHaveLength(2);
+    });
+
+    it("moves the merged row to the newest time so an in-progress run stays visible", () => {
+      const save = newGame();
+      appendCompletedTask(save, { id: "a", type: "sellGrain", crop: "corn", label: "Corn", tons: 10, revenue: 1800, completedAt: 10 });
+      appendCompletedTask(save, { id: "b", type: "sellGrain", crop: "corn", label: "Corn", tons: 10, revenue: 1800, completedAt: 900 });
+      expect(save.completedTasks![0]!.completedAt).toBe(900);
+    });
+
+    it("drops the field attribution once a total spans more than one source", () => {
+      const save = newGame();
+      appendCompletedTask(save, { id: "a", type: "sellBales", fieldId: "field-1", label: "Hay", bales: 4, revenue: 260, completedAt: 0 });
+      appendCompletedTask(save, { id: "b", type: "sellBales", fieldId: "field-2", label: "Hay", bales: 6, revenue: 390, completedAt: 0 });
+      const row = save.completedTasks!.find((c) => c.type === "sellBales")!;
+      expect(row.bales).toBe(10);
+      expect(row.fieldId).toBeUndefined(); // no longer honest to name one field
+    });
+
+    it("never merges field work — two plows on one field stay two rows", () => {
+      const save = newGame();
+      appendCompletedTask(save, { id: "p1", type: "plow", fieldId: "f", acres: 10, costPaid: 200, completedAt: 0 });
+      appendCompletedTask(save, { id: "p2", type: "plow", fieldId: "f", acres: 10, costPaid: 200, completedAt: 5 });
+      expect(save.completedTasks).toHaveLength(2);
+    });
   });
 });

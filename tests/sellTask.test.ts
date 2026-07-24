@@ -7,7 +7,7 @@ import {
   ensureAgents, buyAgent, buyImplement, tickTasks, queueSellRun, sellableStock,
 } from "../src/sim/tasks";
 import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
-import { sellGrain, sellStoredBalesFrom } from "../src/sim/economy";
+import { sellGrain, sellStoredBalesFrom, sellAllOfProduct } from "../src/sim/economy";
 import { grainUnitPrice, grainInstantPrice, baleInstantPrice, baleUnitPrice, monthOf } from "../src/sim/market";
 import { minutesPerMonth } from "../src/sim/calendar";
 import { gameConfig } from "../src/config/gameConfig";
@@ -200,6 +200,32 @@ describe("a sell run end to end", () => {
     queueSellRun(save, "corn");
     run(save, DEC, () => !save.tasks.some((t) => t.type === "sell"));
     expect(save.completedTasks!.some((c) => c.type === "sellGrain" && c.crop === "corn")).toBe(true);
+  });
+
+  it("a three-trip run logs ONE Completed row carrying the whole total", () => {
+    // 150 t through a 60 t trailer = three deliveries. Each used to log its own
+    // near-identical row (maintainer request, 2026-07-23).
+    const save = grainFarm(150);
+    queueSellRun(save, "corn");
+    run(save, DEC, () => !save.tasks.some((t) => t.type === "sell"));
+
+    const rows = save.completedTasks!.filter((c) => c.type === "sellGrain" && c.crop === "corn");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.tons).toBeCloseTo(150, 6);
+    expect(rows[0]!.revenue).toBe(Math.round(150 * grainUnitPrice("corn", monthOf(DEC))));
+  });
+
+  it("an instant sale folds into the same row as a hauled one", () => {
+    const save = grainFarm(40);
+    queueSellRun(save, "corn");
+    run(save, DEC, () => !save.tasks.some((t) => t.type === "sell"));
+    // Then top the bin up and sell the rest straight from the panel.
+    save.grain.corn = 10;
+    sellAllOfProduct(save, "corn", DEC);
+
+    const rows = save.completedTasks!.filter((c) => c.type === "sellGrain" && c.crop === "corn");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.tons).toBeCloseTo(50, 6);
   });
 });
 

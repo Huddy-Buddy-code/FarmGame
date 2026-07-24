@@ -1398,6 +1398,7 @@ function sellHauledBales(save: SaveState, product: BaleProduct, n: number, now: 
     type: "sellBales",
     label: cfg.name,
     bales: n,
+    tons: n * gameConfig.forage.baleTons,
     revenue,
     completedAt: now,
   });
@@ -1451,6 +1452,9 @@ function sellHauledGrain(save: SaveState, crop: CropId, tons: number, now: SimTi
     id: `sale-${++taskSeq}`,
     type: "sellGrain",
     crop,
+    // Label + crop both set so this merges with the Inventory panel's instant
+    // sale of the same crop — the merge key compares them exactly.
+    label: gameConfig.crops[crop].name,
     tons,
     revenue,
     completedAt: now,
@@ -2767,8 +2771,50 @@ const MAX_COMPLETED_TASKS = 200;
 /** Append one record to `save.completedTasks`, capped at `MAX_COMPLETED_TASKS`
  * — shared by task completions (below) and sale records (main.ts, since a
  * sale isn't a `FarmTask` at all — it's a direct player action in economy.ts). */
+/** Sale records are ACCUMULATED rather than appended one per delivery — see
+ * `appendCompletedTask`. Field-work completions are never merged: each one is a
+ * discrete job on a specific field, and collapsing them would lose that. */
+function isSaleRecord(type: CompletedTask["type"]): boolean {
+  return type === "sellGrain" || type === "sellBales";
+}
+
+/**
+ * Log a finished job (or a sale) to the Work Queue's Completed feed.
+ *
+ * SALES ACCUMULATE INTO ONE ROW PER PRODUCT (maintainer request, 2026-07-23).
+ * A sell run makes as many trips as the trailer needs — 150 t of corn is three
+ * deliveries — and logging each one separately buried the feed in near-identical
+ * rows that individually meant nothing. Now a delivery folds its tons, bales and
+ * revenue into the product's existing row, so it reads as one running total that
+ * climbs as the rig works.
+ *
+ * Merging is scoped to the same CALENDAR MONTH, because that's exactly what the
+ * panel shows: an entry from last month is already filtered out, so extending it
+ * would silently drop the new revenue off the display. A month turn mid-run
+ * simply starts a fresh row, which is also the honest way to report it.
+ */
 export function appendCompletedTask(save: SaveState, entry: CompletedTask): void {
   const log = (save.completedTasks ??= []);
+  if (isSaleRecord(entry.type)) {
+    const at = dateOf(entry.completedAt);
+    const existing = log.find((c) => {
+      if (c.type !== entry.type || c.crop !== entry.crop || c.label !== entry.label) return false;
+      const cAt = dateOf(c.completedAt);
+      return cAt.year === at.year && cAt.month === at.month;
+    });
+    if (existing) {
+      existing.tons = (existing.tons ?? 0) + (entry.tons ?? 0);
+      existing.bales = (existing.bales ?? 0) + (entry.bales ?? 0);
+      existing.revenue = (existing.revenue ?? 0) + (entry.revenue ?? 0);
+      // Once a total spans more than one source, naming one field on it would
+      // be a lie — drop the attribution rather than keep whichever came first.
+      if (existing.fieldId !== entry.fieldId) existing.fieldId = undefined;
+      // Move it to "just happened" so a run in progress keeps surfacing at the
+      // top of the feed instead of sinking under older, finished work.
+      existing.completedAt = entry.completedAt;
+      return;
+    }
+  }
   log.push(entry);
   if (log.length > MAX_COMPLETED_TASKS) log.splice(0, log.length - MAX_COMPLETED_TASKS);
 }
