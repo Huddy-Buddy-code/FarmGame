@@ -65,6 +65,7 @@ import {
   reorderTask, estimateTaskHours, forageDue, canMulch, defaultPlan, forcePlow, removeRotationStep, blockedWork,
   harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
   appendCompletedTask, haySpikesCapacityBales, baleTrailerCapacityBales, queueHaulBales, fieldHasLooseBales,
+  queueSellRun, sellableStock,
 } from "./sim/tasks";
 import type { BlockedWork } from "./sim/tasks";
 import { buildRoadNetwork } from "./sim/roadNet";
@@ -1101,6 +1102,30 @@ function buildQueueRow(task: FarmTask): HTMLElement {
     return row; // system task — not draggable/cancelable, it self-regenerates
   }
 
+  if (task.type === "sell") {
+    // Point-to-point, not acreage — and its fieldId is empty (a sale spans the
+    // farm), so the generic row's `prettyId(fieldId)` would render blank.
+    const product = task.sellProduct ?? "";
+    const name = (gameConfig.crops as Record<string, { name: string } | undefined>)[product]?.name
+      ?? (gameConfig.baleProducts as Record<string, { name: string } | undefined>)[product]?.name
+      ?? product;
+    const left = sellableStock(save, product);
+    const phase: Record<string, string> = {
+      toSource: "heading to storage", loading: "loading", toMarket: "hauling to market", dumping: "selling",
+    };
+    const row = document.createElement("div");
+    row.className = "queue-row" + (isActive ? " active" : " queued");
+    row.innerHTML = `
+      ${iconHtml}
+      <span class="qr-info">
+        <div class="qr-name">💵 Sell ${escapeHtml(name)}</div>
+        ${agent ? `<div class="qr-machine">${agent.name}</div>` : ""}
+        <div class="qr-sub">${phase[task.sellPhase ?? "toSource"] ?? ""}${left > 0 ? ` · ${Math.round(left)} left in storage` : ""}</div>
+        ${implementRowHtml(task, agent)}
+      </span>`;
+    return row; // system task — self-regenerating, not draggable/cancelable
+  }
+
   const hours = estimateTaskHours(save, task);
   const pct = (task.doneAcres / task.totalAcres) * 100;
   const sub = isActive
@@ -1267,7 +1292,7 @@ function refreshQueuePanel(): void {
 const TASK_NOUN: Record<TaskType, string> = {
   plow: "Plow", plant: "Plant", harvest: "Harvest", mow: "Mow",
   mulch: "Mulch", weed: "Weed", fertilize: "Fertilize", rake: "Rake", bale: "Bale",
-  unloadHarvester: "Haul grain", haulBales: "Haul bales",
+  unloadHarvester: "Haul grain", haulBales: "Haul bales", sell: "Sell run",
 };
 
 /** A ⚠️ row for work that can't proceed — task + field, then why. Deliberately
@@ -1294,7 +1319,7 @@ function buildBlockedRow(b: BlockedWork): HTMLElement {
 const TASK_PAST_VERB: Record<TaskType, string> = {
   plow: "Plowed", plant: "Planted", harvest: "Harvested", mow: "Mowed",
   mulch: "Mulched", weed: "Weeded", fertilize: "Fertilized", rake: "Raked", bale: "Baled",
-  unloadHarvester: "Hauled", haulBales: "Hauled bales",
+  unloadHarvester: "Hauled", haulBales: "Hauled bales", sell: "Sold",
 };
 
 /** One compact, non-interactive row per finished job OR sale — sized like a
@@ -1535,13 +1560,15 @@ function buildMarketSection(rows: HTMLElement): void {
       </span>
       <span class="price">$${Math.round(prod.unitPrice).toLocaleString()}${prod.unit} ${priceBadge(prod.id)}</span>`;
 
-    // Sell EVERYTHING of this product, wherever it sits — same path the
-    // scheduled auto-sell takes (which also logs the Completed-feed entry).
+    // Sell EVERYTHING of this product, wherever it sits, RIGHT NOW — a buyer
+    // collects, so it takes the instant price (base less the pickup fee, no
+    // seasonal premium). The button label is the actual cash it pays.
     const value = Math.round(prod.qty * prod.unitPrice);
     const sellBtn = document.createElement("button");
     sellBtn.className = "primary mkt-sellbtn";
     sellBtn.textContent = prod.qty > 0 ? `Sell · $${value.toLocaleString()}` : "Sell";
     sellBtn.disabled = prod.qty <= 0;
+    sellBtn.title = `Instant sale — ${Math.round(gameConfig.market.instantSellPenaltyPct * 100)}% below base price, and no seasonal bonus. Haul it yourself for the full price.`;
     sellBtn.addEventListener("click", () => {
       const before = save.money;
       sellAllOfProduct(save, prod.id, clock.time());
@@ -1554,6 +1581,31 @@ function buildMarketSection(rows: HTMLElement): void {
       toast(`💰 Sold all ${prod.name.toLowerCase()} for $${revenue.toLocaleString()}`);
     });
     row.appendChild(sellBtn);
+
+    // ...or send a rig to haul it to a Sell Point for the FULL seasonal price.
+    // Only offered when a run could actually be made, so the button never
+    // silently does nothing.
+    const stock = sellableStock(save, prod.id);
+    const haulBtn = document.createElement("button");
+    haulBtn.className = "mkt-haulbtn";
+    haulBtn.textContent = "🚜 Haul";
+    const hasSellPoint = save.buildings.some((b) => b.kind === "sellPoint");
+    haulBtn.disabled = stock <= 0 || !hasSellPoint;
+    haulBtn.title = !hasSellPoint
+      ? "Build a Sell Point first (it's free) — then a tractor can haul this to market for the full seasonal price"
+      : stock <= 0
+        ? "Nothing in storage to haul (loose bales in fields are hauled from the field panel)"
+        : `Haul to a Sell Point for the full seasonal price — $${Math.round(prod.qty * prod.unitPrice / (1 - gameConfig.market.instantSellPenaltyPct) * (1 + seasonalBonus(prod.id, dateOf(clock.time()).month))).toLocaleString()} at today's rate`;
+    haulBtn.addEventListener("click", () => {
+      if (!queueSellRun(save, prod.id)) {
+        toast("❌ Nothing free to haul with right now", 3000);
+        return;
+      }
+      refreshQueuePanel();
+      refreshInventory(true);
+      toast(`🚜 Hauling ${prod.name.toLowerCase()} to market`);
+    });
+    row.appendChild(haulBtn);
 
     // Auto-sell: pick the month, flip the switch — tickAutoSell does the rest.
     const select = document.createElement("select");

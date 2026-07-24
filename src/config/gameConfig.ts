@@ -300,6 +300,18 @@ export interface GameConfig {
     peakMonth: number;
     /** Bonus fraction on base price by |months from `peakMonth`| (0, 1, 2, …). */
     seasonalBonusByDistance: Record<number, number>;
+    /**
+     * What selling straight out of Inventory costs you, as a fraction off the
+     * BASE price (maintainer decision, 2026-07-23). Selling from the panel is
+     * instant — a buyer collects — so it forgoes the seasonal premium entirely
+     * AND takes this haircut for the pickup.
+     *
+     * The alternative is a Sell task: tractors haul the load to a Sell Point
+     * and it fetches the full seasonal price. That's the trade the whole
+     * mechanic turns on — convenience versus logistics — so this number is the
+     * price of not bothering.
+     */
+    instantSellPenaltyPct: number;
   };
 
   /**
@@ -656,7 +668,10 @@ export const gameConfig: GameConfig = {
     tractorBarn: { price: 60_000, slots: 3 },
     implementBarn: { price: 40_000, slots: 4 },
     farmYard: { price: 15_000 },
-    sellPoint: { price: 10_000 },
+    // Free (2026-07-23): the Sell task makes this the farm.s route to full
+    // seasonal price, so gating it behind a purchase would just tax the
+    // mechanic the player is meant to be choosing between.
+    sellPoint: { price: 0 },
   },
   yieldRangeNarrowing: 0.85,
   rotationBonusPct: 0.1,
@@ -665,6 +680,7 @@ export const gameConfig: GameConfig = {
     // Dec +25%, Nov/Jan +15%, Oct/Feb +10%, everything else base.
     peakMonth: 11, // December
     seasonalBonusByDistance: { 0: 0.25, 1: 0.15, 2: 0.1 },
+    instantSellPenaltyPct: 0.1,
   },
   harvestWindowMonths: 2,
   schedule: {

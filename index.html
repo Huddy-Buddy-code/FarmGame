@@ -531,6 +531,14 @@
       .mkt-row.empty { opacity: 0.55; }
       .mkt-row .icon { font-size: 20px; width: 24px; text-align: center; }
       .mkt-sellbtn { flex-shrink: 0; white-space: nowrap; }
+      /* Haul to market (2026-07-23) — secondary to the instant Sell button,
+         since it's the slower path, but it's the one that pays full price. */
+      .mkt-haulbtn {
+        flex-shrink: 0; white-space: nowrap; font: inherit; font-size: 11px;
+        font-weight: 700; padding: 4px 7px; border-radius: 8px; cursor: pointer;
+        border: 1.5px solid var(--wood); background: var(--cream-2); color: var(--wood);
+      }
+      .mkt-haulbtn:disabled { opacity: 0.35; cursor: default; }
       .mkt-month {
         font: inherit; font-size: 11px; font-weight: 600; padding: 3px 4px;
         border-radius: 8px; border: 1.5px solid var(--wood); background: var(--cream);

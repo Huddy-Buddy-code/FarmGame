@@ -12,6 +12,7 @@ import { tickFarming } from "../src/sim/farming";
 import { sellBales } from "../src/sim/economy";
 import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
 import { minutesPerMonth } from "../src/sim/calendar";
+import { baleInstantPrice } from "../src/sim/market";
 import { gameConfig } from "../src/config/gameConfig";
 import { areaAcres, pointInPolygon } from "../src/geo/geometry";
 
@@ -143,7 +144,7 @@ describe("selling bales from the field", () => {
     const before = save.money;
     const { bales, revenue } = sellBales(save, field, 4 * minutesPerMonth());
     expect(bales).toBe(10);
-    expect(revenue).toBe(10 * gameConfig.forage.balePricePerBale);
+    expect(revenue).toBe(Math.round(10 * baleInstantPrice("cornStover")));
     expect(save.money).toBe(before + revenue);
     expect(field.baleLocations).toHaveLength(0);
     // Nothing to sell the second time.

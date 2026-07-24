@@ -12,12 +12,12 @@ import { gameConfig } from "../config/gameConfig";
 import type { CropId, BaleProduct } from "../config/gameConfig";
 import type { SaveState, Field, Agent, Implement, Building } from "../state/saveState";
 import { areaAcres } from "../geo/geometry";
-import { agentPrice, implementPrice, appendCompletedTask } from "./tasks";
+import { agentPrice, implementPrice, appendCompletedTask, queueSellRun } from "./tasks";
 import type { EquipmentKind } from "./tasks";
 import { recordCash } from "./ledger";
 import type { SimTime } from "./clock";
 import { START_MONTH, MONTHS_PER_YEAR, minutesPerMonth } from "./calendar";
-import { grainUnitPrice, baleUnitPrice, monthOf, SELLABLE_GRAINS } from "./market";
+import { grainInstantPrice, baleInstantPrice, SELLABLE_GRAINS } from "./market";
 import type { MarketProduct } from "./market";
 
 export interface SaleResult {
@@ -30,11 +30,14 @@ export interface SaleResult {
  * month's SEASONAL price (`sim/market.ts`). Mutates the save; returns what
  * actually sold.
  */
-export function sellGrain(save: SaveState, crop: CropId, tons: number, now: SimTime): SaleResult {
+export function sellGrain(save: SaveState, crop: CropId, tons: number, _now?: SimTime): SaleResult {
   const available = save.grain[crop];
   const sold = Math.min(available, Math.max(0, tons));
   if (sold <= 0) return { tons: 0, revenue: 0 };
-  const unit = grainUnitPrice(crop, monthOf(now));
+  // INSTANT sale from the panel: base price less the pickup fee, no seasonal
+  // premium (2026-07-23). Hauling it to a Sell Point yourself pays the full
+  // seasonal rate -- that's the Sell task.
+  const unit = grainInstantPrice(crop);
   const revenue = Math.round(sold * unit);
   save.grain[crop] -= sold;
   save.money += revenue;
@@ -47,12 +50,12 @@ export function sellGrain(save: SaveState, crop: CropId, tons: number, now: SimT
  * Mutates the save; returns what sold. Bales are tracked per-field and stay put
  * until sold — this is the field's "market interface."
  */
-export function sellBales(save: SaveState, field: Field, now: SimTime): { bales: number; revenue: number } {
+export function sellBales(save: SaveState, field: Field, _now?: SimTime): { bales: number; revenue: number } {
   const bales = field.baleLocations?.length ?? 0;
   if (bales <= 0) return { bales: 0, revenue: 0 };
   const productId = field.baleProduct ?? "cornStover";
   const product = gameConfig.baleProducts[productId];
-  const unit = baleUnitPrice(productId, monthOf(now));
+  const unit = baleInstantPrice(productId); // instant pickup price -- see sellGrain
   const revenue = Math.round(bales * unit);
   field.baleLocations = [];
   save.money += revenue;
@@ -74,8 +77,7 @@ export interface BaleStock {
 /** Every bale sitting in every field, summed per product (2026-07-14) — the
  * Inventory tab's bale section. `pricePerBale`/`value` are at the current
  * month's seasonal price. Only products with at least one bale appear. */
-export function baleInventory(save: SaveState, now: SimTime): BaleStock[] {
-  const month = monthOf(now);
+export function baleInventory(save: SaveState, _now?: SimTime): BaleStock[] {
   const counts = new Map<BaleProduct, number>();
   for (const f of save.fields) {
     const n = f.baleLocations?.length ?? 0;
@@ -86,7 +88,7 @@ export function baleInventory(save: SaveState, now: SimTime): BaleStock[] {
   const out: BaleStock[] = [];
   for (const [product, bales] of counts) {
     const cfg = gameConfig.baleProducts[product];
-    const unit = baleUnitPrice(product, month);
+    const unit = baleInstantPrice(product); // quote what clicking Sell pays
     out.push({ product, name: cfg.name, bales, pricePerBale: Math.round(unit), value: Math.round(bales * unit), color: cfg.color });
   }
   // Stable, readable order (highest value first).
@@ -95,11 +97,11 @@ export function baleInventory(save: SaveState, now: SimTime): BaleStock[] {
 
 /** Sell the bales of `product` stored in one Bale Storage building at the flat
  * price (2026-07-17 — bales can now be hauled into storage). Mutates the save. */
-export function sellStoredBalesFrom(save: SaveState, building: Building, product: BaleProduct, now: SimTime): { bales: number; revenue: number } {
+export function sellStoredBalesFrom(save: SaveState, building: Building, product: BaleProduct, _now?: SimTime): { bales: number; revenue: number } {
   const bales = building.storedBales?.[product] ?? 0;
   if (bales <= 0) return { bales: 0, revenue: 0 };
   const cfg = gameConfig.baleProducts[product];
-  const unit = baleUnitPrice(product, monthOf(now));
+  const unit = baleInstantPrice(product); // instant pickup price -- see sellGrain
   const revenue = Math.round(bales * unit);
   building.storedBales![product] = 0;
   save.money += revenue;
@@ -183,7 +185,14 @@ export function tickAutoSell(save: SaveState, now: SimTime): void {
     const cal = (START_MONTH + mAbs) % MONTHS_PER_YEAR;
     const monthNow = mAbs * minutesPerMonth(); // a sim-time in that month → correct price
     for (const [product, sched] of Object.entries(save.sellSchedule)) {
-      if (sched.auto && sched.month === cal) sellAllOfProduct(save, product as MarketProduct, monthNow);
+      if (!sched.auto || sched.month !== cal) continue;
+      // Prefer a real HAUL to a Sell Point: it fetches the full seasonal price
+      // (2026-07-23). Falls back to the instant, discounted sale only when a
+      // run isn't possible at all — no Sell Point built, or nothing free to
+      // pull a trailer. A scheduled sell that silently did nothing would be
+      // far worse than one that quietly took the lower price.
+      const queued = queueSellRun(save, product);
+      if (!queued) sellAllOfProduct(save, product as MarketProduct, monthNow);
     }
   }
   save.sellLastMonthAbs = curAbs;

@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import {
   peakSaleMonth, seasonalMultiplier, seasonalBonus, grainUnitPrice, baleUnitPrice,
-  SELLABLE_GRAINS, SELLABLE_BALES,
+  SELLABLE_GRAINS, SELLABLE_BALES, grainInstantPrice,
 } from "../src/sim/market";
 import { tickAutoSell } from "../src/sim/economy";
+import { ensureAgents, buyImplement } from "../src/sim/tasks";
+import { buyBuildingAt } from "../src/sim/buildings";
 import { newGame } from "../src/state/saveState";
 import { minutesPerMonth, setDaysPerMonth } from "../src/sim/calendar";
 import { setProjection } from "../src/geo/coords";
@@ -67,7 +69,7 @@ describe("sellable product lists", () => {
 // % 12 = 11). So arming the cursor at abs 8 (the preceding Nov) and ticking to
 // abs 9 crosses exactly that Dec — the +25% peak.
 describe("tickAutoSell", () => {
-  it("sells all of a product in its scheduled month, at that month's price", () => {
+  it("falls back to an instant sale when no Sell Point exists to haul to", () => {
     const save = newGame();
     save.grain.corn = 100;
     save.sellSchedule = { corn: { month: 11, auto: true } }; // Dec (the +25% peak)
@@ -75,7 +77,29 @@ describe("tickAutoSell", () => {
     const before = save.money;
     tickAutoSell(save, 9 * minutesPerMonth()); // cross into Dec
     expect(save.grain.corn).toBe(0);
-    expect(save.money - before).toBe(Math.round(100 * gameConfig.crops.corn.sellPricePerTon * 1.25));
+    // No Sell Point, so nothing can be hauled — it takes the instant price
+    // (base less the pickup fee, NO seasonal premium) rather than doing
+    // nothing at all. A scheduled sell that silently no-ops would be worse.
+    expect(save.money - before).toBe(Math.round(100 * grainInstantPrice("corn")));
+  });
+
+  it("QUEUES a haul instead of selling instantly once a Sell Point exists", () => {
+    const save = newGame();
+    ensureAgents(save, [0, 0]);
+    buyImplement(save, "grainTrailer", "medium");
+    buyBuildingAt(save, "sellPoint", [200, 200]);
+    save.grain.corn = 100;
+    save.sellSchedule = { corn: { month: 11, auto: true } };
+    save.sellLastMonthAbs = 8;
+    const before = save.money;
+
+    tickAutoSell(save, 9 * minutesPerMonth());
+
+    // Nothing is paid yet, and the grain is still in the bin — it gets picked
+    // up and cashed in when the rig actually reaches the Sell Point.
+    expect(save.money).toBe(before);
+    expect(save.grain.corn).toBe(100);
+    expect(save.tasks.some((t) => t.type === "sell" && t.sellProduct === "corn")).toBe(true);
   });
 
   it("does nothing when auto is off", () => {

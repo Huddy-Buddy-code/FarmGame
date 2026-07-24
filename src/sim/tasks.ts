@@ -43,7 +43,7 @@ import { planRoute } from "./roadNet";
 import type { RoadNetwork } from "./roadNet";
 import { recordCash } from "./ledger";
 import { recordFieldCash, recordFieldCrop } from "./fieldLedger";
-import { grainUnitPrice, baleUnitPrice, monthOf } from "./market";
+import { grainUnitPrice, baleUnitPrice, monthOf, SELLABLE_GRAINS } from "./market";
 
 const ACRE_M2 = 4046.8564224;
 
@@ -58,6 +58,7 @@ export const TASK_AGENT_KIND: Record<TaskType, Agent["kind"]> = {
   fertilize: "tractor",
   rake: "tractor",
   bale: "tractor",
+  sell: "tractor", // hauls stored produce to a Sell Point
   unloadHarvester: "tractor",
   haulBales: "tractor",
 };
@@ -100,6 +101,9 @@ const FIELD_EXPENSE_ITEM: Partial<Record<TaskType, string>> = {
 export const TASK_IMPLEMENT: Partial<Record<TaskType, ImplementKind>> = {
   plow: "plow", plant: "planter", mow: "mower", mulch: "mulcher", weed: "sprayer", fertilize: "sprayer",
   rake: "rake", bale: "bailer", unloadHarvester: "grainTrailer", haulBales: "haySpikes",
+  // `sell` deliberately has NO fixed entry: which trailer it needs depends
+  // on the product (grain vs bales), so it is resolved per task by
+  // `sellTrailerKind` instead of read from this table.
 };
 
 /** Price of a power unit at a given size. */
@@ -1453,6 +1457,132 @@ function sellHauledGrain(save: SaveState, crop: CropId, tons: number, now: SimTi
   });
 }
 
+// --- Sell runs: storage → Sell Point (maintainer request, 2026-07-23) -------
+
+/** Is this market product a grain (sold by the ton from the bin) rather than a
+ * bale product (counted per bale, stored per building)? */
+function isGrainProduct(product: string): product is CropId {
+  return (SELLABLE_GRAINS as string[]).includes(product);
+}
+
+/** How much of `product` is sitting in storage, ready for a sell run. Grain
+ * pools farm-wide in the bin; bales are counted per storage building. Loose
+ * bales still lying in a field are NOT included — those are the bale-haul
+ * job's business, and it already knows how to divert to a Sell Point. */
+export function sellableStock(save: SaveState, product: string): number {
+  if (isGrainProduct(product)) return save.grain[product] ?? 0;
+  let n = 0;
+  for (const b of save.buildings) n += b.storedBales?.[product as BaleProduct] ?? 0;
+  return n;
+}
+
+/** The implement a sell run needs for this product. */
+function sellTrailerKind(product: string): ImplementKind {
+  return isGrainProduct(product) ? "grainTrailer" : "baleTrailer";
+}
+
+/**
+ * Queue a Sell run for `product`, if one's worth making: there's stock in
+ * storage, a Sell Point to take it to, and room in the crew.
+ *
+ * Crews here follow the same shape as grain carts and bale haulers — parallel
+ * tasks, each with its own rig — and grow only while a free tractor exists to
+ * join, so a full crew never leaves an uncrewed task parked in the queue.
+ */
+export function queueSellRun(save: SaveState, product: string): FarmTask | undefined {
+  if (sellableStock(save, product) <= 0) return undefined;
+  if (!save.buildings.some((b) => b.kind === "sellPoint")) return undefined;
+  const existing = save.tasks.filter((t) => t.type === "sell" && t.sellProduct === product);
+  if (existing.length > 0) {
+    if (existing.length >= gameConfig.hauling.maxCrewSize) return undefined;
+    if (existing.some((t) => !t.agentId)) return undefined;
+    const kind = sellTrailerKind(product);
+    const free = save.agents.some(
+      (a) => isFreeTractor(a) && (!!attachedImplement(save, a.id, kind) || !!availableImplementFor(save, a, kind)),
+    );
+    if (!free) return undefined;
+  }
+  const task: FarmTask = {
+    id: `task-${++taskSeq}`,
+    type: "sell",
+    fieldId: "", // display-only: a sale isn't tied to one field
+    totalAcres: 1,
+    doneAcres: 0,
+    status: "queued",
+    costPaid: 0,
+    sellProduct: product,
+    sellPhase: "toSource",
+  };
+  save.tasks.push(task);
+  return task;
+}
+
+/** Where a sell run picks its load up: the nearest silo assigned to the crop,
+ * or the nearest bale store actually holding the product. */
+function sellSourcePos(save: SaveState, product: string, from: Meters): Meters | undefined {
+  if (isGrainProduct(product)) {
+    return nearestSiloForCrop(save, product, from)?.pos;
+  }
+  const stores = save.buildings.filter(
+    (b) => (b.kind === "baleBarn" || b.kind === "baleArea") && (b.storedBales?.[product as BaleProduct] ?? 0) > 0,
+  );
+  return nearestByPos(stores, from)?.pos;
+}
+
+/** Take up to `capacity` of `product` out of storage for a sell run. Returns
+ * how much was actually loaded. */
+function loadForSale(save: SaveState, product: string, capacity: number, from: Meters): number {
+  if (isGrainProduct(product)) {
+    const take = Math.min(capacity, save.grain[product] ?? 0);
+    if (take > 0) save.grain[product] -= take;
+    return take;
+  }
+  // Bales: drain the nearest store first, topping up from others if there's
+  // still room on the trailer — a full load beats a short one.
+  let left = capacity;
+  let loaded = 0;
+  const stores = save.buildings
+    .filter((b) => (b.kind === "baleBarn" || b.kind === "baleArea") && (b.storedBales?.[product as BaleProduct] ?? 0) > 0)
+    .sort((a, b) => dist2(a.pos, from) - dist2(b.pos, from));
+  for (const store of stores) {
+    if (left <= 0) break;
+    const have = store.storedBales![product as BaleProduct] ?? 0;
+    const take = Math.min(left, have);
+    store.storedBales![product as BaleProduct] = have - take;
+    left -= take;
+    loaded += take;
+  }
+  return loaded;
+}
+
+function dist2(a: Meters, b: Meters): number {
+  return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2;
+}
+
+function nearestByPos<T extends { pos: Meters }>(items: T[], from: Meters): T | undefined {
+  let best: T | undefined;
+  let bestD = Infinity;
+  for (const it of items) {
+    const d = dist2(it.pos, from);
+    if (d < bestD) {
+      bestD = d;
+      best = it;
+    }
+  }
+  return best;
+}
+
+/** A sell run is over: release the rig and drop the task. */
+function finishSell(save: SaveState, task: FarmTask, agent: Agent, events: TaskEvent[]): void {
+  events.push({ kind: "finished", task, agent });
+  agent.taskId = undefined;
+  agent.state = "idle";
+  clearAgentRoute(agent.id);
+  const idx = save.tasks.indexOf(task);
+  if (idx >= 0) save.tasks.splice(idx, 1);
+  clearTaskRuntime(task.id);
+}
+
 /** An unload trip is done: release the cart and drop the task. */
 function finishUnload(save: SaveState, task: FarmTask, agent: Agent, events: TaskEvent[]): void {
   events.push({ kind: "finished", task, agent });
@@ -1565,6 +1695,9 @@ function tickAgent(
           t.status === "queued" &&
           TASK_AGENT_KIND[t.type] === agent.kind &&
           (!TASK_IMPLEMENT[t.type] || tractorCanUse(save, agent, TASK_IMPLEMENT[t.type]!)) &&
+          // A sell run's trailer depends on WHAT it's hauling, so it isn't in
+          // TASK_IMPLEMENT — check the product's kind directly instead.
+          (t.type !== "sell" || tractorCanUse(save, agent, sellTrailerKind(t.sellProduct!))) &&
           // Biggest implement available, pulled by the smallest tractor that
           // can manage it (2026-07-23). A tractor that isn't the preferred rig
           // for this job stands down and lets the right one take it; the loop
@@ -1575,9 +1708,11 @@ function tickAgent(
           (!TASK_IMPLEMENT[t.type] ||
             (preferredTractorFor(save, TASK_IMPLEMENT[t.type]!)?.id ?? agent.id) === agent.id) &&
           // unloadHarvester's fieldId is display-only (may be a legacy/
-          // unknown "" for a recovered leftover hopper) — doesn't need the
-          // field to actually exist, unlike every other task type.
-          (t.type === "unloadHarvester" || save.fields.some((f) => f.id === t.fieldId && isStartable(t, f))),
+          // unknown "" for a recovered leftover hopper), and a sell run's is
+          // empty outright (a sale spans the farm) — neither needs the field
+          // to actually exist, unlike every other task type.
+          (t.type === "unloadHarvester" || t.type === "sell" ||
+            save.fields.some((f) => f.id === t.fieldId && isStartable(t, f))),
       );
       // Hold a cart-capable tractor back from starting FIELD work while a combine
       // is harvesting and still needs a cart — so it stays free to crew the
@@ -1603,7 +1738,8 @@ function tickAgent(
       }
       // Auto-hitch the needed implement if the tractor isn't already carrying
       // it — swapping off whatever else it's carrying (one implement at a time).
-      const needKind = TASK_IMPLEMENT[next.type];
+      // A sell run's trailer is product-dependent, so it isn't in the table.
+      const needKind = next.type === "sell" ? sellTrailerKind(next.sellProduct!) : TASK_IMPLEMENT[next.type];
       if (needKind && !attachedImplement(save, agent.id, needKind)) {
         const impl = availableImplementFor(save, agent, needKind);
         if (impl) {
@@ -1641,6 +1777,111 @@ function tickAgent(
         assignTrailerHelper(save, next, agent);
       }
       events.push({ kind: "started", task: next, agent });
+      continue;
+    }
+
+    // A SELL run (2026-07-23), like the unload below, is point-to-point travel
+    // rather than field coverage — storage → Sell Point, repeating until the
+    // store is empty. Its `fieldId` is empty (a sale isn't tied to a field), so
+    // it must be handled before the field lookup further down.
+    if (task.type === "sell") {
+      const product = task.sellProduct!;
+      const kind = sellTrailerKind(product);
+      const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === kind);
+      const carried = isGrainProduct(product) ? trailer?.cargoTons ?? 0 : trailer?.cargoBales ?? 0;
+      if (!trailer) {
+        // Trailer detached mid-run — don't strand the tractor.
+        finishSell(save, task, agent, events);
+        continue;
+      }
+      const speed = (gameConfig.work.travelSpeedKmh * 1000) / 60;
+
+      if (task.sellPhase === "loading" || task.sellPhase === "dumping") {
+        agent.state = "working";
+        task.phaseTimer = (task.phaseTimer ?? 0) - budget;
+        if (task.phaseTimer > 0) {
+          budget = 0;
+          break;
+        }
+        const overshoot = -task.phaseTimer;
+        task.phaseTimer = undefined;
+        budget = overshoot;
+
+        if (task.sellPhase === "loading") {
+          const cap = isGrainProduct(product)
+            ? grainTrailerCapacityTons(trailer.size)
+            : baleTrailerCapacityBales(trailer.size);
+          const got = loadForSale(save, product, cap - carried, agent.pos);
+          if (isGrainProduct(product)) {
+            trailer.cargoTons = (trailer.cargoTons ?? 0) + got;
+            trailer.cargoCrop = product;
+          } else {
+            trailer.cargoBales = (trailer.cargoBales ?? 0) + got;
+            trailer.cargoBaleProduct = product as BaleProduct;
+          }
+          // Nothing left to pick up and nothing aboard: the run is pointless.
+          if (got <= 0 && carried <= 0) {
+            finishSell(save, task, agent, events);
+            continue;
+          }
+          task.sellPhase = "toMarket";
+          continue;
+        }
+
+        // dumping: cash the load in at the FULL seasonal price — that premium
+        // is the whole point of hauling instead of clicking Sell.
+        if (isGrainProduct(product)) {
+          sellHauledGrain(save, product, trailer.cargoTons ?? 0, now);
+          trailer.cargoTons = 0;
+          trailer.cargoCrop = undefined;
+        } else {
+          sellHauledBales(save, product as BaleProduct, trailer.cargoBales ?? 0, now);
+          trailer.cargoBales = 0;
+          trailer.cargoBaleProduct = undefined;
+        }
+        // More in storage? Go back for it; otherwise the run is done.
+        if (sellableStock(save, product) > 0 && sellSourcePos(save, product, agent.pos)) {
+          task.sellPhase = "toSource";
+          continue;
+        }
+        finishSell(save, task, agent, events);
+        continue;
+      }
+
+      if (task.sellPhase === "toMarket") {
+        const market = nearestSellPointFor(save, agent.pos);
+        if (!market) {
+          // Sell Point sold out from under the run while it was loaded.
+          agent.state = "idle";
+          budget = 0;
+          break;
+        }
+        agent.state = "traveling";
+        budget = driveToward(save, agent, market.pos, speed, budget);
+        if (samePos(agent.pos, market.pos)) {
+          task.sellPhase = "dumping";
+          task.phaseTimer = gameConfig.hauling.dumpMinutes;
+        }
+        continue;
+      }
+
+      // toSource
+      const source = sellSourcePos(save, product, agent.pos);
+      if (!source) {
+        // Storage emptied by something else (a manual sale) mid-trip.
+        if (carried > 0) {
+          task.sellPhase = "toMarket";
+          continue;
+        }
+        finishSell(save, task, agent, events);
+        continue;
+      }
+      agent.state = "traveling";
+      budget = driveToward(save, agent, source, speed, budget);
+      if (samePos(agent.pos, source)) {
+        task.sellPhase = "loading";
+        task.phaseTimer = gameConfig.hauling.loadMinutes;
+      }
       continue;
     }
 

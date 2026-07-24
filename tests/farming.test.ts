@@ -17,6 +17,7 @@ import {
   dateOf, formatDate, nextMonthStart, MINUTES_PER_DAY, minutesPerMonth,
   getDaysPerMonth, setDaysPerMonth,
 } from "../src/sim/calendar";
+import { grainInstantPrice } from "../src/sim/market";
 import { gameConfig } from "../src/config/gameConfig";
 import { boundsOf } from "../src/geo/geometry";
 import type { Meters } from "../src/geo/coords";
@@ -396,7 +397,9 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     const cash = save.money;
     const r = sellGrain(save, "corn", Infinity, 4 * minutesPerMonth());
     expect(r.tons).toBe(50);
-    expect(r.revenue).toBe(Math.round(50 * gameConfig.crops.corn.sellPricePerTon));
+    // Selling from the panel is the INSTANT price: base less the pickup fee,
+    // no seasonal premium (2026-07-23).
+    expect(r.revenue).toBe(Math.round(50 * grainInstantPrice("corn")));
     expect(save.money).toBe(cash + r.revenue);
     expect(save.grain.corn).toBe(0);
     // Selling from an empty bin is a no-op.

@@ -7,6 +7,7 @@ import { buyBuildingAt, sellBuilding } from "../src/sim/buildings";
 import { sellGrain } from "../src/sim/economy";
 import { borrowOpen, paydownOpen, tickLoans } from "../src/sim/finance";
 import { minutesPerMonth, MONTHS_PER_YEAR } from "../src/sim/calendar";
+import { grainInstantPrice } from "../src/sim/market";
 import { gameConfig } from "../src/config/gameConfig";
 
 beforeAll(() => setProjection(15, "N"));
@@ -40,7 +41,7 @@ describe("cashflow ledger (maintainer request, 2026-07-12)", () => {
 
     const y1 = save.ledger![1]!;
     expect(categoryTotal(y1, "landEquipment")).toBe(0); // silo bought + sold back
-    expect(y1.cropRevenue?.["Corn"]).toBe(Math.round(50 * gameConfig.crops.corn.sellPricePerTon));
+    expect(y1.cropRevenue?.["Corn"]).toBe(Math.round(50 * grainInstantPrice("corn")));
 
     // Borrowing books as money IN under Loan Expenses (2026-07-23) — before
     // this, the ledger showed repayments with no sign of the money that

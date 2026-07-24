@@ -67,6 +67,31 @@ export function baleUnitPrice(product: BaleProduct, month: number): number {
   return gameConfig.baleProducts[product].pricePerBale * seasonalMultiplier(product, month);
 }
 
+/**
+ * The DELIVERED price is the one above (`grainUnitPrice`/`baleUnitPrice`): you
+ * hauled the load to a Sell Point yourself, so you get the seasonal premium.
+ *
+ * These two are the INSTANT price (2026-07-23) — selling straight from the
+ * Inventory panel, where a buyer collects. That forgoes the seasonal premium
+ * entirely AND takes `market.instantSellPenaltyPct` off the base for pickup, so
+ * it is always the worst price available. The gap between the two IS the Sell
+ * task's reason to exist: at December's peak, hauling is worth ~39% more than
+ * clicking sell.
+ */
+export function instantPriceFactor(): number {
+  return 1 - gameConfig.market.instantSellPenaltyPct;
+}
+
+/** Per-ton grain price when sold instantly from Inventory (no season, less fee). */
+export function grainInstantPrice(crop: CropId): number {
+  return gameConfig.crops[crop].sellPricePerTon * instantPriceFactor();
+}
+
+/** Per-bale price when sold instantly from Inventory. */
+export function baleInstantPrice(product: BaleProduct): number {
+  return gameConfig.baleProducts[product].pricePerBale * instantPriceFactor();
+}
+
 /** Calendar month (0-11) of a sim-time — convenience for callers that only
  * have `now`. */
 export function monthOf(now: SimTime): number {

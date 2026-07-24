@@ -12,6 +12,7 @@ import {
 } from "../src/sim/farming";
 import { sellBales } from "../src/sim/economy";
 import { minutesPerMonth } from "../src/sim/calendar";
+import { baleInstantPrice } from "../src/sim/market";
 import { gameConfig } from "../src/config/gameConfig";
 
 beforeAll(() => setProjection(15, "N"));
@@ -168,7 +169,7 @@ describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-0
     grass.baleLocations = [[1, 1], [2, 2], [3, 3]];
     grass.baleProduct = "hay";
     const grassSale = sellBales(g, grass, 4 * minutesPerMonth());
-    expect(grassSale.revenue).toBe(3 * gameConfig.baleProducts.hay.pricePerBale);
+    expect(grassSale.revenue).toBe(Math.round(3 * baleInstantPrice("hay")));
 
     // Alfalfa bales — same crop machinery, higher value + its own product.
     const a = forageGame();
@@ -177,7 +178,7 @@ describe("perennial forage crops — grass & alfalfa (maintainer request, 2026-0
     alfalfa.baleLocations = [[1, 1], [2, 2], [3, 3]];
     alfalfa.baleProduct = "alfalfaHay";
     const alfalfaSale = sellBales(a, alfalfa, 4 * minutesPerMonth());
-    expect(alfalfaSale.revenue).toBe(3 * gameConfig.baleProducts.alfalfaHay.pricePerBale);
+    expect(alfalfaSale.revenue).toBe(Math.round(3 * baleInstantPrice("alfalfaHay")));
     expect(gameConfig.baleProducts.alfalfaHay.pricePerBale).toBeGreaterThan(gameConfig.baleProducts.hay.pricePerBale);
   });
 

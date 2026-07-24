@@ -290,7 +290,7 @@ export interface Implement {
  * gated by plow/plant/harvest, they just need a standing crop in the field.
  * `unloadHarvester` is system-generated (never player-queued) — a tractor+
  * Grain Trailer hauling a full combine's hopper to a silo. */
-export type TaskType = "plow" | "plant" | "harvest" | "mow" | "mulch" | "weed" | "fertilize" | "rake" | "bale" | "unloadHarvester" | "haulBales";
+export type TaskType = "plow" | "plant" | "harvest" | "mow" | "mulch" | "weed" | "fertilize" | "rake" | "bale" | "unloadHarvester" | "haulBales" | "sell";
 
 export interface FarmTask {
   id: string;
@@ -354,6 +354,14 @@ export interface FarmTask {
    * silos are full/absent (so a partial dump into a filling silo diverts to
    * selling instead of stalling). Same lock-per-trip idea as haulDest. */
   unloadDest?: "silo" | "sell";
+  /** sell-only (2026-07-23): a tractor+trailer run taking stored produce to a
+   * Sell Point for the FULL seasonal price, instead of the discounted instant
+   * sale the Inventory panel gives. `sellProduct` is the crop id or bale
+   * product being hauled; the run repeats source→market trips until the store
+   * is empty. Like `unloadHarvester` this is point-to-point travel, not field
+   * coverage, so `fieldId` is display-only (empty — a sale spans the farm). */
+  sellProduct?: string;
+  sellPhase?: "toSource" | "loading" | "toMarket" | "dumping";
   /** What was paid when the task was queued (plow cost / seed inputs) —
    * refunded in full if a still-queued task is canceled. */
   costPaid: number;
