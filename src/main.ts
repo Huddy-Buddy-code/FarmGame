@@ -60,8 +60,8 @@ import {
 import {
   ensureAgents, initTaskIds, enqueueTask, cancelTask, taskCost, tasksFor,
   isFieldHarvesting, effectiveStatus, tickTasks, autoManageAll, autoManageField,
-  buyAgent, sellAgent, buyImplement, sellImplement, attachImplement, detachImplement,
-  agentPrice, implementPrice, canPull, implementName, getCoveragePath,
+  buyAgent, sellAgent, buyImplement, sellImplement,
+  agentPrice, implementPrice, implementName, getCoveragePath,
   reorderTask, estimateTaskHours, forageDue, canMulch, defaultPlan, forcePlow, removeRotationStep, blockedWork,
   harvesterCapacityTons, grainTrailerCapacityTons, harvesterCapacityBushels, grainTrailerCapacityBushels,
   tonsPerBushel, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
@@ -924,6 +924,36 @@ function sectionDivider(label: string): HTMLElement {
 /** Display name + working-width/capacity for an implement kind at a size, as
  * TWO separate lines (maintainer request, 2026-07-13): "Plow - Medium" then
  * "10 ft Working Width" — mirrors the equipment-name reorder, "<Kind> - <Size>". */
+/**
+ * Implement GROUPS for the Equipment tab (maintainer request, 2026-07-24:
+ * "sort equipment by Types & Name"). Fourteen implement kinds is well past the
+ * point where one flat list reads, so both the owned list and the shop are
+ * split under these headings, alphabetical within each.
+ *
+ * "Misc" has no members today. It's kept so a new implement that fits nowhere
+ * else has an obvious home instead of forcing a premature new category.
+ */
+const IMPLEMENT_GROUP_ORDER = [
+  "Field Work", "Yield Modifiers", "Harvesting", "Hay & Silage Tools", "Trailers", "Misc",
+] as const;
+type ImplementGroup = (typeof IMPLEMENT_GROUP_ORDER)[number];
+
+const IMPLEMENT_GROUP: Record<ImplementKind, ImplementGroup> = {
+  plow: "Field Work",
+  planter: "Field Work",
+  // These two don't move soil or seed — they change what the crop YIELDS.
+  sprayer: "Yield Modifiers",
+  mulcher: "Yield Modifiers",
+  cornHeader: "Harvesting",
+  grainHeader: "Harvesting",
+  mower: "Hay & Silage Tools",
+  rake: "Hay & Silage Tools",
+  bailer: "Hay & Silage Tools",
+  haySpikes: "Hay & Silage Tools",
+  grainTrailer: "Trailers",
+  baleTrailer: "Trailers",
+};
+
 const IMPLEMENT_KIND_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake",
   bailer: "Baler", grainTrailer: "Grain Trailer", mower: "Mower",
@@ -2627,42 +2657,34 @@ function buildEquipShop(): void {
     },
   });
 
-  section("Implements");
+  // The shop is grouped exactly like the owned list (2026-07-24) — fourteen
+  // implement kinds in one flat run was unreadable.
   const widthSpec = (kind: "plow" | "planter" | "sprayer", s: EquipmentSize) =>
     `${gameConfig.equipment[kind][s].widthFt} ft working width`;
+
+  section("Field Work");
   line("Plow", plowIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: widthSpec("plow", s), price: implementPrice("plow", s), onBuy: buyImpl("plow", s),
   }])));
   line("Planter", planterIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: widthSpec("planter", s), price: implementPrice("planter", s), onBuy: buyImpl("planter", s),
   }])));
+
+  section("Yield Modifiers");
   // Sprayers now come in all three sizes — the 30 ft Small joined the shop
   // 2026-07-24 (it existed in config but was never offered).
   line("Sprayer", sprayerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${widthSpec("sprayer", s)} boom`, price: implementPrice("sprayer", s), onBuy: buyImpl("sprayer", s),
   }])));
-  // Mower: cuts perennial forage (grass/alfalfa) — three sizes as of 2026-07-24.
-  line("Mower", mowerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
-    spec: `${gameConfig.equipment.mower[s].widthFt} ft · cuts hay`, price: implementPrice("mower", s), onBuy: buyImpl("mower", s),
-  }])));
   // Mulcher: optional post-harvest residue pass on annuals — all three sizes.
   line("Mulcher", mulcherIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${gameConfig.equipment.mulcher[s].widthFt} ft · shreds residue`, price: implementPrice("mulcher", s), onBuy: buyImpl("mulcher", s),
   }])));
-  // Rake: three sizes as of 2026-07-24 (15 / 30 / 50 ft).
-  line("Rake", rakeIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
-    spec: `${gameConfig.equipment.rake[s].widthFt} ft · windrows forage`, price: implementPrice("rake", s), onBuy: buyImpl("rake", s),
-  }])));
-  // Baler: three sizes as of 2026-07-24, and the size decides BALE SHAPE —
-  // Small/Medium are round balers, the Large is a large square baler whose
-  // bales are heavier and worth more per ton.
-  line("Baler", implementIconHtml("bailer", "medium", 26), Object.fromEntries(SIZES.map((s) => [s, {
-    spec: `${gameConfig.equipment.bailer[s].widthFt} ft pickup · ${gameConfig.equipment.bailer[s].makesSquareBales ? "square bales" : "round bales"}`,
-    price: implementPrice("bailer", s), onBuy: buyImpl("bailer", s),
-  }])));
-  // Combine headers (2026-07-24): a combine can't cut without the right one —
-  // corn head for corn, grain head for everything else. Hitch to the COMBINE,
-  // and its class caps which size it can carry, same rule as a tractor.
+
+  section("Harvesting");
+  // A combine can't cut without the right header (2026-07-24) — corn head for
+  // corn, grain head for everything else. These hitch to the COMBINE, and its
+  // class caps which size it can carry, same rule as a tractor.
   line("Corn Header", implementIconHtml("cornHeader", "medium", 26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${gameConfig.equipment.cornHeader[s].widthFt} ft · corn only`,
     price: implementPrice("cornHeader", s), onBuy: buyImpl("cornHeader", s),
@@ -2671,13 +2693,31 @@ function buildEquipShop(): void {
     spec: `${gameConfig.equipment.grainHeader[s].widthFt} ft · all but corn`,
     price: implementPrice("grainHeader", s), onBuy: buyImpl("grainHeader", s),
   }])));
-  line("Grain Trailer", grainTrailerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
-    spec: `${grainTrailerCapacityBushels(s).toLocaleString()} bu (~${grainTrailerCapacityTons(s).toFixed(0)} t corn)`,
-    price: implementPrice("grainTrailer", s), onBuy: buyImpl("grainTrailer", s),
+
+  section("Hay & Silage Tools");
+  // Mower: cuts perennial forage (grass/alfalfa) — three sizes as of 2026-07-24.
+  line("Mower", mowerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.mower[s].widthFt} ft · cuts hay`, price: implementPrice("mower", s), onBuy: buyImpl("mower", s),
+  }])));
+  // Rake: three sizes as of 2026-07-24 (15 / 30 / 50 ft).
+  line("Rake", rakeIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.rake[s].widthFt} ft · windrows forage`, price: implementPrice("rake", s), onBuy: buyImpl("rake", s),
+  }])));
+  // Baler: the SIZE decides bale shape — Small/Medium are round balers, the
+  // Large is a large square baler whose bales are heavier and worth more per ton.
+  line("Baler", implementIconHtml("bailer", "medium", 26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.bailer[s].widthFt} ft pickup · ${gameConfig.equipment.bailer[s].makesSquareBales ? "square bales" : "round bales"}`,
+    price: implementPrice("bailer", s), onBuy: buyImpl("bailer", s),
   }])));
   // Hay Spikes: in-field bale collector — Small (1 bale) & Medium (2).
   line("Hay Spikes", haySpikesIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
     spec: `${haySpikesCapacityBales(s)} bale${haySpikesCapacityBales(s) === 1 ? "" : "s"} · collects`, price: implementPrice("haySpikes", s), onBuy: buyImpl("haySpikes", s),
+  }])));
+
+  section("Trailers");
+  line("Grain Trailer", grainTrailerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${grainTrailerCapacityBushels(s).toLocaleString()} bu (~${grainTrailerCapacityTons(s).toFixed(0)} t corn)`,
+    price: implementPrice("grainTrailer", s), onBuy: buyImpl("grainTrailer", s),
   }])));
   // Bale Trailer: bulk bale hauler — Small (10) / Medium (20) / Large (30).
   // Catalog preview shows the empty (0%) fill sprite — a fresh purchase starts empty.
@@ -2763,8 +2803,8 @@ function buildEquipMachines(): void {
     row.className = `equip-card ${stateClass}`;
     row.innerHTML = `
       <span class="ec-dot ${stateClass}" title="${taskText}"></span>
-      <span class="icon">${machineIconHtml(agent.kind, agent.size, 90)}</span>
-      <div class="ec-name">${agent.name}</div>
+      <span class="icon">${machineIconHtml(agent.kind, agent.size, 118)}</span>
+      <div class="ec-name">${escapeHtml(agent.name)}</div>
       <div class="ec-status" title="${taskText}">${taskText}</div>
       ${sub}`;
 
@@ -2794,8 +2834,11 @@ function buildEquipMachines(): void {
       row.appendChild(select);
     }
 
+    // Locate + sell live down the card's SIDE now (2026-07-24) and only appear
+    // on hover or selection, so a resting card is just the machine and its
+    // state.
     const actions = document.createElement("div");
-    actions.className = "ec-actions";
+    actions.className = "ec-actions side";
     actions.appendChild(locateButton(agent.name, agent.pos));
 
     const refund = agent.purchaseCost ?? (agent.size ? agentPrice(agent.kind as EquipmentKind, agent.size) : 0);
@@ -2808,12 +2851,13 @@ function buildEquipMachines(): void {
       }),
     );
     row.appendChild(actions);
+    wireCardSelection(row, `agent:${agent.id}`);
     rows.appendChild(row);
   }
 }
 
-/** IMPLEMENTS you attach: every plow/planter, with a selector to hitch it to a
- * tractor (or park it in the yard) and a sell button. */
+/** IMPLEMENTS you attach, grouped by type (2026-07-24): short strips with a big
+ * icon on the left, and a sell button that appears on hover or selection. */
 function buildEquipImplements(): void {
   const rows = $("equip-implements");
   rows.innerHTML = "";
@@ -2822,81 +2866,92 @@ function buildEquipImplements(): void {
     rows.innerHTML = `<div id="fields-empty">No implements — buy a plow and a planter so a tractor can till and seed.</div>`;
     return;
   }
-  for (const impl of implements_) {
-    const host = impl.attachedTo ? save.agents.find((a) => a.id === impl.attachedTo) : undefined;
-    const where = host ? `On ${host.name}` : "In the yard";
-    const refund = impl.purchaseCost ?? implementPrice(impl.kind, impl.size);
-    const sizeLine = impl.kind === "grainTrailer"
-      ? `${grainTrailerCapacityBushels(impl.size).toLocaleString()} bu${impl.cargoTons ? ` · ${impl.cargoTons.toFixed(1)}t onboard` : ""}`
-      : `${gameConfig.equipment[impl.kind][impl.size].widthFt} ft wide`;
 
-    // Same dot language as the Machines cards: green while its host tractor
-    // is actively working, gold while driving, gray otherwise (in the yard
-    // or hitched to an idle tractor).
-    const stateClass = host?.state === "working" ? "working" : host?.state === "traveling" ? "traveling" : "idle";
-    const statusText = `${where} · ${sizeLine}`;
+  // Grouped by type, alphabetical within a group (maintainer request,
+  // 2026-07-24). Only groups with something in them get a heading.
+  for (const group of IMPLEMENT_GROUP_ORDER) {
+    const inGroup = implements_
+      .filter((i) => IMPLEMENT_GROUP[i.kind] === group)
+      .sort((a, b) => implementName(save, a).localeCompare(implementName(save, b), undefined, { numeric: true }));
+    if (inGroup.length === 0) continue;
+    rows.insertAdjacentHTML("beforeend", `<div class="eq-group">${group}</div>`);
 
-    const row = document.createElement("div");
-    row.className = `equip-card implement ${stateClass}`;
-    row.innerHTML = `
-      <span class="ec-dot ${stateClass}" title="${statusText}"></span>
-      <span class="icon">${trailerIconHtml(impl, 30)}</span>
-      <div class="ec-name">${implementName(save, impl)}</div>
-      <div class="ec-status" title="${statusText}">${statusText}</div>`;
+    for (const impl of inGroup) {
+      const host = impl.attachedTo ? save.agents.find((a) => a.id === impl.attachedTo) : undefined;
+      const where = host ? `On ${host.name}` : "In the yard";
+      const refund = impl.purchaseCost ?? implementPrice(impl.kind, impl.size);
+      const sizeLine = impl.kind === "grainTrailer"
+        ? `${grainTrailerCapacityBushels(impl.size).toLocaleString()} bu${impl.cargoTons ? ` · ${impl.cargoTons.toFixed(1)}t onboard` : ""}`
+        : `${gameConfig.equipment[impl.kind][impl.size].widthFt} ft wide`;
 
-    row.appendChild(hitchSelector(impl));
+      // Same dot language as the Machines cards: green while its host tractor
+      // is actively working, gold while driving, gray otherwise (in the yard
+      // or hitched to an idle tractor).
+      const stateClass = host?.state === "working" ? "working" : host?.state === "traveling" ? "traveling" : "idle";
+      const statusText = `${where} · ${sizeLine}`;
 
-    const busy = !!host && host.state !== "idle";
-    const actions = document.createElement("div");
-    actions.className = "ec-actions";
-    actions.appendChild(
-      iconButton("💰", busy ? `${host!.name} is using this` : `Sell · $${refund.toLocaleString()}`, busy, () => {
-        if (!confirm(`Sell ${implementName(save, impl)} for $${refund.toLocaleString()}?`)) return;
-        const { refund: paid } = sellImplement(save, impl.id);
-        afterFleetChange();
-        toast(`💰 Sold for $${paid.toLocaleString()}`);
-      }),
-    );
-    row.appendChild(actions);
-    rows.appendChild(row);
-  }
-}
+      // SHORT card (2026-07-24): one row, big icon on the left, text to its
+      // right. The hitch dropdown is gone — hitching is automatic when a task
+      // is picked up, and the card still says where the implement is.
+      const row = document.createElement("div");
+      row.className = `eq-strip implement ${stateClass}`;
+      row.innerHTML = `
+        <span class="ec-dot ${stateClass}" title="${escapeHtml(statusText)}"></span>
+        <span class="icon">${trailerIconHtml(impl, 44)}</span>
+        <span class="eq-strip-text">
+          <span class="ec-name">${escapeHtml(implementName(save, impl))}</span>
+          <span class="ec-status" title="${escapeHtml(statusText)}">${escapeHtml(statusText)}</span>
+        </span>`;
 
-/** A <select> on the implement side to hitch it to a compatible idle tractor, or
- * unhitch it to the yard. Tractors must be able to pull this size and be idle. */
-function hitchSelector(impl: Implement): HTMLElement {
-  const wrap = document.createElement("div");
-  wrap.className = "er-hitch";
-  const host = impl.attachedTo ? save.agents.find((a) => a.id === impl.attachedTo) : undefined;
-  const sel = document.createElement("select");
-  sel.className = "hitch-select";
-  // Can't re-hitch while the current host is mid-job.
-  sel.disabled = !!host && host.state !== "idle";
-  sel.title = sel.disabled ? "That tractor is mid-job" : "Attach to a tractor";
-
-  const yard = new Option("— in the yard —", "");
-  yard.selected = !host;
-  sel.add(yard);
-  for (const t of save.agents) {
-    if (t.kind !== "tractor" || !t.size || !canPull(t.size, impl.size)) continue;
-    if (t.state !== "idle" && t.id !== host?.id) continue; // only idle tractors (or the current host)
-    const o = new Option(t.name, t.id);
-    if (t.id === host?.id) o.selected = true;
-    sel.add(o);
-  }
-  sel.addEventListener("change", () => {
-    try {
-      if (sel.value === "") detachImplement(save, impl.id);
-      else attachImplement(save, sel.value, impl.id);
-      afterFleetChange();
-    } catch (err) {
-      toast("❌ " + (err as Error).message, 3500);
-      refreshEquipTab(true);
+      const busy = !!host && host.state !== "idle";
+      const actions = document.createElement("div");
+      actions.className = "ec-actions";
+      actions.appendChild(
+        iconButton("💰", busy ? `${host!.name} is using this` : `Sell · $${refund.toLocaleString()}`, busy, () => {
+          if (!confirm(`Sell ${implementName(save, impl)} for $${refund.toLocaleString()}?`)) return;
+          const { refund: paid } = sellImplement(save, impl.id);
+          afterFleetChange();
+          toast(`💰 Sold for $${paid.toLocaleString()}`);
+        }),
+      );
+      row.appendChild(actions);
+      wireCardSelection(row, `impl:${impl.id}`);
+      rows.appendChild(row);
     }
-  });
-  wrap.appendChild(sel);
-  return wrap;
+  }
 }
+
+/**
+ * Which equipment card is "selected" — the actions on a card are hidden until
+ * it's hovered OR selected (maintainer request, 2026-07-24: "sell button only
+ * visible when hovering over or selection"). Hover alone is no good on a touch
+ * screen, and it also makes the buttons impossible to reach if the pointer has
+ * to cross another card to get to them.
+ *
+ * A single id, not a set: selecting a card deselects whatever was selected
+ * before, so at most one card ever shows its actions unprompted.
+ */
+let selectedEquipCardId: string | null = null;
+
+function wireCardSelection(card: HTMLElement, id: string): void {
+  if (selectedEquipCardId === id) card.classList.add("selected");
+  card.addEventListener("click", (e) => {
+    // Clicks on the actions themselves are the buttons doing their job — don't
+    // let them toggle the selection out from under the press.
+    if ((e.target as HTMLElement).closest(".ec-actions")) return;
+    selectedEquipCardId = selectedEquipCardId === id ? null : id;
+    refreshEquipTab(true);
+  });
+}
+
+/* REMOVED 2026-07-24: `hitchSelector`, the per-implement "which tractor is this
+ * on" dropdown. Maintainer request ("remove the dropdown with location") — the
+ * implement cards are short strips now, and hitching has been automatic on task
+ * pickup for a long time, so the control was a manual override for something
+ * the game already gets right. The card still SAYS where the implement is; you
+ * just can't drag it around by hand any more. `attachImplement`/
+ * `detachImplement` (sim/tasks.ts) are still exported and still tested — bring
+ * a control back here if hand-hitching is ever wanted again. */
 
 function locateButton(name: string, pos: Meters): HTMLButtonElement {
   return iconButton("📍", `Fly to ${name}`, false, () => {

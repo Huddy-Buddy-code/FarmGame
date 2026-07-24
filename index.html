@@ -833,6 +833,72 @@
       .equip-card .ec-actions { display: flex; gap: 3px; margin-top: 2px; }
       .equip-card .ec-actions button { padding: 2px 5px; font-size: 12px; }
 
+      /* --- Equipment tab, 2026-07-24 pass ------------------------------- */
+      /* Group headings over the owned implements ("Field Work", "Trailers"…). */
+      .eq-group {
+        grid-column: 1 / -1;
+        font-size: 12px; font-weight: 700; color: #8a7658;
+        text-transform: uppercase; letter-spacing: 0.04em;
+        margin: 8px 0 1px; padding-bottom: 2px;
+        border-bottom: 1.5px solid var(--wood);
+      }
+
+      /* SHORT implement card: one horizontal strip, big icon left, text right.
+         Replaces the near-square card these used to share with machines —
+         an implement has far less to say than a machine, so it doesn't need
+         the height. */
+      .eq-strip {
+        position: relative;
+        grid-column: 1 / -1;
+        display: flex; align-items: center; gap: 10px;
+        background: var(--cream-2); border: 1.5px solid var(--wood);
+        border-radius: 10px; padding: 4px 10px 4px 8px; min-width: 0;
+        cursor: pointer;
+        transition: background 0.15s, border-color 0.15s;
+      }
+      .eq-strip.working { border-color: var(--green-dark); background: #e9f1de; }
+      .eq-strip.traveling { border-color: var(--gold); background: #f7ecd2; }
+      .eq-strip.selected { border-color: var(--green-dark); box-shadow: 0 0 0 2px rgba(93, 138, 58, 0.28); }
+      .eq-strip .icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+      .eq-strip .icon svg, .eq-strip .icon img { width: 44px; height: 44px; }
+      .eq-strip .eq-strip-text {
+        display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; text-align: left;
+      }
+      .eq-strip .ec-name {
+        font-weight: 700; font-size: 13px; line-height: 1.15;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .eq-strip .ec-status {
+        font-size: 11px; color: #8a7658; line-height: 1.15;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      /* The strip's dot sits inline at the far right rather than in a corner. */
+      .eq-strip .ec-dot { position: static; flex: 0 0 auto; order: 3; }
+      .eq-strip .ec-actions { display: flex; gap: 3px; flex: 0 0 auto; }
+      .eq-strip .ec-actions button { padding: 2px 6px; font-size: 13px; }
+
+      /* Machine cards: actions run down the card's SIDE instead of under it. */
+      .equip-card { cursor: pointer; }
+      .equip-card .ec-actions.side {
+        position: absolute; top: 4px; left: 4px; margin: 0;
+        flex-direction: column; gap: 4px;
+      }
+      .equip-card.selected { border-color: var(--green-dark); box-shadow: 0 0 0 2px rgba(93, 138, 58, 0.28); }
+
+      /* Hover-or-select to reveal the actions (maintainer request, 2026-07-24).
+         `visibility` rather than `display` so the buttons keep their box and
+         nothing reflows as they appear. Selection matters as well as hover:
+         hover alone is unreachable on a touch screen, and fiddly when the
+         pointer has to cross other cards to get there. */
+      .equip-card .ec-actions,
+      .eq-strip .ec-actions {
+        visibility: hidden; opacity: 0; transition: opacity 0.12s;
+      }
+      .equip-card:hover .ec-actions, .equip-card.selected .ec-actions,
+      .eq-strip:hover .ec-actions, .eq-strip.selected .ec-actions {
+        visibility: visible; opacity: 1;
+      }
+
       /* Corner status dot: gray idle, gold traveling, red waiting-blocked,
          pulsing green while actually working. */
       .ec-dot {
