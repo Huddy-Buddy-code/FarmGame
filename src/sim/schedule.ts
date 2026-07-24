@@ -189,6 +189,30 @@ export function plowDueAt(crop: CropId, month: number, override: number | undefi
   return at >= 0 && at >= legal.indexOf(chosen);
 }
 
+/**
+ * Is PLANTING due for `crop` at `month` — a legal planting month at or after
+ * the one the schedule picked?
+ *
+ * Same shape, and the same "or after" soft retry, as `plowDueAt` (maintainer
+ * bug report, 2026-07-24: "Not planting when scheduled. If the Field is plowed,
+ * it should plant"). Planting used a bare month EQUALITY, so a plow that
+ * finished one month late — the only tractor was on another field, or the farm
+ * was short that tick — left the field sitting tilled for a WHOLE YEAR waiting
+ * for the chosen month to come round again. Winter Wheat showed it worst: a
+ * two-month window, in the busiest month of the autumn.
+ *
+ * The crop's own `plantMonths` stay the hard floor and ceiling. Slipping is
+ * forgiven inside the window, never outside it — a wheat plow that runs on into
+ * November still doesn't get to sow wheat in November.
+ */
+export function plantDueAt(crop: CropId, month: number, override: number | undefined): boolean {
+  const legal = legalMonthsFor("plant", crop);
+  const chosen = effectiveMonthFor("plant", crop, override);
+  if (chosen === undefined) return false;
+  const at = legal.indexOf(month);
+  return at >= 0 && at >= legal.indexOf(chosen);
+}
+
 /** Validating mutator for a drag/click on a Schedule cell — throws a
  * player-facing message on an illegal month (mirrors reorderTask's shape,
  * sim/tasks.ts). */

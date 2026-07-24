@@ -44,7 +44,7 @@ import type { RoadNetwork } from "./roadNet";
 import { recordCash } from "./ledger";
 import { recordFieldCash, recordFieldCrop } from "./fieldLedger";
 import { grainUnitPrice, baleUnitPrice, monthOf, SELLABLE_GRAINS } from "./market";
-import { effectiveMonthFor, plowDueAt } from "./schedule";
+import { effectiveMonthFor, plowDueAt, plantDueAt } from "./schedule";
 
 const ACRE_M2 = 4046.8564224;
 
@@ -3043,6 +3043,12 @@ function plowDue(now: SimTime, upcoming: FieldPlan): boolean {
   return plowDueAt(upcoming.crop, dateOf(now).month, upcoming.schedule?.plow, plantMonth);
 }
 
+/** Is this step's crop due to go in the ground? Soft-retries from its chosen
+ * month through the rest of the crop's planting window — see `plantDueAt`. */
+function plantDue(now: SimTime, plan: FieldPlan): boolean {
+  return plantDueAt(plan.crop, dateOf(now).month, plan.schedule?.plant);
+}
+
 /**
  * Is a planned mulch still OWED on this field — the plan asks for one, it hasn't
  * run yet this cycle, and the field can still take it?
@@ -3121,7 +3127,7 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
         if (plowDue(now, upcoming)) {
           tryEnqueue(save, field, "plow", now);
         }
-      } else if (monthMatches(now, plan.schedule?.plant)) {
+      } else if (plantDue(now, plan)) {
         // Tilled — establish the stand in its (March) planting window. The plow
         // already moved the pointer, so `plan` is the crop going in.
         tryEnqueue(save, field, "plant", now, plan.crop);
@@ -3203,8 +3209,10 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       break;
     case "tilled":
       // Ground is ready, so the plow has already advanced the pointer — `plan`
-      // IS the crop going in, on its own schedule row.
-      if (monthMatches(now, plan.schedule?.plant)) {
+      // IS the crop going in, on its own schedule row. Due from the chosen month
+      // through the rest of the crop's window, so a plow that finished late
+      // doesn't cost the field a year (maintainer report, 2026-07-24).
+      if (plantDue(now, plan)) {
         tryEnqueue(save, field, "plant", now, plan.crop);
       }
       break;
