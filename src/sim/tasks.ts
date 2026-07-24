@@ -943,12 +943,31 @@ export function tickTasks(save: SaveState, now: SimTime, dtMinutes: number, rand
       ensureUnloadTask(save, a, a.lastFieldId ?? "", a.lastCrop, events);
     }
   }
-  // Process machines SMALLEST-first, so the smallest capable tractor picks up a
-  // queued task before any larger one does — keeping big tractors free for the
-  // jobs only they can pull (maintainer request, 2026-07-11). Agents already
-  // mid-task just continue regardless of order; this only affects who grabs an
-  // unclaimed job.
+  // Pickup order. Agents already mid-task just continue regardless; this only
+  // decides who grabs an UNCLAIMED job.
+  //
+  // Tractors go SMALLEST-first, so the smallest capable one takes a queued task
+  // and the big ones stay free for the jobs only they can pull (maintainer
+  // request, 2026-07-11).
+  //
+  // Combines go LARGEST-first (maintainer request, 2026-07-24) — the opposite
+  // rule, for the opposite reason. Header width is the entire point of a big
+  // combine, and a ripe crop only has `harvestWindowMonths` before it withers,
+  // so leaving the standing crop to the small machine is exactly backwards.
+  // Done by building the smallest-first order as before and then swapping the
+  // combines around WITHIN their own slots, rather than by a comparator that
+  // sorts one group up and the other down — that wouldn't be a consistent
+  // ordering, and grouping combines ahead of tractors instead would quietly
+  // change the within-tick pipeline (a cart draining a hopper in the same tick
+  // the combine filled it, rather than the next one).
   const order = [...save.agents].sort((a, b) => SIZE_RANK[a.size ?? "medium"] - SIZE_RANK[b.size ?? "medium"]);
+  const combines = order
+    .filter((a) => a.kind === "harvester")
+    .sort((a, b) => SIZE_RANK[b.size ?? "medium"] - SIZE_RANK[a.size ?? "medium"]);
+  let nextCombine = 0;
+  for (let i = 0; i < order.length; i++) {
+    if (order[i]!.kind === "harvester") order[i] = combines[nextCombine++]!;
+  }
   for (const agent of order) {
     tickAgent(save, agent, now, dtMinutes, changed, events, rand);
   }
@@ -2559,6 +2578,12 @@ function tickAgent(
         (field.baleLocations ??= []).push([drop[0], drop[1]]);
         baler.cargoTons = Math.max(0, baler.cargoTons - baleTarget);
         baleTargetRuntime.delete(task.id); // re-roll the next bale's fill distance
+        // Collectable the moment it hits the ground (maintainer request,
+        // 2026-07-24) — a hauler no longer waits for the baler to finish the
+        // whole field, which on a big one meant the entire crop lying out while
+        // an idle hay-spikes rig had nothing to do. No-ops if a haul is already
+        // covering the field or there's nothing free to send.
+        queueHaulBales(save, field.id);
         continue;
       }
 
