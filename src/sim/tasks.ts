@@ -1205,7 +1205,16 @@ function ensureUnloadTask(save: SaveState, harvester: Agent, fieldId: string, cr
   // UI already reports. EXTRA trips are different: spawning one with no free
   // rig just parks a permanently uncrewed task in the queue, which reads as
   // stuck. So a crew only grows when there's actually someone to join it.
-  const canGrow = trips.length === 0 || (trips.length < gameConfig.hauling.maxCrewSize && hasFreeCartTractor(save));
+  // ...and only once EVERY combine carrying grain has a cart of its own
+  // (maintainer request, 2026-07-24: "make sure each harvest has at least one
+  // trailer assigned before adding multiple"). A second cart alongside a
+  // combine that already has one is worth far less than the first cart
+  // alongside a combine that has none — and whichever combine happened to ask
+  // first used to take the whole crew cap, leaving the other stood in the
+  // field on a full tank.
+  const canGrow =
+    trips.length === 0 ||
+    (trips.length < gameConfig.hauling.maxCrewSize && hasFreeCartTractor(save) && everyLoadedHarvesterHasACart(save, harvester));
   if (!task && canGrow) {
     task = {
       id: `task-${++taskSeq}`,
@@ -1275,6 +1284,14 @@ export function queueHaulBales(save: SaveState, fieldId: string): FarmTask | und
     // Same rule as the grain-cart crew: don't park an uncrewed extra task in
     // the queue when there's no free tractor to ever pick it up.
     if (!save.agents.some(isFreeTractor)) return undefined;
+    // PAIR BEFORE YOU MULTIPLY (maintainer request, 2026-07-24). A relay that's
+    // still missing its Bale Trailer half has the spare tractor's best job
+    // waiting for it: without a trailer the hay-spikes rig shuttles to storage
+    // one or two bales at a time, and a SECOND rig doing the same thing is a
+    // far worse use of the machine than completing the first relay. Only holds
+    // while a trailer could actually join — if the farm owns none free, waiting
+    // for one that will never come would just stall the field.
+    if (existing.some((t) => !t.trailerAgentId) && hasFreeBaleTrailerTractor(save)) return undefined;
   }
   const task: FarmTask = {
     id: `task-${++taskSeq}`,
@@ -1603,6 +1620,34 @@ function finishUnload(save: SaveState, task: FarmTask, agent: Agent, events: Tas
  * request, 2026-07-20 — "same join-mid-job idea as the baler"). Auto-hitches a
  * loose Grain Trailer if the spare tractor has none. No-op when the task's
  * already crewed, the combine's empty, or nothing's free. */
+/**
+ * Is every OTHER combine that's sitting on grain already looked after — at
+ * least one unload trip of its own?
+ *
+ * The second half of the crew-growth gate (maintainer request, 2026-07-24).
+ * `except` is the combine asking to grow, which is excluded because it
+ * obviously already has one. A combine with no grain aboard isn't waiting on
+ * anything, so it doesn't hold the fleet up.
+ */
+function everyLoadedHarvesterHasACart(save: SaveState, except: Agent): boolean {
+  return save.agents.every(
+    (a) =>
+      a.kind !== "harvester" ||
+      a.id === except.id ||
+      (a.grainOnboard ?? 0) <= 1e-9 ||
+      save.tasks.some((t) => t.type === "unloadHarvester" && t.harvesterAgentId === a.id),
+  );
+}
+
+/** Is there an idle tractor that could take a Bale Trailer right now? Gates
+ * growing a bale-haul crew — an unpaired relay gets the spare rig first (see
+ * `queueHaulBales`). */
+function hasFreeBaleTrailerTractor(save: SaveState): boolean {
+  return save.agents.some(
+    (a) => isFreeTractor(a) && (!!attachedImplement(save, a.id, "baleTrailer") || !!availableImplementFor(save, a, "baleTrailer")),
+  );
+}
+
 /** Is there an idle tractor that could take a Grain Trailer right now? Gates
  * growing a cart crew — see `ensureUnloadTask`. */
 function hasFreeCartTractor(save: SaveState): boolean {
