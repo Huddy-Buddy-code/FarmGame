@@ -169,9 +169,22 @@ function lineIntersect(p1: Meters, d1: Meters, p2: Meters, d2: Meters): Meters |
 export function offsetPolygonInward(ring: Meters[], distance: number): Meters[] | null {
   const n = ring.length;
   if (n < 3 || distance <= 0) return null;
-  const centroid = centroidOf(ring);
   const [minE, minN, maxE, maxN] = boundsOf(ring);
   const guardPad = distance * 4 + Math.max(maxE - minE, maxN - minN);
+
+  // Which way is "in" comes from the ring's WINDING, not from pointing at the
+  // centroid (2026-07-23). The centroid test is only valid on convex shapes:
+  // at a concave vertex the interior can lie on the far side of the centroid,
+  // so an edge bordering a notch got its normal flipped and that lap's vertices
+  // landed OUTSIDE the field. Because one bad edge then failed the
+  // edge-reversal check below, the whole offset returned null and
+  // buildHeadlandCoveragePath silently degraded to a plain no-headland path —
+  // the "headlands don't work on fields with several corners" report.
+  //
+  // For a counter-clockwise ring (positive signed area) the LEFT normal of
+  // every edge points into the interior; for a clockwise ring it's the right
+  // normal. That holds at every vertex, convex or reflex.
+  const ccw = signedAreaMeters(ring) > 0;
 
   const lines: Array<{ p: Meters; dir: Meters }> = [];
   for (let i = 0; i < n; i++) {
@@ -179,11 +192,7 @@ export function offsetPolygonInward(ring: Meters[], distance: number): Meters[] 
     const dx = b[0] - a[0], dy = b[1] - a[1];
     const len = Math.hypot(dx, dy) || 1;
     const ux = dx / len, uy = dy / len;
-    const n1: Meters = [-uy, ux];
-    const n2: Meters = [uy, -ux];
-    const mid: Meters = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-    const toC: Meters = [centroid[0] - mid[0], centroid[1] - mid[1]];
-    const inward = n1[0] * toC[0] + n1[1] * toC[1] > n2[0] * toC[0] + n2[1] * toC[1] ? n1 : n2;
+    const inward: Meters = ccw ? [-uy, ux] : [uy, -ux];
     lines.push({ p: [a[0] + inward[0] * distance, a[1] + inward[1] * distance], dir: [ux, uy] });
   }
 
