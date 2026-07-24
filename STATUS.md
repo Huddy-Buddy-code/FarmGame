@@ -1631,6 +1631,89 @@ session's UI has been seen in a browser:
 **Save-compat note:** a crop sitting ripe in an old save will WITHER shortly
 after loading — the harvest window is enforced from `plantedAt`.
 
+## Latest changes (2026-07-24, big batch: bugs → equipment → UI, 14 commits)
+
+Run as three reviewed batches. Full detail in `git log`; this is the map.
+
+### Batch 1 — bugs (5 commits)
+
+- **Tasks finished ~10% before the tractor did.** Reproduced at 1.117x on a
+  600x70 m strip with the 20 ft plow. TWO causes: `buildHeadlandLaps` laid rings
+  down to the last sliver, so a narrow field's inner laps drove over each other
+  (fixed: a lap is only traced while a full swath of un-worked ground remains);
+  and `doneAcres` was swept-metres x swath CLAMPED to real acreage, so any
+  overshoot froze the progress bar AND the texture reveal. Progress is now a
+  fraction of the route (`acresDoneAt`/`distanceAtAcres`), tying bar, reveal and
+  machine together by construction. A residual few percent survives on very thin
+  fields from the interior fill crediting a sub-swath remnant a full lane —
+  harmless now, guarded at <1.1.
+- **Winter Wheat wouldn't plant.** Planting used a bare month EQUALITY while
+  every other step soft-retries, so a plow one month late cost a full YEAR. New
+  `plantDueAt` mirrors `plowDueAt`.
+- **Field numbers desynced.** Queue/blocked/completed/status lines rendered the
+  raw `fieldId`; badge and panel honoured `field.name`. One `fieldLabelOf` now,
+  and those interpolations are escaped (names are player-typed).
+- **Crew rules spread across the fleet**: every combine gets a cart before any
+  gets a second; a Bale Trailer pairs with an existing hay-spikes rig before a
+  second rig goes out.
+- **Biggest combine takes the harvest** (tractors stay smallest-first), and
+  bales are collected as they drop rather than at end of run.
+
+### Batch 2 — equipment & economy (5 commits)
+
+- Rakes 15/30/50, Mowers 15/25/50, Balers 15/25/30, Small sprayer sold, Large
+  bale trailer (30). Oats/barley plant Mar–May and stay harvestable 3 months
+  (new per-crop `harvestWindowMonths`, read through `harvestWindowMonthsFor`).
+- **Bale Area capped at 1000** — a RULE change: while it was `Infinity` the
+  hauler's "storage full, sell instead" fallback could never fire.
+- **Self-Propelled Windrower** — a new machine kind that mows with no tractor.
+  `TASK_AGENT_KIND` stopped being 1:1; `agentCanDoTask` is the real gate now.
+- **Combine headers, required.** Corn head for corn, grain head for everything
+  else; the header's width drives the coverage path. Crop-dependent, so it's
+  resolved per task (`headerKindForTask`) like a sell run's trailer. SAVE
+  MIGRATION behind its own `headersGranted` flag — `starterFleetGranted` is
+  already set on every existing save.
+- **Square bales** as the Large baler tier (not a new implement kind). Each
+  round product forks into a square twin at 1.5x weight; new per-product
+  `tonsPerBale` replaced the global `forage.baleTons` at six call sites.
+- **Grain capacity is VOLUME.** Per-crop `bushelWeightLbs`; tanks 250/350/500
+  bu, carts 400/1000/1500. Deliberate rebalance ("let it bite"): a Medium
+  combine went 50 t -> under 10 t of corn, so hauling is now the bottleneck of
+  harvest season. The Small cart is 400 bu on purpose — bigger than every tank
+  would have made the partial-drain path dead code.
+
+### Batch 3 — UI (3 commits, NONE visually verified)
+
+- Equipment tab: implements grouped (Field Work / Yield Modifiers / Harvesting /
+  Hay & Silage Tools / Trailers / Misc) in list AND shop; implements are short
+  horizontal strips; machine icons 90->118px with actions down the side. Actions
+  reveal on hover OR selection. **`hitchSelector` removed** per request — that
+  was the only manual hitching control (`attachImplement`/`detachImplement` stay
+  exported and tested if it's wanted back).
+- Field Schedule: rotation reads top-down from the current crop ("Current Crop"
+  / "Next" / "Then (n)"; "Planting Next" when nothing is growing), crop picker
+  moved to its right. **Queue Plow moved here** from Field View, and is now
+  offered on auto-managed fields too.
+- Inventory: Market shows only stocked products, each with t/ac and $/ac (bales
+  use the crop's own cutting count — 3 for hay, 1 for straw). Silos and bale
+  stores are rectangular fill cards with hover/select actions; bale stores list
+  what's held per product, which matters now that round and square are separate
+  products.
+
+**552/552 tests passing, typecheck + build clean.** ~80 new tests across the
+batch.
+
+**Needs eyes (Batch 3 is entirely unverified):**
+- The 5-column equipment grid now mixes full-width group headings and full-width
+  implement strips with the machine cards.
+- The two-column plan layout in a narrow panel — a 5-step rotation with long
+  crop names is the stress case.
+- Storage fill-bar labels on a nearly-empty bar (dark text on cream vs on gold),
+  and a bale store holding several products at panel width.
+
+**Save-compat:** existing saves are granted both combine headers on load, or
+their combine would be unable to cut anything.
+
 ## Known gaps / unverified
 
 - **Field panel Schedule calendar drag-and-drop is logic-tested only** — no
