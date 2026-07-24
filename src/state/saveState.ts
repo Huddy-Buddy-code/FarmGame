@@ -298,14 +298,12 @@ export interface FarmTask {
   fieldId: string;
   /** Which crop to put in (plant tasks only). */
   crop?: CropId;
-  /** Plant-tasks only: this planting is the rotation handing off to its NEXT
-   * step, so starting it should advance `Field.rotationIndex` (2026-07-23).
-   * Set by `autoManageField` when it queues the upcoming step's crop; NOT set
-   * for a field's first-ever planting (that one plants the step already
-   * current) or for a manual plant from the View tab. Carried on the task
-   * rather than inferred at pickup so canceling a queued plant can't leave the
-   * sequence advanced with nothing in the ground. */
-  advancesRotation?: boolean;
+  /** REMOVED 2026-07-23: `advancesRotation`. The rotation now advances when the
+   * ground is PLOWED rather than when the next crop's plant task starts, and
+   * that's derived from the field's own state (`sim/tasks.ts`, the plow
+   * completion case) rather than flagged on a task — so it needs no save
+   * field, is idempotent, and works for a hand-queued plow too. Stale flags in
+   * saves written earlier today are simply ignored. */
   totalAcres: number;
   /** Acres worked so far (progress = doneAcres / totalAcres). */
   doneAcres: number;

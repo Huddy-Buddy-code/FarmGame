@@ -1755,14 +1755,6 @@ function tickAgent(
       next.agentId = agent.id;
       agent.taskId = next.id;
       agent.state = "traveling";
-      // Starting the next step's planting is what advances the rotation
-      // (maintainer spec, 2026-07-23: "when a new crop starts the planting
-      // task, it becomes the current crop"). Doing it here rather than at
-      // enqueue means a canceled plant never strands the sequence a step ahead.
-      if (next.type === "plant" && next.advancesRotation) {
-        const f = save.fields.find((ff) => ff.id === next.fieldId);
-        if (f) advanceRotation(f);
-      }
       // Picking up a rake windrows the field — this unlocks the baler right away
       // (it may start before the rake finishes), and survives the rake finishing.
       if (next.type === "rake") {
@@ -2708,6 +2700,21 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
   switch (task.type) {
     case "plow":
       applyPlow(field);
+      // Fresh ground = the next step of the rotation is now the current one
+      // (maintainer correction, 2026-07-23 — this used to happen when the new
+      // crop's PLANT task started). Plowing is the real boundary between one
+      // crop's cycle and the next: everything before it (residue, baling,
+      // mulching) belongs to the crop that came off, and everything after is
+      // the new crop's.
+      //
+      // Derived rather than flagged on the task: advance exactly when the
+      // pointer is still sitting on the crop that just came off. That makes it
+      // idempotent (a second plow before planting won't skip a step, since the
+      // pointer has already moved past `lastCrop`), and it works for a plow the
+      // PLAYER queued by hand, which a flag set by auto-manage never would.
+      if (field.lastCrop !== undefined && activePlan(field).crop === field.lastCrop) {
+        advanceRotation(field);
+      }
       break;
     case "plant":
       // The window was open at queue time; the work is committed even if the
@@ -2919,14 +2926,16 @@ export function removeRotationStep(field: Field, idx: number): void {
 }
 
 /**
- * Which step's crop auto-manage should put in the ground next.
+ * The step the NEXT plow is preparing ground for — whose schedule row therefore
+ * drives when that plow runs.
  *
- * Normally the NEXT step — the current one is what's standing (or what just
- * came off). The exception is a field that has never grown anything: there's
- * no outgoing crop to hand off from, so its first planting is the step already
- * current, and the sequence does NOT advance for it. Returns the identical
- * object reference as `activePlan` in that case, which is how callers tell the
- * two situations apart.
+ * Normally the next step, since the pointer is still on the crop that just came
+ * off. The exception is a field that has never grown anything: there's nothing
+ * to hand off from, so the ground is being prepared for the step already
+ * current. Returns the identical object reference as `activePlan` in that case.
+ *
+ * Only meaningful BEFORE the plow — once it completes the pointer advances onto
+ * this step and `activePlan` takes over (see the plow completion case).
  */
 export function planToPlant(field: Field): FieldPlan {
   const virgin = field.crop === undefined && field.lastCrop === undefined;
@@ -3037,16 +3046,18 @@ function monthMatches(now: SimTime, override: number | undefined): boolean {
  * afford it, out of season) are silently retried next tick.
  */
 export function autoManageField(save: SaveState, field: Field, now: SimTime): void {
-  // TWO steps are in play at once (sequence rework, 2026-07-23):
-  //   `plan`     — the step running now. Owns the standing crop and everything
-  //                downstream of it: weed, fertilize, harvest, mulch, rake/bale.
-  //   `upcoming` — the step about to go in the ground. Owns the ground prep for
-  //                its own crop: plow and plant.
-  // That split is what makes residue work belong to the crop that produced it
-  // while the next crop's plow/plant timing comes from its own schedule row.
+  // TWO steps are in play, either side of the PLOW (maintainer correction,
+  // 2026-07-23 — the handover used to be at planting):
+  //   `plan`     — the step the pointer is on. Before the plow that's the crop
+  //                that just came off, so it owns the residue work (mulch,
+  //                rake/bale); after the plow it IS the new crop, so it owns
+  //                planting and everything downstream (weed, fertilize, harvest).
+  //   `upcoming` — the step the plow is preparing ground for. Only meaningful
+  //                BEFORE the plow, which is the only place it's read: once the
+  //                plow completes, the pointer advances onto it and `plan`
+  //                takes over.
   const plan = activePlan(field);
   const upcoming = planToPlant(field);
-  const handoff = upcoming !== plan; // false only on a field's first-ever planting
 
   // Optional side-tasks first — independent of the lifecycle, once per crop.
   // A schedule override just narrows WHICH month within the open window
@@ -3081,10 +3092,10 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
         if (inPlowWindow(now) && monthMatches(now, upcoming.schedule?.plow)) {
           tryEnqueue(save, field, "plow", now);
         }
-      } else if (monthMatches(now, upcoming.schedule?.plant)) {
-        // Tilled — establish the stand in its (March) planting window.
-        const t = tryEnqueue(save, field, "plant", now, upcoming.crop);
-        if (t && handoff) t.advancesRotation = true;
+      } else if (monthMatches(now, plan.schedule?.plant)) {
+        // Tilled — establish the stand in its (March) planting window. The plow
+        // already moved the pointer, so `plan` is the crop going in.
+        tryEnqueue(save, field, "plant", now, plan.crop);
       }
       return;
     }
@@ -3168,12 +3179,10 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       }
       break;
     case "tilled":
-      // Plant the UPCOMING step's crop, on its own schedule row. Starting the
-      // task is what makes it "current" (`advancesRotation`) — queueing it
-      // isn't, so a canceled plant leaves the sequence exactly where it was.
-      if (monthMatches(now, upcoming.schedule?.plant)) {
-        const t = tryEnqueue(save, field, "plant", now, upcoming.crop);
-        if (t && handoff) t.advancesRotation = true;
+      // Ground is ready, so the plow has already advanced the pointer — `plan`
+      // IS the crop going in, on its own schedule row.
+      if (monthMatches(now, plan.schedule?.plant)) {
+        tryEnqueue(save, field, "plant", now, plan.crop);
       }
       break;
     case "ready":

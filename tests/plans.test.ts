@@ -4,7 +4,7 @@ import type { Meters } from "../src/geo/coords";
 import { newGame } from "../src/state/saveState";
 import type { Field, SaveState } from "../src/state/saveState";
 import { tickFarming } from "../src/sim/farming";
-import { ensureAgents, buyImplement, tickTasks, autoManageAll, activePlan, advanceRotation, planToPlant, cancelTask, removeRotationStep } from "../src/sim/tasks";
+import { ensureAgents, buyImplement, tickTasks, autoManageAll, activePlan, advanceRotation, planToPlant, enqueueTask, removeRotationStep } from "../src/sim/tasks";
 import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
 import { minutesPerMonth } from "../src/sim/calendar";
 
@@ -13,6 +13,7 @@ beforeAll(() => setProjection(15, "N"));
 const side = Math.sqrt(100 * 4046.8564224);
 const boundary: Meters[] = [[0, 0], [side, 0], [side, side], [0, side]];
 const APRIL_1 = minutesPerMonth();
+const WINTER_1 = 9 * minutesPerMonth(); // Dec 1 — the plow window opens
 
 /** Also gives a Silo per crop + a Grain Trailer (maintainer request,
  * 2026-07-12: the combine now has a real hopper and needs somewhere to haul
@@ -124,28 +125,28 @@ describe("removeRotationStep — the pointer follows the step it was on", () => 
   });
 });
 
-describe("planToPlant — first planting vs. rotation handoff", () => {
+describe("planToPlant — which step the next plow is preparing for", () => {
   const twoStep = (): Field => ({
     id: "f", parcelId: "p", boundary, status: "tilled",
     plans: [{ crop: "corn" }, { crop: "soybeans" }],
   });
 
-  it("plants the CURRENT step on a field that has never grown anything", () => {
+  it("is the CURRENT step on a field that has never grown anything", () => {
     const field = twoStep();
-    // Same object reference as activePlan — that's how autoManageField knows
-    // this isn't a handoff and must not advance the sequence.
+    // Same object reference as activePlan — nothing to hand off from, so the
+    // plow that follows won't advance the sequence.
     expect(planToPlant(field)).toBe(activePlan(field));
     expect(planToPlant(field).crop).toBe("corn");
   });
 
-  it("plants the NEXT step once a crop has come off the field", () => {
+  it("is the NEXT step once a crop has come off the field", () => {
     const field = twoStep();
     field.lastCrop = "corn"; // set by applyHarvestDone
     expect(planToPlant(field).crop).toBe("soybeans");
     expect(planToPlant(field)).not.toBe(activePlan(field));
   });
 
-  it("plants the NEXT step while a crop is still standing", () => {
+  it("is the NEXT step while a crop is still standing", () => {
     const field = twoStep();
     field.crop = "corn";
     expect(planToPlant(field).crop).toBe("soybeans");
@@ -167,14 +168,14 @@ describe("auto-manage runs the field's rotation plan", () => {
     expect(field.crop).toBe("corn");
     expect(field.rotationIndex ?? 0).toBe(0);
 
-    // The next crop it plants is step 2's — soybeans — and starting that plant
-    // is what moves the pointer.
+    // The next crop it plants is step 2's — soybeans — the pointer having moved
+    // when the winter plow turned the ground over.
     runUntil(save, afterCorn, () => field.crop === "soybeans");
     expect(field.crop).toBe("soybeans");
     expect(field.rotationIndex).toBe(1);
   });
 
-  it("advances on PLANT START, not at harvest — residue work stays on the outgoing step", () => {
+  it("advances at the PLOW, not at harvest — residue work stays on the outgoing step", () => {
     const save = gameWithAgents();
     const field: Field = {
       id: "field-1", parcelId: "p", boundary, status: "tilled", autoManage: true,
@@ -184,33 +185,74 @@ describe("auto-manage runs the field's rotation plan", () => {
 
     runUntil(save, APRIL_1, () => field.crop === "corn");
     const afterHarvest = runUntil(save, APRIL_1, () => field.status === "harvested");
-    // Corn is off the field, but nothing new is in the ground yet — the
-    // pointer is still on corn, so corn's own bale/mulch/plow settings apply.
+    // Corn is off the field but the ground hasn't been turned yet — the pointer
+    // is still on corn, so corn's own bale/mulch settings still apply.
     expect(field.status).toBe("harvested");
     expect(field.rotationIndex ?? 0).toBe(0);
     expect(activePlan(field).crop).toBe("corn");
 
-    runUntil(save, afterHarvest, () => field.crop === "soybeans");
+    // Plowing is the handover: the moment the ground is turned, the next step
+    // becomes current — before anything is planted in it.
+    const afterPlow = runUntil(save, afterHarvest, () => field.status === "tilled");
     expect(field.rotationIndex).toBe(1);
+    expect(activePlan(field).crop).toBe("soybeans");
+    expect(field.crop).toBeUndefined(); // nothing planted yet
+
+    runUntil(save, afterPlow, () => field.crop === "soybeans");
+    expect(field.crop).toBe("soybeans");
   });
 
-  it("a canceled plant leaves the sequence where it was (advance is at start, not enqueue)", () => {
+  it("a hand-queued plow advances the rotation too — no auto-manage flag involved", () => {
     const save = gameWithAgents();
     const field: Field = {
-      id: "field-1", parcelId: "p", boundary, status: "tilled", autoManage: true,
+      id: "field-1", parcelId: "p", boundary, status: "harvested", autoManage: false,
       plans: [{ crop: "corn" }, { crop: "soybeans" }],
-      lastCrop: "corn", // pretend a crop already came off: next plant is a handoff
+      lastCrop: "corn", // corn already came off
+    };
+    save.fields.push(field);
+    expect(activePlan(field).crop).toBe("corn");
+
+    enqueueTask(save, field, "plow", WINTER_1);
+    runUntil(save, WINTER_1, () => field.status === "tilled");
+
+    expect(field.rotationIndex).toBe(1);
+    expect(activePlan(field).crop).toBe("soybeans");
+  });
+
+  it("a second plow before planting does NOT skip a step", () => {
+    const save = gameWithAgents();
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary, status: "harvested", autoManage: false,
+      plans: [{ crop: "corn" }, { crop: "soybeans" }, { crop: "wheat" }],
+      lastCrop: "corn",
     };
     save.fields.push(field);
 
-    // Queue the handoff plant without ever letting an agent pick it up.
-    autoManageAll(save, APRIL_1 + minutesPerMonth()); // May — soybeans' window
-    const plant = save.tasks.find((t) => t.type === "plant" && t.fieldId === field.id);
-    expect(plant?.advancesRotation).toBe(true);
-    expect(field.rotationIndex ?? 0).toBe(0); // not yet — it hasn't started
+    enqueueTask(save, field, "plow", WINTER_1);
+    const after = runUntil(save, WINTER_1, () => field.status === "tilled");
+    expect(activePlan(field).crop).toBe("soybeans");
 
-    cancelTask(save, plant!.id);
+    // Plow the same tilled ground again — the pointer has already moved past
+    // lastCrop, so there's nothing to advance.
+    field.status = "stubble";
+    enqueueTask(save, field, "plow", after);
+    runUntil(save, after, () => field.status === "tilled");
+    expect(activePlan(field).crop).toBe("soybeans"); // not wheat
+  });
+
+  it("a field's FIRST plow doesn't advance — there's no outgoing crop", () => {
+    const save = gameWithAgents();
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary, status: "stubble", autoManage: false,
+      plans: [{ crop: "corn" }, { crop: "soybeans" }],
+    };
+    save.fields.push(field);
+
+    enqueueTask(save, field, "plow", WINTER_1);
+    runUntil(save, WINTER_1, () => field.status === "tilled");
+
     expect(field.rotationIndex ?? 0).toBe(0);
+    expect(activePlan(field).crop).toBe("corn"); // still the first step
   });
 
   it("folds in weeding & fertilizing when the plan asks for them (once each)", () => {
