@@ -53,7 +53,10 @@ export const TASK_AGENT_KIND: Record<TaskType, Agent["kind"]> = {
   plow: "tractor",
   plant: "tractor",
   harvest: "harvester",
-  mow: "tractor", // perennial forage "harvest" — tractor + Mower, no combine
+  // Perennial forage "harvest" — tractor + Mower, no combine. A Self-Propelled
+  // Windrower can take it too (2026-07-24); this table holds the PRIMARY kind,
+  // and `agentCanDoTask` is the real gate.
+  mow: "tractor",
   mulch: "tractor", // optional post-harvest residue pass — tractor + Mulcher
   weed: "tractor",
   fertilize: "tractor",
@@ -74,14 +77,42 @@ export function initTaskIds(save: SaveState): void {
   }
 }
 
-/** Buyable power units. */
-export type EquipmentKind = "tractor" | "harvester";
+/** Buyable power units. The Self-Propelled Windrower (2026-07-24) is one:
+ * unlike a Mower it is not pulled by anything, it IS the machine. */
+export type EquipmentKind = "tractor" | "harvester" | "windrower";
+
+/**
+ * Can this machine take this kind of task?
+ *
+ * `TASK_AGENT_KIND` is a 1:1 map, which was true until the windrower arrived —
+ * mowing now has two answers (a tractor pulling a Mower, or a windrower on its
+ * own), so every "is this my kind of job" check goes through here instead of
+ * comparing against the table directly.
+ */
+export function agentCanDoTask(agent: Agent, type: TaskType): boolean {
+  if (agent.kind === "windrower") return type === "mow";
+  return TASK_AGENT_KIND[type] === agent.kind;
+}
+
+/** A windrower carries no implement — it IS the mower — so the implement
+ * checks (own one, hitch it, be the preferred rig for it) don't apply to it. */
+function needsImplementFor(agent: Agent, type: TaskType): ImplementKind | undefined {
+  if (agent.kind === "windrower") return undefined;
+  return TASK_IMPLEMENT[type];
+}
+
+/** An idle Self-Propelled Windrower, free to take a cut. Tractors stand down
+ * from mowing while one exists, so the specialist machine isn't left parked
+ * while a tractor ties itself up doing its job. */
+function freeWindrower(save: SaveState): Agent | undefined {
+  return save.agents.find((a) => a.kind === "windrower" && a.state === "idle" && !a.taskId);
+}
 /** Buyable implements: a plow (tills), a planter (seeds), a sprayer (weeds or
  * fertilizes), a Grain Trailer (hauls a full combine to a silo) — same widths/
  * requirements, a tractor hitches one at a time. */
 export type ImplementKind = "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower" | "mulcher" | "haySpikes" | "baleTrailer";
 
-const EQUIPMENT_NAME: Record<EquipmentKind, string> = { tractor: "Tractor", harvester: "Combine" };
+const EQUIPMENT_NAME: Record<EquipmentKind, string> = { tractor: "Tractor", harvester: "Combine", windrower: "Windrower" };
 const IMPLEMENT_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake", bailer: "Baler",
   grainTrailer: "Grain Trailer", mower: "Mower", mulcher: "Mulcher", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
@@ -109,7 +140,14 @@ export const TASK_IMPLEMENT: Partial<Record<TaskType, ImplementKind>> = {
 
 /** Price of a power unit at a given size. */
 export function agentPrice(kind: EquipmentKind, size: EquipmentSize): number {
+  // The windrower is sold in one size only, so its price ignores `size`.
+  if (kind === "windrower") return gameConfig.equipment.windrower.price;
   return kind === "harvester" ? gameConfig.equipment.harvester[size].price : gameConfig.equipment.tractor[size].price;
+}
+
+/** Cutting width (meters) of the Self-Propelled Windrower. */
+export function windrowerWidthM(): number {
+  return gameConfig.equipment.windrower.widthFt * FEET_TO_METERS;
 }
 
 /** Grain hopper capacity of a combine at `size`, tons (maintainer request, 2026-07-12). */
@@ -239,7 +277,8 @@ function makeAgent(save: SaveState, kind: EquipmentKind, size: EquipmentSize, po
   let n = 1;
   while (save.agents.some((a) => a.id === `${kind}-${n}`)) n++;
   // Unique display name within the fleet ("Tractor - Medium", "Tractor - Medium 2"…).
-  const base = `${EQUIPMENT_NAME[kind]} - ${SIZE_LABEL[size]}`;
+  // The windrower is sold in one size, so a size suffix would be noise.
+  const base = kind === "windrower" ? EQUIPMENT_NAME[kind] : `${EQUIPMENT_NAME[kind]} - ${SIZE_LABEL[size]}`;
   return {
     id: `${kind}-${n}`,
     kind,
@@ -307,7 +346,7 @@ export function sellAgent(save: SaveState, agentId: string): { agent: Agent; ref
     throw new Error(`${agent.name} still has ${(agent.grainOnboard ?? 0).toFixed(1)}t of grain onboard — get it unloaded first`);
   }
   const lastOfKind = !save.agents.some((a) => a.id !== agentId && a.kind === agent.kind);
-  const kindHasWork = save.tasks.some((t) => TASK_AGENT_KIND[t.type] === agent.kind);
+  const kindHasWork = save.tasks.some((t) => agentCanDoTask(agent, t.type));
   if (lastOfKind && kindHasWork) {
     throw new Error(`Jobs are waiting for your only ${EQUIPMENT_NAME[agent.kind as EquipmentKind]?.toLowerCase() ?? agent.kind} — cancel them first`);
   }
@@ -873,6 +912,8 @@ const haulTargetRuntime = new Map<string, Meters>();
  * planter), or the config combine header width for harvest. */
 function taskSwathMeters(save: SaveState, task: FarmTask, agent: Agent): number {
   if (task.type === "harvest") return gameConfig.equipment.harvester[agent.size ?? "medium"].widthFt * FEET_TO_METERS;
+  // A windrower's cut is its own width — it carries no implement to read one from.
+  if (agent.kind === "windrower") return windrowerWidthM();
   const kind = TASK_IMPLEMENT[task.type]!;
   const impl = attachedImplement(save, agent.id, kind);
   return impl ? implementWidthM(impl) : IMPLEMENT_CONFIG[kind].medium.widthFt * FEET_TO_METERS;
@@ -1762,8 +1803,12 @@ function tickAgent(
       const next = save.tasks.find(
         (t) =>
           t.status === "queued" &&
-          TASK_AGENT_KIND[t.type] === agent.kind &&
-          (!TASK_IMPLEMENT[t.type] || tractorCanUse(save, agent, TASK_IMPLEMENT[t.type]!)) &&
+          agentCanDoTask(agent, t.type) &&
+          // A free windrower gets first refusal on a cut: it can do nothing
+          // else, so letting a tractor take the job would park the specialist
+          // and tie up a machine that had other options.
+          (t.type !== "mow" || agent.kind === "windrower" || !freeWindrower(save)) &&
+          (!needsImplementFor(agent, t.type) || tractorCanUse(save, agent, needsImplementFor(agent, t.type)!)) &&
           // A sell run's trailer depends on WHAT it's hauling, so it isn't in
           // TASK_IMPLEMENT — check the product's kind directly instead.
           (t.type !== "sell" || tractorCanUse(save, agent, sellTrailerKind(t.sellProduct!))) &&
@@ -1774,8 +1819,8 @@ function tickAgent(
           // elsewhere first, whoever's best next simply picks the job up.
           // No preferred rig at all (no implement of the kind exists, or the
           // task needs none) falls back to the old any-capable-agent rule.
-          (!TASK_IMPLEMENT[t.type] ||
-            (preferredTractorFor(save, TASK_IMPLEMENT[t.type]!)?.id ?? agent.id) === agent.id) &&
+          (!needsImplementFor(agent, t.type) ||
+            (preferredTractorFor(save, needsImplementFor(agent, t.type)!)?.id ?? agent.id) === agent.id) &&
           // unloadHarvester's fieldId is display-only (may be a legacy/
           // unknown "" for a recovered leftover hopper), and a sell run's is
           // empty outright (a sale spans the farm) — neither needs the field
@@ -1808,7 +1853,7 @@ function tickAgent(
       // Auto-hitch the needed implement if the tractor isn't already carrying
       // it — swapping off whatever else it's carrying (one implement at a time).
       // A sell run's trailer is product-dependent, so it isn't in the table.
-      const needKind = next.type === "sell" ? sellTrailerKind(next.sellProduct!) : TASK_IMPLEMENT[next.type];
+      const needKind = next.type === "sell" ? sellTrailerKind(next.sellProduct!) : needsImplementFor(agent, next.type);
       if (needKind && !attachedImplement(save, agent.id, needKind)) {
         const impl = availableImplementFor(save, agent, needKind);
         if (impl) {
@@ -3083,11 +3128,20 @@ export function blockedWork(save: SaveState): BlockedWork[] {
     if (task.status !== "queued") continue;
     const kind = TASK_IMPLEMENT[task.type];
     const needed = TASK_AGENT_KIND[task.type];
-    const haveMachine = save.agents.some((a) => a.kind === needed);
-    if (!haveMachine) {
-      out.push({ fieldId: task.fieldId, type: task.type, reason: `No ${needed === "harvester" ? "combine" : needed} owned` });
+    // `agentCanDoTask`, not a bare kind comparison: a cut counts as covered by
+    // a windrower as well as by a tractor (2026-07-24).
+    if (!save.agents.some((a) => agentCanDoTask(a, task.type))) {
+      const what = needed === "harvester" ? "combine" : needed;
+      out.push({
+        fieldId: task.fieldId, type: task.type,
+        reason: task.type === "mow" ? "No tractor or windrower owned" : `No ${what} owned`,
+      });
       continue;
     }
+    // A cut is covered by a Self-Propelled Windrower whether or not the farm
+    // owns a Mower — the windrower needs no implement at all, so neither the
+    // "own one" nor the "big enough tractor" check below applies to it.
+    if (task.type === "mow" && save.agents.some((a) => a.kind === "windrower")) continue;
     if (kind && !save.implements.some((i) => i.kind === kind)) {
       out.push({ fieldId: task.fieldId, type: task.type, reason: `No ${IMPLEMENT_NAME[kind]} owned` });
       continue;

@@ -436,7 +436,7 @@ function repaintGrowthStages(now: number, alreadyPainted: { id: string }[]) {
 // fallback; every rendered UI icon (map dots, queue rows, equipment panel) uses
 // the SVGs below instead — a classic big-tractor/combine silhouette in the
 // game's own cozy palette, not a real manufacturer's colors/logo.
-const AGENT_EMOJI: Record<string, string> = { tractor: "🚜", harvester: "🌾" };
+const AGENT_EMOJI: Record<string, string> = { tractor: "🚜", harvester: "🌾", windrower: "🌿" };
 
 /** "Minor" implements (maintainer request, 2026-07-21): small enough
  * (hay spikes bolt straight to the loader, no separate silhouette worth
@@ -2587,6 +2587,21 @@ function buildEquipShop(): void {
     },
   }])));
 
+  // Self-Propelled Windrower: a machine, not an implement — it cuts hay with no
+  // tractor tied up. One size, so it occupies the Large column alone rather
+  // than pretending to a range it doesn't have.
+  line("Windrower", machineIconHtml("windrower", "large", 78), {
+    large: {
+      spec: `${gameConfig.equipment.windrower.widthFt} ft · self-propelled, no tractor`,
+      price: agentPrice("windrower", "large"),
+      onBuy: () => {
+        const a = buyAgent(save, "windrower", "large", spawnPos());
+        afterFleetChange();
+        toast(`Bought ${a.name} — parked at the yard`);
+      },
+    },
+  });
+
   section("Implements");
   const widthSpec = (kind: "plow" | "planter" | "sprayer", s: EquipmentSize) =>
     `${gameConfig.equipment[kind][s].widthFt} ft working width`;
@@ -2601,8 +2616,8 @@ function buildEquipShop(): void {
   line("Sprayer", sprayerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${widthSpec("sprayer", s)} boom`, price: implementPrice("sprayer", s), onBuy: buyImpl("sprayer", s),
   }])));
-  // Mower: cuts perennial forage (grass/alfalfa) — Small (10 ft) & Medium (20 ft).
-  line("Mower", mowerIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
+  // Mower: cuts perennial forage (grass/alfalfa) — three sizes as of 2026-07-24.
+  line("Mower", mowerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${gameConfig.equipment.mower[s].widthFt} ft · cuts hay`, price: implementPrice("mower", s), onBuy: buyImpl("mower", s),
   }])));
   // Mulcher: optional post-harvest residue pass on annuals — all three sizes.

@@ -201,13 +201,22 @@ export interface GameConfig {
     bailer: Record<EquipmentSize, { price: number; widthFt: number }>;
     /** Mower implement (2026-07-13): CUTS a perennial forage field (grass/
      * alfalfa) — the "harvest" for those crops, in place of the combine. Leaves
-     * cut material to rake + bale. Sold Small (10 ft) & Medium (20 ft). */
+     * cut material to rake + bale. Three real sizes as of 2026-07-24
+     * (15 / 25 / 50 ft); it used to be Small 10 / Medium 20 with Large a
+     * duplicate placeholder. */
     mower: Record<EquipmentSize, { price: number; widthFt: number }>;
     /** Mulcher implement (2026-07-21): a flail/stalk shredder that chops annual
      * crop residue and works it back into the surface — an OPTIONAL post-harvest
      * pass that returns the field to stubble and boosts the next crop's yield.
      * Sold in three real sizes: Small 15 ft, Medium 25 ft, Large 35 ft. */
     mulcher: Record<EquipmentSize, { price: number; widthFt: number }>;
+    /** Self-Propelled Windrower (maintainer request, 2026-07-24): a MACHINE,
+     * not an implement — it drives itself, so it cuts a hay field with no
+     * tractor tied up at all. That's the whole trade: it costs about as much as
+     * a tractor plus a big mower, and in exchange your tractors stay free
+     * through hay season. One size only (40 ft), so unlike every other machine
+     * this isn't keyed by `EquipmentSize`. */
+    windrower: { price: number; widthFt: number };
     /** The combine is self-contained (integral grain header) but now SIZED
      * like a tractor (maintainer request, 2026-07-12): each tier has its own
      * hopper capacity — the combine fills as it cuts, stops when full, and
@@ -612,12 +621,11 @@ export const gameConfig: GameConfig = {
       medium: { price: 130_000, widthFt: 25 },
       large: { price: 130_000, widthFt: 25 },
     },
-    // Mower: Small (10 ft) & Medium (20 ft) sold; the large slot mirrors medium
-    // so the record type-checks like the others but is never offered.
+    // Mower — three real sizes, all sold (maintainer spec, 2026-07-24).
     mower: {
-      small: { price: 45_000, widthFt: 10 },
-      medium: { price: 85_000, widthFt: 20 },
-      large: { price: 85_000, widthFt: 20 },
+      small: { price: 35_000, widthFt: 15 },
+      medium: { price: 70_000, widthFt: 25 },
+      large: { price: 130_000, widthFt: 50 },
     },
     // Mulcher — three real sizes, all sold (maintainer pricing, 2026-07-21).
     mulcher: {
@@ -625,6 +633,10 @@ export const gameConfig: GameConfig = {
       medium: { price: 40_000, widthFt: 25 },
       large: { price: 75_000, widthFt: 35 },
     },
+    // Self-propelled windrower — one 40 ft machine. Priced against a Large
+    // mower ($130k) plus the Medium tractor ($250k) it frees up, less a bit:
+    // buying one should be tempting, not obvious.
+    windrower: { price: 320_000, widthFt: 40 },
     harvester: {
       small: { price: 350_000, widthFt: 20, capacityTons: 30 },
       medium: { price: 450_000, widthFt: 30, capacityTons: 50 },

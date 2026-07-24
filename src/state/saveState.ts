@@ -234,7 +234,10 @@ export type AgentState = "idle" | "traveling" | "working";
 
 export interface Agent {
   id: string;
-  kind: "player" | "worker" | "tractor" | "harvester" | "truck";
+  /** "windrower" (2026-07-24) is the Self-Propelled Windrower: a machine that
+   * mows hay on its own, with no tractor and no implement. Older saves never
+   * contain one, so no migration is needed — it can only arrive by purchase. */
+  kind: "player" | "worker" | "tractor" | "harvester" | "windrower" | "truck";
   /** Display name for the queue panel / map label ("Tractor", "Combine"). */
   name: string;
   pos: Meters;

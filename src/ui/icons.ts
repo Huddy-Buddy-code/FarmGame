@@ -312,6 +312,9 @@ export function baleTrailerIconSvg(size = 22): string {
 export const MACHINE_ICON: Record<string, (size?: number) => string> = {
   tractor: tractorIconSvg,
   harvester: combineIconSvg,
+  // The Self-Propelled Windrower (2026-07-24) has no sprite art yet, and it IS
+  // a mower, so it borrows the mower glyph until one is drawn.
+  windrower: mowerIconSvg,
 };
 
 /** Implements, by implement kind. */
