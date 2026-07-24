@@ -39,11 +39,23 @@ function rangeWrapped(fromIncl: number, toIncl: number): number[] {
   return out;
 }
 
-/** Inclusive month range, CLAMPED (not wrapped) at December — harvest's delay
- * window must not cross into the next rotation-plan slot's year. */
-function rangeClamped(fromIncl: number, toIncl: number): number[] {
+/**
+ * Inclusive month range measured in ABSOLUTE months from planting, wrapped into
+ * 0-11 and capped at `maxSpanMonths` so a delay window can't lap the calendar.
+ *
+ * This replaced a December CLAMP (2026-07-23). The clamp existed because a
+ * rotation plan was one campaign YEAR, so nothing was allowed to cross Jan 1 —
+ * but it silently produced EMPTY legal sets for any crop whose cycle ends after
+ * December. Winter Wheat plants in month 8 (Sep) and grows 9 months, so harvest
+ * asked for `rangeClamped(17, 11)` = nothing at all, and the Schedule tab drew
+ * blank Harvest, Mulch, and Rake/Bale rows (maintainer report + screenshot).
+ * Now that the rotation is a sequence rather than a per-year slot, a step is
+ * free to span the year boundary and the wrap is simply correct.
+ */
+function rangeWrappedCapped(fromIncl: number, toIncl: number, maxSpanMonths = MONTHS_PER_YEAR - 1): number[] {
   const out: number[] = [];
-  for (let m = fromIncl; m <= toIncl && m <= 11; m++) out.push(m);
+  const end = Math.min(toIncl, fromIncl + maxSpanMonths);
+  for (let m = fromIncl; m <= end; m++) out.push(monthMod(m));
   return out;
 }
 
@@ -58,11 +70,17 @@ export function legalMonthsFor(type: ScheduleTaskType, crop: CropId, plantMonth?
   const span = gameConfig.crops[crop].growMonths;
   if (type === "weed") return rangeWrapped(plantMonth + 2, plantMonth + span - 1);
   if (type === "fertilize") return rangeWrapped(plantMonth + 1, plantMonth + span - 1);
-  if (type === "harvest") return rangeClamped(plantMonth + span, 11);
-  // Mulch: the month(s) after the natural harvest (plant+grow), up to Nov —
-  // the last month before the winter plow window (plowMonths = Dec–Feb) opens.
-  // An annual residue pass only; empty for a late crop with no gap before winter.
-  if (type === "mulch") return rangeClamped(plantMonth + span + 1, 10);
+  // Harvest is DELAY-ONLY: from the natural ready month (plant+grow) forward,
+  // bounded so holding a crop in the field can't run into the next step's own
+  // planting. The bound is wide enough to reach the December price peak from
+  // any realistic ready month.
+  if (type === "harvest") {
+    return rangeWrappedCapped(plantMonth + span, plantMonth + span + gameConfig.schedule.harvestDelayMaxMonths);
+  }
+  // Mulch: the months following the natural harvest. An annual residue pass.
+  if (type === "mulch") {
+    return rangeWrappedCapped(plantMonth + span + 1, plantMonth + span + gameConfig.schedule.mulchWindowMonths);
+  }
   return [];
 }
 

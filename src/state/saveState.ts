@@ -37,10 +37,18 @@ export interface Parcel {
   owned: boolean;
 }
 
-/** One year of a field's rotation plan (maintainer design, 2026-07-12). Picks the
- * crop for that campaign year and toggles which optional operations to fold into
- * the auto-managed lifecycle; the game schedules each at its natural window. The
- * mandatory cycle (plow → plant → harvest) is always run. */
+/** One STEP of a field's rotation sequence (maintainer redesign, 2026-07-23 —
+ * was one plan per campaign YEAR, 2026-07-12). Picks the crop for that step and
+ * toggles which optional operations to fold into the auto-managed lifecycle;
+ * the game schedules each at its natural window. The mandatory cycle (plow →
+ * plant → harvest) is always run.
+ *
+ * The sequence is ordered Current → Next → Next…, advancing when the NEXT
+ * step's plant task starts (`Field.rotationIndex`) rather than on Jan 1. That's
+ * what makes double-cropping and cover crops expressible: a step whose crop
+ * comes off in June can hand straight to a step that plants in July, inside one
+ * calendar year — and a step that overwinters (Winter Wheat, Sep→Jun) can span
+ * two of them without the sequence losing its place. */
 export interface FieldPlan {
   crop: CropId;
   /** Fold a weeding pass in (once, when the weeding window opens). */
@@ -89,10 +97,21 @@ export interface Field {
   /** Idle-game mode (brief §7-adjacent, player-requested): when true, the field
    * runs itself against its rotation `plans`, looping year to year. */
   autoManage?: boolean;
-  /** Rotation plans, one per campaign year (1–5). The active plan advances each
-   * campaign year (Jan 1) and loops after the last — `plans[(year-1) % len]`.
-   * Empty/undefined while auto-managing falls back to a single default plan. */
+  /** The rotation SEQUENCE (1–5 steps), ordered Current → Next → Next…, looping
+   * after the last. Which step is current is `rotationIndex`, NOT the campaign
+   * year (changed 2026-07-23 — see `FieldPlan`). Empty/undefined while
+   * auto-managing falls back to a single default plan. */
   plans?: FieldPlan[];
+  /** Index into `plans` of the step running right now. Advanced (mod length)
+   * when the NEXT step's plant task starts, so post-harvest work — bale, mulch,
+   * plow — still belongs to the crop that produced the residue. Migrated on
+   * load for saves written before the sequence rework: `(year - 1) % len`,
+   * which is exactly where the old per-campaign-year rule had left off. */
+  rotationIndex?: number;
+  /** Player-chosen name for this field's rotation ("Corn/Bean 2yr", "Wheat +
+   * cover"). Display only — carried along by the Schedule tab's Copy/Paste so a
+   * pasted rotation arrives recognizable. */
+  rotationName?: string;
   /** Per-season guards so an auto-managed weeding/fertilizing pass runs ONCE per
    * crop (reset when a new crop is planted). */
   autoWeedDone?: boolean;
@@ -267,6 +286,14 @@ export interface FarmTask {
   fieldId: string;
   /** Which crop to put in (plant tasks only). */
   crop?: CropId;
+  /** Plant-tasks only: this planting is the rotation handing off to its NEXT
+   * step, so starting it should advance `Field.rotationIndex` (2026-07-23).
+   * Set by `autoManageField` when it queues the upcoming step's crop; NOT set
+   * for a field's first-ever planting (that one plants the step already
+   * current) or for a manual plant from the View tab. Carried on the task
+   * rather than inferred at pickup so canceling a queued plant can't leave the
+   * sequence advanced with nothing in the ground. */
+  advancesRotation?: boolean;
   totalAcres: number;
   /** Acres worked so far (progress = doneAcres / totalAcres). */
   doneAcres: number;

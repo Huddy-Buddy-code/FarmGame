@@ -62,12 +62,14 @@ describe("mulch yield bonus (+7%, additive) via productivityMultiplier", () => {
   });
 });
 
-describe("legalMonthsFor mulch — the gap after harvest, before winter plowing", () => {
-  it("corn planted April (harvest Aug): Sep/Oct/Nov, capped before the Dec plow window", () => {
+describe("legalMonthsFor mulch — the months following harvest", () => {
+  it("corn planted April (harvest Aug): Sep/Oct/Nov", () => {
     expect(legalMonthsFor("mulch", "corn", 3)).toEqual([8, 9, 10]);
   });
-  it("empty when a late crop leaves no month before winter", () => {
-    expect(legalMonthsFor("mulch", "corn", 6)).toEqual([]); // 6+4+1 = 11 > 10
+  it("wraps past December for a late crop instead of coming back empty", () => {
+    // Corn planted month 6 -> harvest month 10 (Nov) -> mulch Dec/Jan/Feb.
+    // The old December clamp returned [] here, silently disabling the row.
+    expect(legalMonthsFor("mulch", "corn", 6)).toEqual([11, 0, 1]);
   });
   it("empty for a perennial (its residue is never mulched)", () => {
     expect(legalMonthsFor("mulch", "grass", 3)).toEqual([]);

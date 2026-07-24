@@ -285,6 +285,18 @@ export interface GameConfig {
     seasonalBonusByDistance: Record<number, number>;
   };
 
+  /** Field Schedule tab windows (`sim/schedule.ts`). How far a player may shift
+   * an auto-managed step from its natural month — balance, because a longer
+   * harvest delay is a stronger price-timing tool. */
+  schedule: {
+    /** Months past the natural ready month a harvest may be delayed to. Wide
+     * enough to reach the December price peak from any realistic ready month
+     * (Winter Wheat is ready in June — the furthest out any crop starts). */
+    harvestDelayMaxMonths: number;
+    /** How many months after harvest the optional mulch pass stays legal. */
+    mulchWindowMonths: number;
+  };
+
   /** Loans (brief §8, "loan interest, the difficulty dial"). v1 is simple: one
    * fixed-rate, fixed-term amortized loan per campaign YEAR the player
    * borrows in (maintainer design, 2026-07-11) — see `sim/finance.ts`. */
@@ -623,6 +635,10 @@ export const gameConfig: GameConfig = {
     // Dec +25%, Nov/Jan +15%, Oct/Feb +10%, everything else base.
     peakMonth: 11, // December
     seasonalBonusByDistance: { 0: 0.25, 1: 0.15, 2: 0.1 },
+  },
+  schedule: {
+    harvestDelayMaxMonths: 6, // June-ready Winter Wheat can still reach the Dec peak
+    mulchWindowMonths: 3,
   },
   loan: {
     ratePercent: 5,

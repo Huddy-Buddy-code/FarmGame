@@ -1426,6 +1426,14 @@ function tickAgent(
       next.agentId = agent.id;
       agent.taskId = next.id;
       agent.state = "traveling";
+      // Starting the next step's planting is what advances the rotation
+      // (maintainer spec, 2026-07-23: "when a new crop starts the planting
+      // task, it becomes the current crop"). Doing it here rather than at
+      // enqueue means a canceled plant never strands the sequence a step ahead.
+      if (next.type === "plant" && next.advancesRotation) {
+        const f = save.fields.find((ff) => ff.id === next.fieldId);
+        if (f) advanceRotation(f);
+      }
       // Picking up a rake windrows the field — this unlocks the baler right away
       // (it may start before the rake finishes), and survives the rake finishing.
       if (next.type === "rake") {
@@ -2381,12 +2389,51 @@ export function defaultPlan(): FieldPlan {
   return { crop: defaultCrop(), bale: true };
 }
 
-/** The rotation plan active for `field` at `now`: `plans[(year-1) % len]`, since
- * plans advance one per campaign year and loop after the last (maintainer design,
- * 2026-07-12). Falls back to a single default plan when none are set. */
-export function activePlan(field: Field, now: SimTime): FieldPlan {
+/** The rotation step currently running on `field`: `plans[rotationIndex % len]`
+ * (maintainer redesign, 2026-07-23 — was keyed to the campaign year). Falls back
+ * to a single default plan when none are set. `now` is no longer read, but is
+ * kept in the signature: every call site has it, and a future step-level "how
+ * long has this been current" rule would want it back. */
+export function activePlan(field: Field, _now?: SimTime): FieldPlan {
   const plans = field.plans && field.plans.length > 0 ? field.plans : [defaultPlan()];
-  return plans[(dateOf(now).year - 1) % plans.length]!;
+  return plans[rotationStep(field, plans.length)]!;
+}
+
+/** The NEXT step in the sequence — what auto-manage plants once the current
+ * crop is off the field. Wraps to the start after the last step. */
+export function nextPlan(field: Field): FieldPlan {
+  const plans = field.plans && field.plans.length > 0 ? field.plans : [defaultPlan()];
+  return plans[(rotationStep(field, plans.length) + 1) % plans.length]!;
+}
+
+/** `field.rotationIndex` normalized into a valid index for a `len`-step
+ * sequence — tolerates an unset index (legacy saves migrate in main.ts, but a
+ * field built in a test or trimmed to fewer steps must not read out of range). */
+function rotationStep(field: Field, len: number): number {
+  return ((field.rotationIndex ?? 0) % len + len) % len;
+}
+
+/** Move the sequence on by one step. Called the moment the next step's PLANT
+ * task starts (see the task-pickup branch in `tickAgent`) — not at harvest, so
+ * the outgoing crop keeps ownership of its own residue work (bale/mulch/plow). */
+export function advanceRotation(field: Field): void {
+  const len = field.plans?.length ?? 1;
+  field.rotationIndex = (rotationStep(field, len) + 1) % len;
+}
+
+/**
+ * Which step's crop auto-manage should put in the ground next.
+ *
+ * Normally the NEXT step — the current one is what's standing (or what just
+ * came off). The exception is a field that has never grown anything: there's
+ * no outgoing crop to hand off from, so its first planting is the step already
+ * current, and the sequence does NOT advance for it. Returns the identical
+ * object reference as `activePlan` in that case, which is how callers tell the
+ * two situations apart.
+ */
+export function planToPlant(field: Field): FieldPlan {
+  const virgin = field.crop === undefined && field.lastCrop === undefined;
+  return virgin ? activePlan(field) : nextPlan(field);
 }
 
 /** Field Schedule tab (2026-07-21): does the current month satisfy this
@@ -2407,7 +2454,16 @@ function monthMatches(now: SimTime, override: number | undefined): boolean {
  * afford it, out of season) are silently retried next tick.
  */
 export function autoManageField(save: SaveState, field: Field, now: SimTime): void {
-  const plan = activePlan(field, now);
+  // TWO steps are in play at once (sequence rework, 2026-07-23):
+  //   `plan`     — the step running now. Owns the standing crop and everything
+  //                downstream of it: weed, fertilize, harvest, mulch, rake/bale.
+  //   `upcoming` — the step about to go in the ground. Owns the ground prep for
+  //                its own crop: plow and plant.
+  // That split is what makes residue work belong to the crop that produced it
+  // while the next crop's plow/plant timing comes from its own schedule row.
+  const plan = activePlan(field);
+  const upcoming = planToPlant(field);
+  const handoff = upcoming !== plan; // false only on a field's first-ever planting
 
   // Optional side-tasks first — independent of the lifecycle, once per crop.
   // A schedule override just narrows WHICH month within the open window
@@ -2438,22 +2494,26 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
   // Perennial forage (grass/alfalfa): plow, establish once, then cut → rake →
   // bale each cutting window — never replanted after that. Fertilize was
   // already handled above (canFertilizeNow's perennial branch = its April window).
-  if (isPerennial(plan.crop) || isPerennial(field.crop)) {
+  // A standing perennial stand keeps this branch for as long as it lives; a
+  // BARE field only enters it when the step about to be planted is perennial.
+  if (isPerennial(field.crop) || (!field.crop && isPerennial(upcoming.crop))) {
     if (!field.crop) {
       // Ground needs plowing first, same as an annual crop (maintainer
-      // request, 2026-07-16) — still waits for the winter plow window.
+      // request, 2026-07-16) — still waits for the winter plow window. Plow and
+      // plant both read the UPCOMING step's schedule: they're prep for its crop.
       if (canPlow(field.status)) {
-        if (inPlowWindow(now) && monthMatches(now, plan.schedule?.plow)) {
+        if (inPlowWindow(now) && monthMatches(now, upcoming.schedule?.plow)) {
           try {
             enqueueTask(save, field, "plow", now);
           } catch {
             /* unaffordable — retry next tick */
           }
         }
-      } else if (monthMatches(now, plan.schedule?.plant)) {
+      } else if (monthMatches(now, upcoming.schedule?.plant)) {
         // Tilled — establish the stand in its (March) planting window.
         try {
-          enqueueTask(save, field, "plant", now, plan.crop);
+          const t = enqueueTask(save, field, "plant", now, upcoming.crop);
+          if (handoff) t.advancesRotation = true;
         } catch {
           /* out of the plant window / unaffordable — retry next tick */
         }
@@ -2494,8 +2554,9 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
     case "stubble":
     case "mulched":
       // Auto-manage (unlike the manual Queue Plow button) still waits for
-      // winter — enqueueTask itself no longer season-gates plowing.
-      if (inPlowWindow(now) && monthMatches(now, plan.schedule?.plow)) {
+      // winter — enqueueTask itself no longer season-gates plowing. The plow
+      // is ground prep for the UPCOMING crop, so it reads that step's schedule.
+      if (inPlowWindow(now) && monthMatches(now, upcoming.schedule?.plow)) {
         try {
           enqueueTask(save, field, "plow", now);
         } catch {
@@ -2536,7 +2597,7 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
         } catch {
           /* no mulcher / unaffordable — retry next tick */
         }
-      } else if (inPlowWindow(now) && monthMatches(now, plan.schedule?.plow)) {
+      } else if (inPlowWindow(now) && monthMatches(now, upcoming.schedule?.plow)) {
         // Plow under — discard any un-baled forage so the plow isn't gated on it
         // (the plan opted out of baling, or there's no gear for it). Still
         // waits for winter, same as the stubble/mulched case above.
@@ -2549,9 +2610,13 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       }
       break;
     case "tilled":
-      if (monthMatches(now, plan.schedule?.plant)) {
+      // Plant the UPCOMING step's crop, on its own schedule row. Starting the
+      // task is what makes it "current" (`advancesRotation`) — queueing it
+      // isn't, so a canceled plant leaves the sequence exactly where it was.
+      if (monthMatches(now, upcoming.schedule?.plant)) {
         try {
-          enqueueTask(save, field, "plant", now, plan.crop);
+          const t = enqueueTask(save, field, "plant", now, upcoming.crop);
+          if (handoff) t.advancesRotation = true;
         } catch {
           /* window closed or unaffordable — retry next tick */
         }

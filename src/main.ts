@@ -123,6 +123,19 @@ if (loaded) {
   for (const c of Object.keys(gameConfig.crops) as CropId[]) save.grain[c] ??= 0;
   save.completedTasks ??= [];
   save.fieldLedger ??= {};
+  // Rotation-sequence rework (2026-07-23): `plans` used to be indexed by
+  // campaign year (`plans[(year-1) % len]`) and is now an explicit sequence
+  // pointer. Seed the pointer at whatever the year-based rule would have
+  // selected right now, so a mid-campaign save resumes on the same crop
+  // instead of jumping back to the start of its rotation.
+  {
+    const campaignYear = dateOf(loaded.clockNow).year;
+    for (const f of save.fields) {
+      if (f.rotationIndex === undefined && f.plans && f.plans.length > 0) {
+        f.rotationIndex = (campaignYear - 1) % f.plans.length;
+      }
+    }
+  }
   initBuildingIdCounters(save);
   // Pre-finance saves: start the open borrowing year at whatever campaign
   // year the save was loaded at (tickLoans self-corrects instantly either
@@ -3432,12 +3445,22 @@ function editPlans(): void {
   refreshFieldPanel(true);
 }
 
-/** Render the field's rotation plans into #fp-plans — one row per campaign year,
- * each with a crop and the optional-operation toggles. Own change-detection so
- * its dropdowns aren't rebuilt under the cursor on every tick. */
-function refreshPlanEditor(field: Field, now: number, auto: boolean): void {
+/** Which rotation STEP a field is on, normalized for display. Mirrors the
+ * sim's own `rotationStep` (sim/tasks.ts) — the rotation stopped being keyed to
+ * the campaign year on 2026-07-23, so the UI reads the pointer, not the clock. */
+function activeRotationIdx(field: Field): number {
+  const len = field.plans?.length ?? 1;
+  return ((field.rotationIndex ?? 0) % len + len) % len;
+}
+
+/** Render the field's rotation sequence into #fp-plans — one row per step, each
+ * with a crop. Own change-detection so its dropdowns aren't rebuilt under the
+ * cursor on every tick. */
+function refreshPlanEditor(field: Field, auto: boolean): void {
   const container = $("fp-plans");
-  const key = [field.id, auto ? 1 : 0, dateOf(now).year, JSON.stringify(field.plans ?? [])].join("|");
+  // Keyed on the rotation POINTER, not the campaign year — the year no longer
+  // selects the active step, so a year turn is not a reason to rebuild.
+  const key = [field.id, auto ? 1 : 0, activeRotationIdx(field), JSON.stringify(field.plans ?? [])].join("|");
   if (key === lastPlansKey) return;
   lastPlansKey = key;
   container.innerHTML = "";
@@ -3449,13 +3472,13 @@ function refreshPlanEditor(field: Field, now: number, auto: boolean): void {
   const perennialField = isPerennial(field.plans[0]!.crop);
   if (perennialField && field.plans.length > 1) field.plans.length = 1;
   const plans = field.plans;
-  const activeIdx = (dateOf(now).year - 1) % plans.length;
+  const activeIdx = activeRotationIdx(field);
 
   container.insertAdjacentHTML(
     "beforeend",
     perennialField
       ? `<div class="plan-hint">Perennial stand — one plan, cut every year (no rotation).</div>`
-      : `<div class="plan-hint">Rotation — one plan per year, loops after Yr ${plans.length}. Running Yr ${activeIdx + 1} now.</div>`,
+      : `<div class="plan-hint">Rotation — ${plans.length} step${plans.length === 1 ? "" : "s"}, looping. Step ${activeIdx + 1} is current.</div>`,
   );
 
   // The weed/fertilize/bale toggles used to live here as per-row buttons; they
@@ -3909,16 +3932,17 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
   }
 }
 
-/** Field Schedule tab: the Auto-manage switch + the rotation-plan editor
- * (crop per year, weed/fertilize/bale toggles) + a monthly drag-drop calendar
- * of the active/viewed rotation year's task months. */
-function refreshFieldScheduleTab(field: Field, now: number, _force: boolean): void {
+/** Field Schedule tab: the Auto-manage switch + the rotation-sequence editor +
+ * a monthly drag-drop calendar of the viewed step's task months. `_now` is unused
+ * since the rotation stopped being keyed to the campaign year (2026-07-23), but
+ * stays for signature parity with the other per-tab refreshers. */
+function refreshFieldScheduleTab(field: Field, _now: number, _force: boolean): void {
   const auto = !!field.autoManage;
   ($("fp-auto") as HTMLInputElement).checked = auto;
   // refreshPlanEditor has its own change-detection (lastPlansKey) so its
   // dropdowns aren't rebuilt under the cursor on every tick.
-  refreshPlanEditor(field, now, auto);
-  refreshScheduleCalendar(field, now, auto);
+  refreshPlanEditor(field, auto);
+  refreshScheduleCalendar(field, auto);
 }
 
 // --- Field Schedule calendar (maintainer request, 2026-07-21; rotated to a
@@ -3964,7 +3988,7 @@ interface ScheduleColumn {
 }
 
 let lastScheduleCalKey = "";
-function refreshScheduleCalendar(field: Field, now: number, auto: boolean): void {
+function refreshScheduleCalendar(field: Field, auto: boolean): void {
   const yearBar = $("fp-schedule-year");
   const host = $("fp-schedule-grid");
   const msg = $("fp-schedule-msg");
@@ -3980,7 +4004,7 @@ function refreshScheduleCalendar(field: Field, now: number, auto: boolean): void
   if (!field.plans || field.plans.length === 0) field.plans = [defaultPlan()];
   const plans = field.plans;
   const perennialField = isPerennial(plans[0]!.crop);
-  const activeIdx = (dateOf(now).year - 1) % plans.length;
+  const activeIdx = activeRotationIdx(field);
 
   if (scheduleViewFieldId !== field.id) {
     scheduleViewFieldId = field.id;

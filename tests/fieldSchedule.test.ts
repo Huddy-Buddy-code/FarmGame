@@ -46,11 +46,25 @@ describe("legalMonthsFor", () => {
     expect(legalMonthsFor("fertilize", "corn", 3)).toEqual([4, 5, 6]); // plantMonth+1 .. plantMonth+growMonths-1
   });
 
-  it("harvest: delay-only, from the natural ready month through December, clamped (no year wrap)", () => {
-    // Corn planted month 3 (Apr), growMonths 4 -> ready month 7 (Aug).
-    expect(legalMonthsFor("harvest", "corn", 3)).toEqual([7, 8, 9, 10, 11]);
-    // A late plant month whose ready month would be January next year clamps at Dec.
-    expect(legalMonthsFor("harvest", "corn", 10)).toEqual([]); // ready month 14 -> nothing <=11
+  it("harvest: delay-only, from the natural ready month, wrapping past December", () => {
+    // Corn planted month 3 (Apr), growMonths 4 -> ready month 7 (Aug), then up
+    // to `schedule.harvestDelayMaxMonths` (6) further out.
+    expect(legalMonthsFor("harvest", "corn", 3)).toEqual([7, 8, 9, 10, 11, 0, 1]);
+    // A cycle that ripens after December used to produce an EMPTY set (the old
+    // December clamp) — the bug that left Winter Wheat's Harvest row blank.
+    expect(legalMonthsFor("harvest", "corn", 10)).toEqual([2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it("Winter Wheat's harvest/mulch rows are populated (regression: the blank-row bug)", () => {
+    // Wheat plants month 8 (Sep) and grows 9 months -> ready month 17 = Jun.
+    // Under the old December clamp both of these came back empty, so the
+    // Schedule tab drew Harvest, Mulch and Rake/Bale as blank rows.
+    const harvest = legalMonthsFor("harvest", "wheat", 8);
+    expect(harvest[0]).toBe(5); // June
+    expect(harvest.length).toBeGreaterThan(0);
+    const mulch = legalMonthsFor("mulch", "wheat", 8);
+    expect(mulch[0]).toBe(6); // July, the month after harvest
+    expect(mulch.length).toBeGreaterThan(0);
   });
 
   it("cross-checks weed/fertilize legal months against the real farming.ts gates", () => {
