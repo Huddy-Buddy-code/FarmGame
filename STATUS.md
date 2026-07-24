@@ -1558,11 +1558,87 @@ big-first on first click.
 **307/307 tests, typecheck clean.** UI changes are logic-tested only — the new
 Inventory/Fields layouts and the 10-crop calendar need eyes in a browser.
 
+## Latest changes (2026-07-23, big batch: rotation sequence → sell task, 8 commits)
+
+Maintainer's ~20-item list, built as 8 commits. **411/411 tests (was 307),
+typecheck + build clean.**
+
+- **Rotation is a SEQUENCE, not one plan per campaign year** (`6fd254a`).
+  `plans` is now ordered Current→Next→…, with `Field.rotationIndex` instead of
+  `plans[(year-1) % len]`. Advances when the next step's PLANT TASK STARTS
+  (`FarmTask.advancesRotation`) — not at harvest (residue work stays owned by
+  the outgoing crop) and not at enqueue (a canceled plant would strand the
+  pointer). `autoManageField` juggles two steps: `plan` (running) owns weed/
+  fert/harvest/mulch/bale; `upcoming` owns plow/plant. Saves migrate:
+  `rotationIndex = (year-1) % len`. **Fixed the Winter Wheat blank rows** as a
+  side effect — `legalMonthsFor` clamped at December, so wheat's harvest asked
+  for `rangeClamped(17, 11)` = empty.
+- **Schedule tab: crop chips** (`5afa35f`) replacing the dropdown rows and the
+  `‹ Yr N ›` stepper. Bale icon on balable crops, Fertilize before Weed,
+  rotation NAME + Copy/Paste (module clipboard, deep-copied both ways),
+  overwintering crops get a faded/striped "next year" band. `removeRotationStep`
+  lives in tasks.ts with tests — a naive splice silently changes which crop the
+  field is growing.
+- **⚠️ `npm run build` was corrupting the test suite** (fixed in `5afa35f`):
+  `"tsc && vite build"` with no `noEmit` wrote a `.js` beside every `.ts` in
+  `src/`, and **Vite resolves `.js` before `.ts`**, so tests ran against stale
+  compiled output. Found via a fresh export reporting "not a function". Set
+  `noEmit` in tsconfig, deleted 32 files, gitignored the pattern.
+- **Display fixes** (`4002158`): mulch showed as "Harvesting" (`taskVerb` had no
+  branch, fell through to the harvest default); field panel keeps its tab across
+  field clicks; header shows total acres instead of grain; field badge gets a
+  44px crop icon, acres, rotation name. Net Worth needed no change — verified
+  against the three existing tests.
+- **Balance** (`aa57295`): harvest costs $30/ac (was free). Mulch on every
+  annual at two rates — 7% whole residue, 3% if baled off first
+  (`Field.residueBaled`). Corn no longer bales. Straw skips the rake
+  (`needsRakeBeforeBaling`). Loan borrow/paydown finally book to the ledger —
+  they booked *nothing* before, so Net disagreed with the bank balance.
+- **Headlands on concave fields** (`866d52d`): `offsetPolygonInward` chose each
+  edge's inward normal by pointing at the CENTROID, which is only valid on
+  convex shapes — a notch edge got flipped, tripped the edge-reversal check,
+  returned null, and `buildHeadlandCoveragePath` silently degraded to a plain
+  path. Now derived from ring WINDING. New `headlandShapes.test.ts` (17):
+  L-shape, plus, notched rectangle.
+- **Harvest windows + withering** (`7a1698e`): annuals are harvestable for
+  `harvestWindowMonths` (2) from ripening; miss it and the crop is a TOTAL loss.
+  New `withered` status + texture (standing dead crop — the read that matters is
+  against `stubble`, which was *cut*). Never interrupts an active combine; a
+  stranded queued harvest is cancelled and refunded. Field panel counts down the
+  remaining months and explains the loss. Crop Calendar gained bale icons and its
+  harvest band now draws the real window.
+- **Crews + rig selection + blocked warnings** (`edf6182`): hauling jobs run up
+  to `maxCrewSize` (3) rigs as PARALLEL TASKS, so each keeps the proven
+  single-agent brain. Assignment inverted — biggest implement first, then the
+  smallest tractor that can pull it (was: smallest tractor grabs it, then hitches
+  the biggest tool *it* can pull — a 5ft plow on 400 acres with a large tractor
+  idle). New "Blocked" section surfaces missing equipment + cash shortfalls via a
+  typed `InsufficientFundsError`; out-of-season stays silent.
+- **Sell task** (`b6489e6`): selling is now a choice. Instant from Inventory =
+  base −10%, no seasonal premium. Hauled to a Sell Point (now FREE) = full
+  seasonal price — ~39% better at the December peak. Auto-sell queues a run,
+  falling back to instant only when a run is impossible.
+
+**UX-needs-eyes (no Browser Preview — maintainer directive).** None of this
+session's UI has been seen in a browser:
+- Crop chips at the 320px panel width (long names, 3-crop rotations; the green
+  "current" dot vs the gold "selected" fill).
+- The Winter Wheat calendar wrap — faded rows + the `↑ next year` divider.
+- The **withered texture** — chiefly whether it reads as distinct from stubble
+  at map zoom.
+- Blocked ⚠️ rows, the sell-run queue row, and the Inventory "🚜 Haul" button.
+
+**Save-compat note:** a crop sitting ripe in an old save will WITHER shortly
+after loading — the harvest window is enforced from `plantedAt`.
+
 ## Known gaps / unverified
 
 - **Field panel Schedule calendar drag-and-drop is logic-tested only** — no
   visual/interactive verification (no Browser Preview in this project).
-- **Economy is placeholder** — flat sell price. No buyers, capacity, or hauling yet.
+- **Economy is partly real now** (2026-07-23) — seasonal prices, and produce is
+  physically hauled to a Sell Point for full price vs. an instant discounted
+  sale. Still NO buyers with capacity, no local demand drop, no per-buyer
+  distance/price tradeoff (brief §5's core tension).
 - Rotation planner unplayed in real sessions (unit-tested only).
 - Drag-reorder in Work Queue unmanually verified.
 - Routing uses public OSRM demo (not self-hosted).
