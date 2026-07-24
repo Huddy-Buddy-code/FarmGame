@@ -531,7 +531,7 @@ function taskVerb(task: FarmTask): string {
 
 function toastTaskEvent(task: FarmTask, agent: Agent, kind: "started" | "finished"): void {
   const emoji = AGENT_EMOJI[agent.kind] ?? "🚜";
-  const where = prettyId(task.fieldId);
+  const where = fieldLabelOf(task.fieldId);
   if (kind === "started") toast(`${emoji} ${agent.name} is heading out — ${taskVerb(task)} ${where}`);
   else toast(`✅ ${agent.name} finished ${taskVerb(task)} ${where}`);
 }
@@ -1096,7 +1096,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
     row.innerHTML = `
       ${iconHtml}
       <span class="qr-info">
-        <div class="qr-name">Unload Harvester · ${prettyId(task.fieldId)}</div>
+        <div class="qr-name">Unload Harvester · ${escapeHtml(fieldLabelOf(task.fieldId))}</div>
         ${agent ? `<div class="qr-machine">${agent.name}</div>` : ""}
         <div class="qr-sub">${sub}</div>
         ${implementRowHtml(task, agent)}
@@ -1115,7 +1115,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
     row.className = "queue-row" + (isActive ? " active" : " queued") + (task.waitingForStorage ? " warn" : "");
     row.innerHTML = `
       <span class="qr-info">
-        <div class="qr-name">Haul Bales · ${prettyId(task.fieldId)}</div>
+        <div class="qr-name">Haul Bales · ${escapeHtml(fieldLabelOf(task.fieldId))}</div>
         ${agent ? `<div class="qr-machine">${agent.name}${trailerAgent ? ` + ${trailerAgent.name}` : ""}</div>` : ""}
         <div class="qr-sub">${haulSubText(task)}${remaining > 0 ? ` · ${remaining} left in field` : ""}</div>
         ${implementRowHtml(task, agent)}
@@ -1125,7 +1125,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
 
   if (task.type === "sell") {
     // Point-to-point, not acreage — and its fieldId is empty (a sale spans the
-    // farm), so the generic row's `prettyId(fieldId)` would render blank.
+    // farm), so the generic row's field label would render blank.
     const product = task.sellProduct ?? "";
     const name = (gameConfig.crops as Record<string, { name: string } | undefined>)[product]?.name
       ?? (gameConfig.baleProducts as Record<string, { name: string } | undefined>)[product]?.name
@@ -1158,7 +1158,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
   row.innerHTML = `
     ${iconHtml}
     <span class="qr-info">
-      <div class="qr-name">${cap(taskVerb(task))} · ${prettyId(task.fieldId)}</div>
+      <div class="qr-name">${cap(taskVerb(task))} · ${escapeHtml(fieldLabelOf(task.fieldId))}</div>
       ${agent ? `<div class="qr-machine">${agent.name}</div>` : ""}
       <div class="qr-sub">${sub}</div>
       ${isActive ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
@@ -1324,7 +1324,7 @@ function buildBlockedRow(b: BlockedWork): HTMLElement {
   row.className = "queue-row blocked";
   row.innerHTML = `
     <span class="qr-info">
-      <div class="qr-name">⚠️ ${TASK_NOUN[b.type] ?? b.type} · ${prettyId(b.fieldId)}</div>
+      <div class="qr-name">⚠️ ${TASK_NOUN[b.type] ?? b.type} · ${escapeHtml(fieldLabelOf(b.fieldId))}</div>
       <div class="qr-sub">${escapeHtml(b.reason)}</div>
     </span>`;
   row.addEventListener("click", () => {
@@ -1351,11 +1351,11 @@ function buildCompletedRow(ct: CompletedTask): HTMLElement {
   if (ct.type === "sellGrain" || ct.type === "sellBales") {
     icon = "💰";
     const label = ct.label ?? (ct.crop ? gameConfig.crops[ct.crop].name : "Product");
-    name = `Sold ${label}` + (ct.fieldId ? ` · ${prettyId(ct.fieldId)}` : "");
+    name = `Sold ${label}` + (ct.fieldId ? ` · ${escapeHtml(fieldLabelOf(ct.fieldId))}` : "");
   } else {
     icon = "✅";
     const verb = TASK_PAST_VERB[ct.type] ?? cap(ct.type);
-    const field = prettyId(ct.fieldId ?? "");
+    const field = escapeHtml(fieldLabelOf(ct.fieldId));
     name = ct.type === "plant" && ct.crop ? `${verb} ${gameConfig.crops[ct.crop].name} · ${field}` : `${verb} · ${field}`;
   }
 
@@ -2228,7 +2228,7 @@ function refreshFieldsTab() {
     const row = document.createElement("div");
     row.className = "ft-row field-row";
     row.innerHTML = `
-      <span class="ft-name"><span class="icon">${icon}</span> ${fieldLabel(field)}</span>
+      <span class="ft-name"><span class="icon">${icon}</span> ${escapeHtml(fieldLabel(field))}</span>
       <span class="ft-num">${e.acres.toFixed(1)}</span>
       <span class="ft-status">${e.statusLabel}</span>
       <span class="ft-num">${e.yieldText}</span>
@@ -2462,9 +2462,9 @@ function agentStatusText(agent: Agent): { text: string; pct: number | null } {
     const text = task.waitingForSilo ? "⚠️ Waiting for silo room" : (UNLOAD_PHASE_TEXT[task.unloadPhase ?? "toHarvester"] ?? "Hauling grain…");
     return { text, pct: null };
   }
-  if (task && agent.state === "traveling") return { text: `Driving to ${prettyId(task.fieldId)}…`, pct: null };
+  if (task && agent.state === "traveling") return { text: `Driving to ${escapeHtml(fieldLabelOf(task.fieldId))}…`, pct: null };
   if (task && agent.state === "working") {
-    let text = `${cap(taskVerb(task))} ${prettyId(task.fieldId)}`;
+    let text = `${cap(taskVerb(task))} ${escapeHtml(fieldLabelOf(task.fieldId))}`;
     if (task.type === "harvest" && (agent.grainOnboard ?? 0) > 0) {
       text += ` · ${(agent.grainOnboard ?? 0).toFixed(1)}t onboard`;
     }
@@ -3469,7 +3469,7 @@ function wireFieldHover(map: maplibregl.Map) {
       badge.innerHTML = `
         <div class="fb-icon">${cropIcon}</div>
         <div class="fb-text">
-          <div class="fb-name">${fieldLabel(hit)}<span class="fb-acres">${areaAcres(hit.boundary).toFixed(1)} ac</span></div>
+          <div class="fb-name">${escapeHtml(fieldLabel(hit))}<span class="fb-acres">${areaAcres(hit.boundary).toFixed(1)} ac</span></div>
           <div class="fb-crop">${cropName}</div>
           ${rot ? `<div class="fb-rot">🔁 ${escapeHtml(rot)}</div>` : ""}
           <div class="fb-boost">⚡ ${boost}%</div>
@@ -4629,6 +4629,25 @@ function prettyId(id: string): string {
 
 function fieldLabel(field: Field): string {
   return field.name || prettyId(field.id);
+}
+
+/**
+ * A field's display name from its ID alone.
+ *
+ * The Work Queue, the blocked-work rows, the Completed feed and the machine
+ * status lines all only have a `fieldId` to hand, and each of them used to
+ * render `prettyId(fieldId)` directly — the RAW id, ignoring `field.name`. So
+ * the moment a field was renamed, the badge and panel said one thing and the
+ * queue said "Field 3" (maintainer bug report, 2026-07-24: "Field Numbers are
+ * getting out of sync in Field Badge/Panel and Work Queue"). Everything goes
+ * through here now, so there's one answer to what a field is called.
+ *
+ * Falls back to the prettified id for a field that's since been sold — a
+ * completed-task row outlives the field it happened on.
+ */
+function fieldLabelOf(fieldId: string | undefined): string {
+  const field = fieldId ? save.fields.find((f) => f.id === fieldId) : undefined;
+  return field ? fieldLabel(field) : prettyId(fieldId ?? "");
 }
 
 function escapeHtml(text: string): string {
