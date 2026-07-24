@@ -162,7 +162,11 @@ describe("the header's width drives the cut", () => {
       buyAgent(save, "tractor", "large", [0, 0]);
       buyImplement(save, "grainTrailer", "large");
       buyImplement(save, "cornHeader", size);
-      const field = readyField("corn");
+      // A deliberately THIN crop: with bushel-based hoppers (2026-07-24) a
+      // normal-yielding 100-acre field is dominated by cart round trips, which
+      // would swamp the header-width difference this test is about. At this
+      // yield the tank never fills, so what's left is purely the driving.
+      const field = { ...readyField("corn"), trueYieldTonsPerAcre: 0.05 };
       save.fields.push(field);
       enqueueTask(save, field, "harvest", APRIL_1);
 

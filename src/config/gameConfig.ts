@@ -109,6 +109,20 @@ export interface CropConfig {
    * alfalfaHay for alfalfa). Corn's stover is handled separately (its crop is
    * cleared at harvest before baling). */
   baleProduct?: BaleProduct;
+  /**
+   * TEST WEIGHT — pounds per bushel (maintainer request, 2026-07-24: "each crop
+   * should have a volume per ton").
+   *
+   * On-board storage is VOLUME, not weight: a combine tank and a grain cart hold
+   * so many bushels regardless of what's in them. Dense crops therefore go
+   * further per load than light ones — a 500 bu tank is ~14 t of corn (56 lb/bu)
+   * but only ~7 t of sunflowers (28 lb/bu), so oilseeds need roughly twice the
+   * cart trips per ton hauled. These are the standard US test weights.
+   *
+   * Perennials omit it — their yield is bales, never a combine load — and
+   * `tonsPerBushel` falls back to corn's for anything that somehow asks.
+   */
+  bushelWeightLbs?: number;
   /** Per-crop override for [[GameConfig.harvestWindowMonths]] — how many months
    * this crop stays harvestable once ripe (maintainer request, 2026-07-24:
    * "extend Planting and Harvesting windows by one month for Oats & Barley").
@@ -240,7 +254,7 @@ export interface GameConfig {
      * needs a HEADER hitched, and the header's width is what drives the
      * coverage path. The number is kept as the size tier's nominal/reference
      * width — what a sensibly-matched header for that combine looks like. */
-    harvester: Record<EquipmentSize, { price: number; widthFt: number; capacityTons: number }>;
+    harvester: Record<EquipmentSize, { price: number; widthFt: number; capacityBushels: number }>;
     /** Corn Header (maintainer decision, 2026-07-24): row units that strip cobs
      * off standing stalks. CORN ONLY — it physically cannot cut a small grain.
      * Sized in rows on a real machine (8/12/16-row at 30 in rows = 20/30/40 ft);
@@ -255,9 +269,11 @@ export interface GameConfig {
     /** Grain Trailer: hauls a full combine hopper to a silo. A normal
      * implement (one tractor hitch slot, like a plow) — `widthFt` is unused
      * (not a fieldwork tool) but kept so it shares the generic implement
-     * config shape. `capacityTons` caps how much one trip can carry; a
-     * trailer smaller than the hopper just takes a partial load. */
-    grainTrailer: Record<EquipmentSize, { price: number; widthFt: number; capacityTons: number }>;
+     * config shape. `capacityBushels` caps how much one trip can carry; a
+     * trailer smaller than the hopper just takes a partial load.
+     *
+     * Volume, not weight, since 2026-07-24 — see [[CropConfig.bushelWeightLbs]]. */
+    grainTrailer: Record<EquipmentSize, { price: number; widthFt: number; capacityBushels: number }>;
     /** Hay Spikes (2026-07-17): a tractor implement that spears round bales to
      * collect them out of the field — tiny capacity (Small 1 bale, Medium 2),
      * `widthFt` unused (not a coverage tool). The in-field collector half of
@@ -462,6 +478,7 @@ export const gameConfig: GameConfig = {
       plantMonths: [3, 4], // Apr–May
       growMonths: 4, // whole months → planted in Apr, ready the 1st of Aug
       sellPricePerTon: 180,
+      bushelWeightLbs: 56, // the reference grain
       // Corn no longer bales (maintainer decision, 2026-07-23) — its residue is
       // mulched back in or plowed under. `cornStover` stays in `baleProducts`
       // below so stover already sitting in a save still prices and sells.
@@ -476,6 +493,7 @@ export const gameConfig: GameConfig = {
       plantMonths: [4, 5], // May–Jun
       growMonths: 4, // whole months → planted in May, ready the 1st of Sep
       sellPricePerTon: 390,
+      bushelWeightLbs: 60, // dense — a load goes further than corn
     },
     // --- Six more annuals (maintainer request, 2026-07-22). Balance targets,
     // per acre at base yield & base price (net of input+fert+plow+weed ≈ $35):
@@ -501,6 +519,7 @@ export const gameConfig: GameConfig = {
       plantMonths: [8, 9], // Sep–Oct (fall seeding)
       growMonths: 9, // Sep 1 + 9 → ready the 1st of Jun (overwinters)
       sellPricePerTon: 210,
+      bushelWeightLbs: 60,
       producesForage: true, // wheat straw → rake + bale before re-plowing
       baleProduct: "straw",
       coverCrop: true,
@@ -515,6 +534,7 @@ export const gameConfig: GameConfig = {
       plantMonths: [8, 9, 10], // Sep–Nov — a wider window than wheat's
       growMonths: 8, // Sep 1 + 8 -> ready the 1st of May, a month before wheat
       sellPricePerTon: 175,
+      bushelWeightLbs: 56,
       producesForage: true, // rye straw
       baleProduct: "straw",
       coverCrop: true,
@@ -530,6 +550,7 @@ export const gameConfig: GameConfig = {
       growMonths: 4, // ready the 1st of Jul/Aug/Sep
       harvestWindowMonths: 3, // dries down and stands; a month longer than the default
       sellPricePerTon: 165,
+      bushelWeightLbs: 32, // lightest grain in the game — bulky per ton
       producesForage: true,
       baleProduct: "straw",
     },
@@ -544,6 +565,7 @@ export const gameConfig: GameConfig = {
       growMonths: 4, // ready the 1st of Jul/Aug/Sep
       harvestWindowMonths: 3,
       sellPricePerTon: 195,
+      bushelWeightLbs: 48,
       producesForage: true,
       baleProduct: "straw",
     },
@@ -557,6 +579,7 @@ export const gameConfig: GameConfig = {
       plantMonths: [3, 4], // Apr–May
       growMonths: 4, // ready the 1st of Aug/Sep
       sellPricePerTon: 510,
+      bushelWeightLbs: 50,
     },
     sunflowers: {
       name: "Sunflowers",
@@ -568,6 +591,7 @@ export const gameConfig: GameConfig = {
       plantMonths: [4, 5], // May–Jun
       growMonths: 5, // ready the 1st of Oct/Nov — rides the ramp to the Dec peak
       sellPricePerTon: 480,
+      bushelWeightLbs: 28, // half of corn — twice the cart trips per ton
     },
     // Perennial forage crops (2026-07-13): planted once in spring, cut 3× a
     // year (mow → rake → bale = hay), fertilized annually, never plowed. Yield
@@ -689,15 +713,23 @@ export const gameConfig: GameConfig = {
     // mower ($130k) plus the Medium tractor ($250k) it frees up, less a bit:
     // buying one should be tempting, not obvious.
     windrower: { price: 320_000, widthFt: 40 },
+    // Hopper/cart sizes are BUSHELS as of 2026-07-24 — real American numbers,
+    // and a deliberate rebalance the maintainer signed off on ("let it bite").
+    // A Medium combine used to hold a flat 50 t; it now holds 350 bu, which is
+    // under 10 t of corn. Hauling is meant to be the bottleneck of harvest
+    // season, the way it is on a real farm.
     harvester: {
-      small: { price: 350_000, widthFt: 20, capacityTons: 30 },
-      medium: { price: 450_000, widthFt: 30, capacityTons: 50 },
-      large: { price: 600_000, widthFt: 40, capacityTons: 80 },
+      small: { price: 350_000, widthFt: 20, capacityBushels: 250 },
+      medium: { price: 450_000, widthFt: 30, capacityBushels: 350 },
+      large: { price: 600_000, widthFt: 40, capacityBushels: 500 },
     },
     grainTrailer: {
-      small: { price: 25_000, widthFt: 0, capacityTons: 40 },
-      medium: { price: 45_000, widthFt: 0, capacityTons: 60 },
-      large: { price: 70_000, widthFt: 0, capacityTons: 100 },
+      // A 400 bu gravity wagon — deliberately SMALLER than the largest combine
+      // tank (500 bu), so "the cart can't take a whole hopper in one go" stays
+      // a real situation the hauling code has to handle.
+      small: { price: 25_000, widthFt: 0, capacityBushels: 400 },
+      medium: { price: 45_000, widthFt: 0, capacityBushels: 1000 },
+      large: { price: 70_000, widthFt: 0, capacityBushels: 1500 },
     },
     // Hay Spikes — cheap, low-capacity in-field bale collector. Small (1 bale)
     // is pullable by any tractor; Medium (2 bales) needs a medium+. The large

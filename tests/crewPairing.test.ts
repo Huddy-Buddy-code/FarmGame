@@ -47,7 +47,11 @@ function readyCornField(id: string, offset: number): Field {
   return {
     id, parcelId: "p",
     boundary: boundary.map(([x, y]) => [x + offset, y] as Meters),
-    status: "ready", crop: "corn", trueYieldTonsPerAcre: 6,
+    // A light crop on purpose. Combine tanks are bushels now (2026-07-24), so a
+    // full-yield 100-acre field is ~60 hopper fills and ~60 cart round trips —
+    // realistic, and far more sim time than these scheduling tests need. This
+    // still needs several trips, which is all the crew rules care about.
+    status: "ready", crop: "corn", trueYieldTonsPerAcre: 0.5,
     plantedAt: APRIL_1 - gameConfig.crops.corn.growMonths * minutesPerMonth(),
   };
 }

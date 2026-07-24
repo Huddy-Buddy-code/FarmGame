@@ -173,14 +173,44 @@ export function windrowerWidthM(): number {
   return gameConfig.equipment.windrower.widthFt * FEET_TO_METERS;
 }
 
-/** Grain hopper capacity of a combine at `size`, tons (maintainer request, 2026-07-12). */
-export function harvesterCapacityTons(size: EquipmentSize): number {
-  return gameConfig.equipment.harvester[size].capacityTons;
+/**
+ * Tons in one bushel of `crop` — the crop's test weight over 2000 lb.
+ *
+ * On-board storage is VOLUME (maintainer decision, 2026-07-24), so this is what
+ * turns a machine's bushel capacity into the tonnage it can actually hold of a
+ * particular crop. Falls back to corn's weight for a crop that declares none
+ * (the perennials, whose yield is bales and never rides in a hopper).
+ */
+export function tonsPerBushel(crop: CropId): number {
+  return (gameConfig.crops[crop].bushelWeightLbs ?? gameConfig.crops.corn.bushelWeightLbs ?? 56) / 2000;
 }
 
-/** Cargo capacity of a Grain Trailer at `size`, tons. */
-export function grainTrailerCapacityTons(size: EquipmentSize): number {
-  return gameConfig.equipment.grainTrailer[size].capacityTons;
+/** Grain hopper VOLUME of a combine at `size`, bushels. */
+export function harvesterCapacityBushels(size: EquipmentSize): number {
+  return gameConfig.equipment.harvester[size].capacityBushels;
+}
+
+/** Cargo VOLUME of a Grain Trailer at `size`, bushels. */
+export function grainTrailerCapacityBushels(size: EquipmentSize): number {
+  return gameConfig.equipment.grainTrailer[size].capacityBushels;
+}
+
+/**
+ * How many TONS of `crop` a combine of `size` can hold — its bushel capacity
+ * converted at that crop's test weight (2026-07-24; it used to be a flat
+ * per-tier tonnage). Light crops fill the tank sooner: a 500 bu tank is ~14 t of
+ * corn but only ~7 t of sunflowers.
+ *
+ * `crop` is optional so the shop and other crop-less display contexts can still
+ * quote a representative figure; they get corn's.
+ */
+export function harvesterCapacityTons(size: EquipmentSize, crop: CropId = "corn"): number {
+  return harvesterCapacityBushels(size) * tonsPerBushel(crop);
+}
+
+/** Tons of `crop` a Grain Trailer at `size` can carry. See `harvesterCapacityTons`. */
+export function grainTrailerCapacityTons(size: EquipmentSize, crop: CropId = "corn"): number {
+  return grainTrailerCapacityBushels(size) * tonsPerBushel(crop);
 }
 
 /** How many bales the Hay Spikes hold at `size` (Small 1 / Medium 2). */
@@ -1982,7 +2012,8 @@ function tickAgent(
 
         if (task.sellPhase === "loading") {
           const cap = isGrainProduct(product)
-            ? grainTrailerCapacityTons(trailer.size)
+            // Volume, so the tonnage depends on what's being hauled (2026-07-24).
+            ? grainTrailerCapacityTons(trailer.size, product)
             : baleTrailerCapacityBales(trailer.size);
           const got = loadForSale(save, product, cap - carried, agent.pos);
           if (isGrainProduct(product)) {
@@ -2090,7 +2121,7 @@ function tickAgent(
           task.phaseTimer = left;
           continue;
         }
-        const cap = grainTrailerCapacityTons(trailer.size);
+        const cap = grainTrailerCapacityTons(trailer.size, task.crop);
         const room = Math.max(0, cap - (trailer.cargoTons ?? 0));
         const amount = Math.min(room, harvester.grainOnboard ?? 0);
         harvester.grainOnboard = (harvester.grainOnboard ?? 0) - amount;
@@ -2177,13 +2208,13 @@ function tickAgent(
       // over; otherwise back to the gate for the combine's next stop
       // (maintainer requests, 2026-07-13).
       {
-        const cap = harvesterCapacityTons(harvester.size ?? "medium");
+        const cap = harvesterCapacityTons(harvester.size ?? "medium", task.crop);
         const combineFull = (harvester.grainOnboard ?? 0) >= cap - 1e-9;
         const combineEmpty = (harvester.grainOnboard ?? 0) <= 1e-9;
         const stillCutting = save.tasks.some(
           (t) => t.type === "harvest" && t.status === "active" && t.agentId === harvester.id,
         );
-        const trailerCap = grainTrailerCapacityTons(trailer.size);
+        const trailerCap = grainTrailerCapacityTons(trailer.size, task.crop);
         const cargo = trailer.cargoTons ?? 0;
         const trailerFull = cargo >= trailerCap - 1e-9;
 
@@ -2768,7 +2799,7 @@ function tickAgent(
     // instead of only kicking in at capacity. The combine itself only stops
     // dead (state stays "working") once truly full.
     if (task.type === "harvest" && field.crop) {
-      const capacity = harvesterCapacityTons(agent.size ?? "medium");
+      const capacity = harvesterCapacityTons(agent.size ?? "medium", field.crop);
       agent.grainOnboard ??= 0;
       if (agent.grainOnboard > 1e-9) ensureUnloadTask(save, agent, field.id, field.crop, events);
       if (agent.grainOnboard >= capacity - 1e-9) {
@@ -2797,7 +2828,7 @@ function tickAgent(
       : undefined;
     let target = path.total;
     if (task.type === "harvest" && effectiveYield) {
-      const capacity = harvesterCapacityTons(agent.size ?? "medium");
+      const capacity = harvesterCapacityTons(agent.size ?? "medium", field.crop ?? "corn");
       const room = Math.max(0, capacity - (agent.grainOnboard ?? 0));
       const roomAcres = room / effectiveYield;
       const fullAt = acresDoneAt(path, dist, task.totalAcres) + roomAcres;

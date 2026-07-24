@@ -4,7 +4,8 @@ import type { Meters } from "../src/geo/coords";
 import { newGame } from "../src/state/saveState";
 import type { Field, SaveState } from "../src/state/saveState";
 import {
-  ensureAgents, tickTasks, enqueueTask, buyImplement, buyAgent, sellAgent, harvesterCapacityTons, setHarvesterCrop,
+  ensureAgents, tickTasks, enqueueTask, buyImplement, buyAgent, sellAgent, harvesterCapacityTons,
+  grainTrailerCapacityTons, setHarvesterCrop,
 } from "../src/sim/tasks";
 import { tickFarming } from "../src/sim/farming";
 import { sellGrain } from "../src/sim/economy";
@@ -19,7 +20,13 @@ const APRIL_1 = minutesPerMonth();
 /** A small field, already "ready" with a known true yield — skips the grow
  * cycle so tests can drive straight into harvesting. `acres` sized per test
  * so the total potential yield lands where the test wants it relative to a
- * medium combine's 50t hopper. */
+ * medium combine's hopper.
+ *
+ * Capacities became VOLUME (bushels) on 2026-07-24, so nothing below hardcodes
+ * a tonnage any more — every figure is derived from harvesterCapacityTons /
+ * grainTrailerCapacityTons at corn's test weight. The RELATIONSHIPS these tests
+ * are really about (cart bigger than hopper, cart smaller than hopper, load
+ * above or below the 75% silo-run threshold) are what's asserted. */
 function readyField(acres: number, tonsPerAcre = 6): Field {
   const side = Math.sqrt(acres * 4046.8564224);
   const boundary: Meters[] = [[0, 0], [side, 0], [side, side], [0, side]];
@@ -184,14 +191,19 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     expect(moved).toBe(false);
   });
 
-  it("multi-load: a 100t cart drains the 50t combine, waits IN FIELD (in place, not at the gate), tops off, and dumps ~100t in one run", () => {
-    const save = gameWithAgents(); // medium combine, 50t hopper
-    const field = readyField(60, 6); // 360t total — several hopper fills
+  it("multi-load: a big cart drains the combine repeatedly, waits IN FIELD (in place, not at the gate), tops off, and dumps a full load in one run", () => {
+    const save = gameWithAgents(); // medium combine
+    const field = readyField(60, 6); // 360t total — many hopper fills
     const side = Math.sqrt(60 * 4046.8564224);
     const gates: Meters[] = [[side / 2, 0], [side / 2, side]];
     field.accessPoints = gates;
     save.fields.push(field);
-    buyImplement(save, "grainTrailer", "large"); // 100t cart — 50t drain = 50% < 75%
+    // A Large cart is several hoppers' worth, so one drain leaves it far under
+    // the 75% silo-run threshold — it should stay put and top off.
+    buyImplement(save, "grainTrailer", "large");
+    const HOPPER = harvesterCapacityTons("medium", "corn");
+    const CART = grainTrailerCapacityTons("large", "corn");
+    expect(HOPPER / CART).toBeLessThan(gameConfig.hauling.cartSiloRunFraction);
     // A large tractor to pull the large cart (the starting medium can't).
     const hauler = buyAgent(save, "tractor", "large", [0, 0]);
     const silo = buyBuildingAt(save, "silo", [-800, -800], "large");
@@ -218,40 +230,55 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     }
     expect(waitedInPlaceWithCargo).toBe(true);
     expect(waitedAtGateWithCargo).toBe(false);
-    // First silo delivery is a FULL cart (two 50t stops), not one drain's 50t.
-    expect(save.grain.corn).toBeGreaterThan(95);
-    expect(save.grain.corn).toBeLessThanOrEqual(100.5);
+    // First silo delivery is SEVERAL hopper stops' worth, not one drain. It
+    // won't be a brim-full cart: the cart tops off in whole hopper drains and
+    // leaves for the silo as soon as it crosses cartSiloRunFraction, so it
+    // departs at whatever the last whole drain put it at.
+    expect(save.grain.corn).toBeGreaterThan(HOPPER * 2);
+    expect(save.grain.corn).toBeGreaterThanOrEqual(CART * gameConfig.hauling.cartSiloRunFraction);
+    expect(save.grain.corn).toBeLessThanOrEqual(CART + 0.5);
   });
 
   it("a cart ≥75% full after fully draining the combine makes a silo run instead of waiting in-field", () => {
-    const save = gameWithAgents(); // medium combine, 50t hopper
+    const save = gameWithAgents(); // medium combine
     const field = readyField(40, 6);
     const side = Math.sqrt(40 * 4046.8564224);
     field.accessPoints = [[side / 2, 0], [side / 2, side]];
     save.fields.push(field);
-    buyImplement(save, "grainTrailer", "medium"); // 60t: one 50t drain = 83% ≥ 75%
+    // A Small cart is a touch BIGGER than a medium hopper, so one drain empties
+    // the combine and leaves the cart ~88% full — over the threshold.
+    buyImplement(save, "grainTrailer", "small");
+    const HOPPER = harvesterCapacityTons("medium", "corn");
+    const CART = grainTrailerCapacityTons("small", "corn");
+    expect(CART).toBeGreaterThan(HOPPER);
+    expect(HOPPER / CART).toBeGreaterThanOrEqual(gameConfig.hauling.cartSiloRunFraction);
     const silo = buyBuildingAt(save, "silo", [-800, -800], "large");
     assignSiloCrop(save, silo.id, "corn");
 
     let now = APRIL_1;
     enqueueTask(save, field, "harvest", now);
     now = runUntil(save, now, () => save.grain.corn > 0, 400_000, 5);
-    // Delivered the single 50t drain while the harvest was still running —
-    // it did NOT sit in the field holding 83% of a cart.
-    expect(save.grain.corn).toBeGreaterThan(45);
-    expect(save.grain.corn).toBeLessThanOrEqual(50.5);
+    // Delivered that single drain while the harvest was still running — it did
+    // NOT sit in the field holding most of a cart.
+    expect(save.grain.corn).toBeGreaterThan(HOPPER * 0.9);
+    expect(save.grain.corn).toBeLessThanOrEqual(HOPPER + 0.5);
     expect(save.tasks.some((t) => t.type === "harvest")).toBe(true);
   });
 
   it("partial cart heads to the silo once the harvest is over and the combine is drained", () => {
     const save = gameWithAgents();
-    // ~35t total: never fills the 50t hopper, so the ONLY stop is the end of
-    // the field — and 35t is under 75% of the 60t cart, so no early silo run.
-    const field = readyField(5.8, 6);
-    const side = Math.sqrt(5.8 * 4046.8564224);
+    // Sized so the whole crop never fills the hopper (so the ONLY stop is the
+    // end of the field) AND stays under the cart's 75% silo-run threshold (so
+    // there's no early run either). Both derived, not guessed.
+    buyImplement(save, "grainTrailer", "medium");
+    const HOPPER = harvesterCapacityTons("medium", "corn");
+    const CART = grainTrailerCapacityTons("medium", "corn");
+    const totalTons = Math.min(HOPPER, CART * gameConfig.hauling.cartSiloRunFraction) * 0.7;
+    const acres = totalTons / 6;
+    const field = readyField(acres, 6);
+    const side = Math.sqrt(acres * 4046.8564224);
     field.accessPoints = [[side / 2, 0], [side / 2, side]];
     save.fields.push(field);
-    buyImplement(save, "grainTrailer", "medium"); // 60t — never fills
     const silo = buyBuildingAt(save, "silo", [-800, -800], "large");
     assignSiloCrop(save, silo.id, "corn");
 
@@ -265,7 +292,7 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
       expect(save.grain.corn).toBe(0);
     }
     // Then the whole crop arrives in one partial-cart delivery.
-    const total = 5.8 * 6;
+    const total = totalTons;
     now = runUntil(save, now, () => save.grain.corn > 0, 300_000, 5);
     expect(save.grain.corn).toBeGreaterThan(total * 0.95);
     expect(save.grain.corn).toBeLessThanOrEqual(total * 1.05);
@@ -275,14 +302,20 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     const save = gameWithAgents();
     const silo = buyBuildingAt(save, "silo", [-50, -50], "large");
     assignSiloCrop(save, silo.id, "corn");
-    buyImplement(save, "grainTrailer", "medium"); // 60t — covers a 50t hopper in one trip
-    const field = readyField(8, 6); // 48t potential — one fill, one clean haul
+    // A Medium cart comfortably covers a Medium hopper in one trip.
+    buyImplement(save, "grainTrailer", "medium");
+    const HOPPER = harvesterCapacityTons("medium", "corn");
+    const CART = grainTrailerCapacityTons("medium", "corn");
+    expect(CART).toBeGreaterThan(HOPPER);
+    // Just under one hopper: a single fill, a single clean haul.
+    const totalTons = HOPPER * 0.9;
+    const field = readyField(totalTons / 6, 6);
     save.fields.push(field);
     enqueueTask(save, field, "harvest", APRIL_1);
 
     const doneAt = runUntil(save, APRIL_1, () => field.status === "harvested", 50_000);
     runUntil(save, doneAt, () => save.grain.corn > 0, 5000);
-    expect(save.grain.corn).toBeCloseTo(48, 0);
+    expect(save.grain.corn).toBeCloseTo(totalTons, 0);
     expect(combineOf(save).grainOnboard ?? 0).toBeCloseTo(0, 6);
     const trailer = save.implements.find((i) => i.kind === "grainTrailer")!;
     expect(trailer.cargoTons ?? 0).toBe(0);
@@ -294,20 +327,28 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     const save = gameWithAgents();
     const silo = buyBuildingAt(save, "silo", [-50, -50], "large");
     assignSiloCrop(save, silo.id, "corn");
-    buyImplement(save, "grainTrailer", "small"); // 40t — can't empty a 50t-full hopper in one go
-    const field = readyField(10, 6); // 60t potential, definitely fills the 50t hopper
+    // The Small cart (a 400 bu gravity wagon) is SMALLER than a Large combine's
+    // 500 bu tank, so it can't empty a full hopper in one go.
+    const combine = buyAgent(save, "harvester", "large", [0, 0]);
+    sellAgent(save, combineOf(save).id); // leave only the large one
+    buyImplement(save, "grainTrailer", "small");
+    const cap = harvesterCapacityTons("large", "corn");
+    const CART = grainTrailerCapacityTons("small", "corn");
+    expect(CART).toBeLessThan(cap);
+
+    const totalTons = cap * 1.2; // fills the hopper, with more left standing
+    const field = readyField(totalTons / 6, 6);
     save.fields.push(field);
     enqueueTask(save, field, "harvest", APRIL_1);
-    const cap = harvesterCapacityTons("medium");
 
-    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) >= cap - 1e-6, 5000);
-    // First trip: trailer (40t) takes what it can, not the full 50t hopper.
-    runUntil(save, APRIL_1, () => save.grain.corn > 0, 5000);
-    expect(save.grain.corn).toBeCloseTo(40, 0);
-    // A fresh Unload Harvester task follows without any player action once
-    // the hopper fills again — eventually the whole 60t potential lands.
-    runUntil(save, APRIL_1, () => save.grain.corn >= 59, 10_000);
-    expect(save.grain.corn).toBeCloseTo(60, 0);
+    runUntil(save, APRIL_1, () => (combine.grainOnboard ?? 0) >= cap - 1e-6, 20_000);
+    // First trip: the cart takes what it can hold, not the whole hopper.
+    runUntil(save, APRIL_1, () => save.grain.corn > 0, 20_000);
+    expect(save.grain.corn).toBeCloseTo(CART, 0);
+    // A fresh Unload Harvester task follows with no player action once the
+    // hopper fills again — eventually the whole crop lands.
+    runUntil(save, APRIL_1, () => save.grain.corn >= totalTons - 1, 100_000);
+    expect(save.grain.corn).toBeCloseTo(totalTons, 0);
   });
 
   it("no silo assigned to the crop → the trailer waits (⚠️) until one's assigned", () => {
@@ -340,14 +381,15 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     assignSiloCrop(save, silo.id, "corn");
     save.grain.corn = 200; // already at capacity
     buyImplement(save, "grainTrailer", "medium");
-    // 8ac × 6t/ac = 48t — fits in one hopper load, so the field finishes
-    // fully cut with nothing left to trigger a SECOND trip once this one
-    // completes (keeps the "trip completed" assertion below unambiguous).
-    const field = readyField(8, 6);
+    // Just under one hopper load, so the field finishes fully cut with nothing
+    // left to trigger a SECOND trip once this one completes (keeps the "trip
+    // completed" assertion below unambiguous).
+    const siloTestTons = harvesterCapacityTons("medium", "corn") * 0.9;
+    const field = readyField(siloTestTons / 6, 6);
     save.fields.push(field);
     enqueueTask(save, field, "harvest", APRIL_1);
 
-    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) >= 48 - 1e-6, 5000);
+    runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) >= siloTestTons - 1e-6, 20_000);
     const now = runUntil(save, APRIL_1, () => !!unloadTaskFor(save, combineOf(save).id)?.waitingForSilo, 5000);
     expect(unloadTaskFor(save, combineOf(save).id)?.waitingForSilo).toBe(true);
     expect(save.grain.corn).toBe(200); // untouched while waiting

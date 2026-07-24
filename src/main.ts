@@ -63,7 +63,8 @@ import {
   buyAgent, sellAgent, buyImplement, sellImplement, attachImplement, detachImplement,
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
   reorderTask, estimateTaskHours, forageDue, canMulch, defaultPlan, forcePlow, removeRotationStep, blockedWork,
-  harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
+  harvesterCapacityTons, grainTrailerCapacityTons, harvesterCapacityBushels, grainTrailerCapacityBushels,
+  tonsPerBushel, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
   appendCompletedTask, haySpikesCapacityBales, baleTrailerCapacityBales, queueHaulBales, fieldHasLooseBales,
   queueSellRun, sellableStock,
 } from "./sim/tasks";
@@ -493,6 +494,8 @@ function implementFillPct(impl: Implement): number | undefined {
     return cap > 0 ? Math.min(100, ((impl.cargoBales ?? 0) / cap) * 100) : 0;
   }
   if (impl.kind === "grainTrailer") {
+    // Corn as the reference crop: this only picks which fill SPRITE to show,
+    // and the real cargo crop isn't reachable from an implement alone.
     const cap = grainTrailerCapacityTons(impl.size);
     return cap > 0 ? Math.min(100, ((impl.cargoTons ?? 0) / cap) * 100) : 0;
   }
@@ -930,7 +933,9 @@ const IMPLEMENT_KIND_NAME: Record<ImplementKind, string> = {
 function implementInfoLines(kind: ImplementKind, size: EquipmentSize): { name: string; detail: string } {
   const name = `${IMPLEMENT_KIND_NAME[kind]} - ${SIZE_LABEL[size]}`;
   if (kind === "grainTrailer") {
-    return { name, detail: `${grainTrailerCapacityTons(size)} t Capacity` };
+    // Volume is the real capacity; the tonnage quoted alongside is corn's, as a
+    // familiar yardstick (a lighter crop gets fewer tons into the same wagon).
+    return { name, detail: `${grainTrailerCapacityBushels(size).toLocaleString()} bu (~${grainTrailerCapacityTons(size).toFixed(0)} t corn)` };
   }
   if (kind === "haySpikes") {
     return { name, detail: `${haySpikesCapacityBales(size)} bale capacity` };
@@ -972,24 +977,31 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     info = header
       ? implementInfoLines(header.kind, header.size)
       : { name: "No header fitted", detail: `${gameConfig.equipment.harvester[size].widthFt} ft nominal` };
-    const capT = harvesterCapacityTons(size);
+    // Capacity is VOLUME, and how many tons that is depends on the crop
+    // (2026-07-24) — so the bar shows both: bushels are what the tank actually
+    // holds, tons are what the player sells.
+    const crop = task.crop ?? save.fields.find((f) => f.id === task.fieldId)?.crop ?? "corn";
+    const capBu = harvesterCapacityBushels(size);
+    const capT = harvesterCapacityTons(size, crop);
     const onboard = agent.grainOnboard ?? 0;
     fill = {
       pct: capT > 0 ? Math.min(100, (onboard / capT) * 100) : 0,
-      current: `${onboard.toFixed(1)} t`,
-      total: `${capT} t`,
+      current: `${(onboard / tonsPerBushel(crop)).toFixed(0)} bu · ${onboard.toFixed(1)} t`,
+      total: `${capBu.toLocaleString()} bu · ${capT.toFixed(1)} t`,
     };
   } else if (task.type === "unloadHarvester") {
     const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "grainTrailer");
     if (!trailer) return "";
     iconSvg = grainTrailerIconSvg(IMPLEMENT_QUEUE_ICON_PX);
     info = implementInfoLines("grainTrailer", trailer.size);
-    const capT = grainTrailerCapacityTons(trailer.size);
+    const haulCrop = task.crop ?? trailer.cargoCrop ?? "corn";
+    const capBu = grainTrailerCapacityBushels(trailer.size);
+    const capT = grainTrailerCapacityTons(trailer.size, haulCrop);
     const cargo = trailer.cargoTons ?? 0;
     fill = {
       pct: capT > 0 ? Math.min(100, (cargo / capT) * 100) : 0,
-      current: `${cargo.toFixed(1)} t`,
-      total: `${capT} t`,
+      current: `${(cargo / tonsPerBushel(haulCrop)).toFixed(0)} bu · ${cargo.toFixed(1)} t`,
+      total: `${capBu.toLocaleString()} bu · ${capT.toFixed(1)} t`,
     };
   } else if (task.type === "haulBales") {
     const spikes = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "haySpikes");
@@ -2428,13 +2440,14 @@ function afterFleetChange(): void {
  * with a leftover partial hopper after finishing its field. ⚠️ if the
  * servicing unload trip is stuck with nowhere to dump. */
 function harvesterWaitingText(agent: Agent): string | null {
-  const capV = harvesterCapacityTons(agent.size ?? "medium");
+  const crop = agent.lastCrop ?? "corn";
+  const capV = harvesterCapacityTons(agent.size ?? "medium", crop);
   const onboard = agent.grainOnboard ?? 0;
   const blocked = onboard >= capV - 1e-9;
   if (onboard <= 1e-9 || !(agent.state === "idle" || blocked)) return null;
   const unload = save.tasks.find((t) => t.type === "unloadHarvester" && t.harvesterAgentId === agent.id);
   const warn = unload?.waitingForSilo ? "⚠️ " : "";
-  return `${warn}Waiting for a Grain Trailer (${onboard.toFixed(1)}/${capV}t)`;
+  return `${warn}Waiting for a Grain Trailer (${onboard.toFixed(1)}/${capV.toFixed(1)}t)`;
 }
 
 const UNLOAD_PHASE_TEXT: Record<string, string> = {
@@ -2590,7 +2603,7 @@ function buildEquipShop(): void {
     },
   }])));
   line("Combine", machineIconHtml("harvester", "medium", 78), Object.fromEntries(SIZES.map((s) => [s, {
-    spec: `${gameConfig.equipment.harvester[s].widthFt} ft header · ${harvesterCapacityTons(s)} t hopper`,
+    spec: `${harvesterCapacityBushels(s).toLocaleString()} bu tank (~${harvesterCapacityTons(s).toFixed(0)} t corn) · needs a header`,
     price: agentPrice("harvester", s),
     onBuy: () => {
       const a = buyAgent(save, "harvester", s, spawnPos());
@@ -2659,7 +2672,8 @@ function buildEquipShop(): void {
     price: implementPrice("grainHeader", s), onBuy: buyImpl("grainHeader", s),
   }])));
   line("Grain Trailer", grainTrailerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
-    spec: `${grainTrailerCapacityTons(s)} t cargo`, price: implementPrice("grainTrailer", s), onBuy: buyImpl("grainTrailer", s),
+    spec: `${grainTrailerCapacityBushels(s).toLocaleString()} bu (~${grainTrailerCapacityTons(s).toFixed(0)} t corn)`,
+    price: implementPrice("grainTrailer", s), onBuy: buyImpl("grainTrailer", s),
   }])));
   // Hay Spikes: in-field bale collector — Small (1 bale) & Medium (2).
   line("Hay Spikes", haySpikesIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
@@ -2813,7 +2827,7 @@ function buildEquipImplements(): void {
     const where = host ? `On ${host.name}` : "In the yard";
     const refund = impl.purchaseCost ?? implementPrice(impl.kind, impl.size);
     const sizeLine = impl.kind === "grainTrailer"
-      ? `${grainTrailerCapacityTons(impl.size)}t capacity${impl.cargoTons ? ` · ${impl.cargoTons.toFixed(1)}t onboard` : ""}`
+      ? `${grainTrailerCapacityBushels(impl.size).toLocaleString()} bu${impl.cargoTons ? ` · ${impl.cargoTons.toFixed(1)}t onboard` : ""}`
       : `${gameConfig.equipment[impl.kind][impl.size].widthFt} ft wide`;
 
     // Same dot language as the Machines cards: green while its host tractor
