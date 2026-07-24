@@ -52,6 +52,9 @@ describe("the biggest combine takes the harvest", () => {
     // accident of fleet order.
     for (const size of bigFirst ? (["large", "small"] as const) : (["small", "large"] as const)) {
       buyAgent(save, "harvester", size, [0, 0]);
+      // One corn header each, matched to size — a combine can't cut without one
+      // (2026-07-24), and a small one can't carry a large header.
+      buyImplement(save, "cornHeader", size);
     }
     buyAgent(save, "tractor", "medium", [0, 0]);
     buyImplement(save, "grainTrailer", "medium");

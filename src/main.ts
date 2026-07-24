@@ -925,6 +925,7 @@ const IMPLEMENT_KIND_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake",
   bailer: "Baler", grainTrailer: "Grain Trailer", mower: "Mower",
   mulcher: "Mulcher", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
+  cornHeader: "Corn Header", grainHeader: "Grain Header",
 };
 function implementInfoLines(kind: ImplementKind, size: EquipmentSize): { name: string; detail: string } {
   const name = `${IMPLEMENT_KIND_NAME[kind]} - ${SIZE_LABEL[size]}`;
@@ -962,8 +963,15 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
 
   if (task.type === "harvest") {
     const size = agent.size ?? "medium";
-    iconSvg = grainHeaderIconSvg(IMPLEMENT_QUEUE_ICON_PX);
-    info = { name: `Grain Header - ${SIZE_LABEL[size]}`, detail: `${gameConfig.equipment.harvester[size].widthFt} ft Working Width` };
+    // The header actually fitted (2026-07-24) — which one, and how wide, is now
+    // a real choice rather than an assumed part of the combine.
+    const header = save.implements.find(
+      (i) => i.attachedTo === agent.id && (i.kind === "cornHeader" || i.kind === "grainHeader"),
+    );
+    iconSvg = header ? implementIconHtml(header.kind, header.size, IMPLEMENT_QUEUE_ICON_PX) : grainHeaderIconSvg(IMPLEMENT_QUEUE_ICON_PX);
+    info = header
+      ? implementInfoLines(header.kind, header.size)
+      : { name: "No header fitted", detail: `${gameConfig.equipment.harvester[size].widthFt} ft nominal` };
     const capT = harvesterCapacityTons(size);
     const onboard = agent.grainOnboard ?? 0;
     fill = {
@@ -2631,6 +2639,17 @@ function buildEquipShop(): void {
   line("Baler", implementIconHtml("bailer", "medium", 26), {
     medium: { spec: `${gameConfig.equipment.bailer.medium.widthFt} ft pickup · drops bales`, price: implementPrice("bailer", "medium"), onBuy: buyImpl("bailer", "medium") },
   });
+  // Combine headers (2026-07-24): a combine can't cut without the right one —
+  // corn head for corn, grain head for everything else. Hitch to the COMBINE,
+  // and its class caps which size it can carry, same rule as a tractor.
+  line("Corn Header", implementIconHtml("cornHeader", "medium", 26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.cornHeader[s].widthFt} ft · corn only`,
+    price: implementPrice("cornHeader", s), onBuy: buyImpl("cornHeader", s),
+  }])));
+  line("Grain Header", implementIconHtml("grainHeader", "medium", 26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.grainHeader[s].widthFt} ft · all but corn`,
+    price: implementPrice("grainHeader", s), onBuy: buyImpl("grainHeader", s),
+  }])));
   line("Grain Trailer", grainTrailerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${grainTrailerCapacityTons(s)} t cargo`, price: implementPrice("grainTrailer", s), onBuy: buyImpl("grainTrailer", s),
   }])));

@@ -41,10 +41,13 @@ describe("netWorth (maintainer spec, 2026-07-11: cash + land value + equipment v
 
   it("equipment value sums every owned machine and implement at their purchase price", () => {
     const save = newGame();
-    ensureAgents(save, [0, 0]); // medium tractor + medium combine + medium plow + medium planter
+    // medium tractor + medium combine + medium plow + medium planter, plus the
+    // two medium headers the combine needs to cut anything (2026-07-24).
+    ensureAgents(save, [0, 0]);
     const expected =
       agentPrice("tractor", "medium") + agentPrice("harvester", "medium") +
-      implementPrice("plow", "medium") + implementPrice("planter", "medium");
+      implementPrice("plow", "medium") + implementPrice("planter", "medium") +
+      implementPrice("cornHeader", "medium") + implementPrice("grainHeader", "medium");
     expect(netWorth(save).equipmentValue).toBe(expected);
 
     const extraTractor = buyAgent(save, "tractor", "large", [0, 0]);

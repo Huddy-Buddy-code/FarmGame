@@ -123,6 +123,9 @@ describe("every combine gets a cart before any combine gets a second", () => {
     assignSiloCrop(save, silo.id, "corn");
     buyAgent(save, "harvester", "medium", [0, 0]);
     buyAgent(save, "harvester", "medium", [0, 0]);
+    // A combine can't cut without a header (2026-07-24) — one each.
+    buyImplement(save, "cornHeader", "medium");
+    buyImplement(save, "cornHeader", "medium");
     for (let i = 0; i < gameConfig.hauling.maxCrewSize + 1; i++) {
       buyAgent(save, "tractor", "medium", [0, 0]);
       buyImplement(save, "grainTrailer", "medium");
@@ -146,6 +149,7 @@ describe("every combine gets a cart before any combine gets a second", () => {
     const silo = buyBuildingAt(save, "silo", [-400, -400], "large");
     assignSiloCrop(save, silo.id, "corn");
     buyAgent(save, "harvester", "medium", [0, 0]);
+    buyImplement(save, "cornHeader", "medium");
     for (let i = 0; i < 4; i++) {
       buyAgent(save, "tractor", "medium", [0, 0]);
       buyImplement(save, "grainTrailer", "medium");

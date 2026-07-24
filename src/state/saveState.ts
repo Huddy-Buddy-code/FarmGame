@@ -266,12 +266,18 @@ export interface Agent {
 }
 
 /** An attachable implement (a plow, a planter, a sprayer, a Grain Trailer). A
- * tractor is a power unit; an implement gives it a job it can do. */
+ * tractor is a power unit; an implement gives it a job it can do.
+ *
+ * The two HEADERS (2026-07-24) are the exception to "implements hitch to
+ * tractors": they hitch to a COMBINE, and a combine can't cut without one. */
 export interface Implement {
   id: string;
-  kind: "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower" | "mulcher" | "haySpikes" | "baleTrailer";
+  kind:
+    | "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer"
+    | "mower" | "mulcher" | "haySpikes" | "baleTrailer"
+    | "cornHeader" | "grainHeader";
   size: EquipmentSize;
-  /** Id of the tractor this is hitched to, or undefined if parked in the yard. */
+  /** Id of the machine this is hitched to, or undefined if parked in the yard. */
   attachedTo?: string;
   /** What was paid — refunded on sell-back. */
   purchaseCost?: number;
@@ -479,6 +485,11 @@ export interface SaveState {
   /** Set once `ensureAgents` has seeded (or migrated) the starter fleet, so a
    * later reload never re-grants free equipment after the player sells it. */
   starterFleetGranted?: boolean;
+  /** Set once combine headers have been granted (2026-07-24). Separate from
+   * `starterFleetGranted` on purpose: headers arrived after that flag was
+   * already set on every existing save, and a combine can't cut without one,
+   * so the grant has to reach saves that predate them. */
+  headersGranted?: boolean;
 }
 
 export function newGame(): SaveState {

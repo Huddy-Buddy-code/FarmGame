@@ -110,12 +110,35 @@ function freeWindrower(save: SaveState): Agent | undefined {
 /** Buyable implements: a plow (tills), a planter (seeds), a sprayer (weeds or
  * fertilizes), a Grain Trailer (hauls a full combine to a silo) — same widths/
  * requirements, a tractor hitches one at a time. */
-export type ImplementKind = "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer" | "mower" | "mulcher" | "haySpikes" | "baleTrailer";
+export type ImplementKind =
+  | "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer"
+  | "mower" | "mulcher" | "haySpikes" | "baleTrailer"
+  // Combine headers (2026-07-24). Unlike every other implement these hitch to a
+  // HARVESTER, not a tractor, and which one a job needs depends on the CROP —
+  // see `harvestHeaderKind`.
+  | "cornHeader" | "grainHeader";
+
+/**
+ * Which header a combine needs to cut `crop` (maintainer decision, 2026-07-24).
+ *
+ * Corn is its own machine: row units that pull stalks down and strip the cobs
+ * off. Everything else — soybeans, the small grains, canola, sunflowers — is cut
+ * off at the base by a platform/draper header. So this is a real, if simple,
+ * equipment decision: a corn-and-beans rotation needs BOTH headers, and a farm
+ * that only grows small grains never buys a corn head at all.
+ *
+ * Crop-dependent, so harvest deliberately has no entry in `TASK_IMPLEMENT` —
+ * same treatment as a sell run's trailer (`sellTrailerKind`).
+ */
+export function harvestHeaderKind(crop: CropId): ImplementKind {
+  return crop === "corn" ? "cornHeader" : "grainHeader";
+}
 
 const EQUIPMENT_NAME: Record<EquipmentKind, string> = { tractor: "Tractor", harvester: "Combine", windrower: "Windrower" };
 const IMPLEMENT_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake", bailer: "Baler",
   grainTrailer: "Grain Trailer", mower: "Mower", mulcher: "Mulcher", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
+  cornHeader: "Corn Header", grainHeader: "Grain Header",
 };
 const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
 
@@ -194,11 +217,21 @@ const IMPLEMENT_CONFIG: Record<ImplementKind, Record<EquipmentSize, { price: num
   mulcher: gameConfig.equipment.mulcher,
   haySpikes: gameConfig.equipment.haySpikes,
   baleTrailer: gameConfig.equipment.baleTrailer,
+  cornHeader: gameConfig.equipment.cornHeader,
+  grainHeader: gameConfig.equipment.grainHeader,
 };
 
 /** Price of an implement at a given size. */
 export function implementPrice(kind: ImplementKind, size: EquipmentSize): number {
   return IMPLEMENT_CONFIG[kind][size].price;
+}
+
+/** The header kind a harvest task needs, from the crop standing in its field
+ * (the task itself may not carry a crop — a panel-queued harvest doesn't set
+ * one). Undefined when the field/crop can't be resolved. */
+function headerKindForTask(save: SaveState, task: FarmTask): ImplementKind | undefined {
+  const crop = task.crop ?? save.fields.find((f) => f.id === task.fieldId)?.crop;
+  return crop ? harvestHeaderKind(crop) : undefined;
 }
 
 /** Working width (meters) of an implement. */
@@ -256,6 +289,25 @@ export function ensureAgents(save: SaveState, home: Meters): void {
       save.implements.push(makeImplement(save, "planter", "medium"));
     }
     save.starterFleetGranted = true;
+  }
+  // Combine headers (2026-07-24). A combine cannot cut without one, so this
+  // runs for EVERY save, not just fresh ones: an existing farm's combine would
+  // otherwise be silently bricked by the update. Its own flag, because older
+  // saves already have `starterFleetGranted` set and would skip the block above.
+  // Both kinds are granted — a farm handed a combine that can only cut half its
+  // rotation isn't a decision, it's a papercut. The choice still bites later:
+  // a Large combine wants a Large header to use its width, and a sold header
+  // has to be replaced.
+  if (!save.headersGranted) {
+    for (const kind of ["cornHeader", "grainHeader"] as const) {
+      if (!save.implements.some((i) => i.kind === kind)) {
+        save.implements.push(makeImplement(save, kind, "medium"));
+      }
+    }
+    const combine = save.agents.find((a) => a.kind === "harvester");
+    const corn = save.implements.find((i) => i.kind === "cornHeader" && !i.attachedTo);
+    if (combine && corn) corn.attachedTo = combine.id;
+    save.headersGranted = true;
   }
   for (const a of save.agents) {
     if (a.kind === "tractor" || a.kind === "harvester") {
@@ -911,7 +963,14 @@ const haulTargetRuntime = new Map<string, Meters>();
 /** Working width (meters) for a task: from the attached implement (plow/
  * planter), or the config combine header width for harvest. */
 function taskSwathMeters(save: SaveState, task: FarmTask, agent: Agent): number {
-  if (task.type === "harvest") return gameConfig.equipment.harvester[agent.size ?? "medium"].widthFt * FEET_TO_METERS;
+  if (task.type === "harvest") {
+    // The HEADER's width, not the combine's (2026-07-24) — that's the whole
+    // point of choosing one. Falls back to the combine tier's nominal width for
+    // the (guarded-against, but not impossible) case of a header-less harvest.
+    const crop = task.crop ?? save.fields.find((f) => f.id === task.fieldId)?.crop;
+    const header = crop ? attachedImplement(save, agent.id, harvestHeaderKind(crop)) : undefined;
+    return header ? implementWidthM(header) : gameConfig.equipment.harvester[agent.size ?? "medium"].widthFt * FEET_TO_METERS;
+  }
   // A windrower's cut is its own width — it carries no implement to read one from.
   if (agent.kind === "windrower") return windrowerWidthM();
   const kind = TASK_IMPLEMENT[task.type]!;
@@ -1812,6 +1871,11 @@ function tickAgent(
           // A sell run's trailer depends on WHAT it's hauling, so it isn't in
           // TASK_IMPLEMENT — check the product's kind directly instead.
           (t.type !== "sell" || tractorCanUse(save, agent, sellTrailerKind(t.sellProduct!))) &&
+          // A combine needs the RIGHT header for what's standing in the field
+          // (2026-07-24) — corn head for corn, grain head for everything else.
+          // Crop-dependent like a sell run's trailer, so it isn't in
+          // TASK_IMPLEMENT and gets checked here instead.
+          (t.type !== "harvest" || !headerKindForTask(save, t) || tractorCanUse(save, agent, headerKindForTask(save, t)!)) &&
           // Biggest implement available, pulled by the smallest tractor that
           // can manage it (2026-07-23). A tractor that isn't the preferred rig
           // for this job stands down and lets the right one take it; the loop
@@ -1853,7 +1917,10 @@ function tickAgent(
       // Auto-hitch the needed implement if the tractor isn't already carrying
       // it — swapping off whatever else it's carrying (one implement at a time).
       // A sell run's trailer is product-dependent, so it isn't in the table.
-      const needKind = next.type === "sell" ? sellTrailerKind(next.sellProduct!) : needsImplementFor(agent, next.type);
+      const needKind =
+        next.type === "sell" ? sellTrailerKind(next.sellProduct!)
+        : next.type === "harvest" ? headerKindForTask(save, next)
+        : needsImplementFor(agent, next.type);
       if (needKind && !attachedImplement(save, agent.id, needKind)) {
         const impl = availableImplementFor(save, agent, needKind);
         if (impl) {
@@ -3126,7 +3193,9 @@ export function blockedWork(save: SaveState): BlockedWork[] {
   );
   for (const task of save.tasks) {
     if (task.status !== "queued") continue;
-    const kind = TASK_IMPLEMENT[task.type];
+    // Harvest's implement is crop-dependent (which header), so it isn't in the
+    // table — resolve it per task instead.
+    const kind = task.type === "harvest" ? headerKindForTask(save, task) : TASK_IMPLEMENT[task.type];
     const needed = TASK_AGENT_KIND[task.type];
     // `agentCanDoTask`, not a bare kind comparison: a cut counts as covered by
     // a windrower as well as by a tractor (2026-07-24).
@@ -3146,10 +3215,15 @@ export function blockedWork(save: SaveState): BlockedWork[] {
       out.push({ fieldId: task.fieldId, type: task.type, reason: `No ${IMPLEMENT_NAME[kind]} owned` });
       continue;
     }
-    // Owned, but nothing that can pull it — a large-only implement on a
-    // small-only fleet is just as stuck as not owning one.
-    if (kind && !save.agents.some((a) => a.kind === "tractor" && a.size && save.implements.some((i) => i.kind === kind && canPull(a.size!, i.size)))) {
-      out.push({ fieldId: task.fieldId, type: task.type, reason: `No tractor big enough for the ${IMPLEMENT_NAME[kind]}` });
+    // Owned, but nothing that can carry it — a large-only implement on a
+    // small-only fleet is just as stuck as not owning one. Headers ride on the
+    // COMBINE, so they're checked against combines rather than tractors.
+    const carrier = task.type === "harvest" ? "harvester" : "tractor";
+    if (kind && !save.agents.some((a) => a.kind === carrier && a.size && save.implements.some((i) => i.kind === kind && canPull(a.size!, i.size)))) {
+      out.push({
+        fieldId: task.fieldId, type: task.type,
+        reason: `No ${carrier === "harvester" ? "combine" : "tractor"} big enough for the ${IMPLEMENT_NAME[kind]}`,
+      });
     }
   }
   return out;

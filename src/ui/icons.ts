@@ -193,9 +193,9 @@ export function grainTrailerIconSvg(size = 22): string {
 
 /** Grain header (maintainer request, 2026-07-13): the wide cutting platform
  * a combine mounts out front — divider points at each end, a reel of tines
- * above the cutting bar, an auger trough feeding the middle. Shown in the
- * Work Queue as the combine's "implement" (assumed always fitted — no
- * separate buyable header exists). */
+ * above the cutting bar, an auger trough feeding the middle. As of 2026-07-24
+ * this is a real buyable implement (the Grain Header), not just the combine's
+ * assumed-fitted "implement" in the Work Queue. */
 export function grainHeaderIconSvg(size = 22): string {
   const reelTines: string[] = [];
   for (let i = 0; i < 6; i++) {
@@ -329,4 +329,12 @@ export const IMPLEMENT_ICON_SVG: Record<string, (size?: number) => string> = {
   mulcher: mulcherIconSvg,
   haySpikes: haySpikesIconSvg,
   baleTrailer: baleTrailerIconSvg,
+  // Headers (2026-07-24) have no art of their own yet. The metaphors are at
+  // least honest: a corn header is a bank of row units (planter glyph), a grain
+  // header is a wide cutter bar (mower glyph).
+  // A corn header is a bank of row units, so the planter glyph is an honest
+  // stand-in until it has art of its own. The grain header already had a real
+  // drawing (it was the combine's assumed implement in the Work Queue).
+  cornHeader: planterIconSvg,
+  grainHeader: grainHeaderIconSvg,
 };

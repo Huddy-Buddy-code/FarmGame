@@ -217,11 +217,27 @@ export interface GameConfig {
      * through hay season. One size only (40 ft), so unlike every other machine
      * this isn't keyed by `EquipmentSize`. */
     windrower: { price: number; widthFt: number };
-    /** The combine is self-contained (integral grain header) but now SIZED
-     * like a tractor (maintainer request, 2026-07-12): each tier has its own
-     * hopper capacity — the combine fills as it cuts, stops when full, and
-     * waits for a Grain Trailer (see `hauling` + `sim/tasks.ts`). */
+    /** The combine is SIZED like a tractor (maintainer request, 2026-07-12):
+     * each tier has its own hopper capacity — the combine fills as it cuts,
+     * stops when full, and waits for a Grain Trailer (see `hauling` +
+     * `sim/tasks.ts`).
+     *
+     * Its `widthFt` is NO LONGER the cutting width (2026-07-24): a combine now
+     * needs a HEADER hitched, and the header's width is what drives the
+     * coverage path. The number is kept as the size tier's nominal/reference
+     * width — what a sensibly-matched header for that combine looks like. */
     harvester: Record<EquipmentSize, { price: number; widthFt: number; capacityTons: number }>;
+    /** Corn Header (maintainer decision, 2026-07-24): row units that strip cobs
+     * off standing stalks. CORN ONLY — it physically cannot cut a small grain.
+     * Sized in rows on a real machine (8/12/16-row at 30 in rows = 20/30/40 ft);
+     * expressed here in feet like every other implement. A combine can carry a
+     * header of its own class or smaller, same `canPull` rule as a tractor. */
+    cornHeader: Record<EquipmentSize, { price: number; widthFt: number }>;
+    /** Grain Header (2026-07-24): the cutter-bar/draper platform for everything
+     * that ISN'T corn — soybeans, the small grains, canola, sunflowers. Wider
+     * than a corn header at every tier (it's cutting a standing crop off at the
+     * base, not pulling rows through row units) and cheaper per foot. */
+    grainHeader: Record<EquipmentSize, { price: number; widthFt: number }>;
     /** Grain Trailer: hauls a full combine hopper to a silo. A normal
      * implement (one tractor hitch slot, like a plow) — `widthFt` is unused
      * (not a fieldwork tool) but kept so it shares the generic implement
@@ -632,6 +648,19 @@ export const gameConfig: GameConfig = {
       small: { price: 20_000, widthFt: 15 },
       medium: { price: 40_000, widthFt: 25 },
       large: { price: 75_000, widthFt: 35 },
+    },
+    // Headers. A combine needs the RIGHT one hitched: corn header for corn,
+    // grain header for everything else. Real American sizes — corn headers
+    // 8/12/16-row on 30 in rows; grain platforms 25/35/45 ft.
+    cornHeader: {
+      small: { price: 70_000, widthFt: 20 },
+      medium: { price: 110_000, widthFt: 30 },
+      large: { price: 165_000, widthFt: 40 },
+    },
+    grainHeader: {
+      small: { price: 55_000, widthFt: 25 },
+      medium: { price: 85_000, widthFt: 35 },
+      large: { price: 130_000, widthFt: 45 },
     },
     // Self-propelled windrower — one 40 ft machine. Priced against a Large
     // mower ($130k) plus the Medium tractor ($250k) it frees up, less a bit:
