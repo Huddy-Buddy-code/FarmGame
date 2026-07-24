@@ -1583,6 +1583,21 @@ function buildingIndex(building: Building): number {
  * so it's explained once in the note line instead of drawn twelve times over.
  * Also absorbs the old "Unassigned Grain" and "In-Field Bales" sections —
  * holdings here are totals, so nothing can strand out of view. */
+/**
+ * How many cuttings a year a bale product comes off an acre (maintainer spec,
+ * 2026-07-24: "assume 3 harvests for grass & alfalfa, 1 harvest for straw").
+ * Straw is a by-product of a single annual grain harvest; a hay stand is mown
+ * three times. Drives the per-acre figures in the Market rows — without it,
+ * hay's $/acre would read a third of what a hay field actually earns.
+ */
+function cuttingsPerYearFor(product: BaleProduct): number {
+  const crop = (Object.keys(gameConfig.crops) as CropId[]).find((c) => {
+    const bp = gameConfig.crops[c].baleProduct;
+    return bp !== undefined && (bp === product || `${bp}Square` === product);
+  });
+  return crop ? (gameConfig.crops[crop].harvestMonths?.length ?? 1) : 1;
+}
+
 function buildMarketSection(rows: HTMLElement): void {
   const now = clock.time();
   const month = monthOf(now);
@@ -1595,54 +1610,78 @@ function buildMarketSection(rows: HTMLElement): void {
   const fieldBales = new Map(baleInventory(save, now).map((s) => [s.product, s.bales]));
   const claimed = new Set(save.buildings.filter((b) => b.kind === "silo").map((b) => b.assignedCrop).filter(Boolean));
 
-  interface MarketRow { id: MarketProduct; name: string; iconHtml: string; unit: string; unitPrice: number; qty: number; qtyLabel: string }
+  interface MarketRow {
+    id: MarketProduct; name: string; iconHtml: string; unit: string; unitPrice: number;
+    qty: number; qtyLabel: string;
+    /** Per-acre economics — yield and gross, for comparing crops at a glance. */
+    perAcre: string;
+  }
   const products: MarketRow[] = [];
   for (const c of SELLABLE_GRAINS) {
     const cfg = gameConfig.crops[c];
     const tons = save.grain[c];
-    const orphanNote = tons > 0 && !claimed.has(c) ? " · ⚠️ no silo assigned" : "";
+    // Only what's actually in store (maintainer request, 2026-07-24) — the full
+    // catalogue of ten crops made this a wall to scroll past, most of it zeroes.
+    if (tons <= 0) continue;
+    const unitPrice = grainUnitPrice(c, month);
+    const orphanNote = !claimed.has(c) ? " · ⚠️ no silo assigned" : "";
     products.push({
       id: c, name: cfg.name, iconHtml: cfg.emoji, unit: "/t",
-      unitPrice: grainUnitPrice(c, month),
+      unitPrice,
       qty: tons,
-      qtyLabel: tons > 0 ? `${tons.toFixed(1)} t stored${orphanNote}` : "none stored",
+      qtyLabel: `${tons.toFixed(1)} t stored${orphanNote}`,
+      perAcre: `${cfg.baseYieldTonsPerAcre.toFixed(1)} t/ac · $${Math.round(unitPrice * cfg.baseYieldTonsPerAcre).toLocaleString()}/ac`,
     });
   }
   for (const p of SELLABLE_BALES) {
     const cfg = gameConfig.baleProducts[p];
     const stored = save.buildings.reduce((s, b) => s + (b.storedBales?.[p] ?? 0), 0);
     const inField = fieldBales.get(p) ?? 0;
+    if (stored + inField <= 0) continue;
     const parts: string[] = [];
     if (stored > 0) parts.push(`${stored} stored`);
     if (inField > 0) parts.push(`${inField} in the field`);
+    const cuttings = cuttingsPerYearFor(p);
+    const balesPerAcre = cfg.balesPerAcre * cuttings;
+    const unitPrice = baleUnitPrice(p, month);
     products.push({
       id: p, name: cfg.name, iconHtml: baleIconSvg(20, cfg.color), unit: "/bale",
-      unitPrice: baleUnitPrice(p, month),
+      unitPrice,
       qty: stored + inField,
-      qtyLabel: parts.length > 0 ? `${parts.join(" · ")} bales` : "no bales",
+      qtyLabel: `${parts.join(" · ")} bales`,
+      perAcre: `${balesPerAcre.toFixed(1)} bales/ac · $${Math.round(unitPrice * balesPerAcre).toLocaleString()}/ac${cuttings > 1 ? ` (${cuttings} cuts)` : ""}`,
     });
+  }
+
+  if (products.length === 0) {
+    rows.insertAdjacentHTML(
+      "beforeend",
+      `<div class="silo-bar-empty">Nothing in store yet — harvest or bale a field and it shows up here to sell.</div>`,
+    );
+    return;
   }
 
   for (const prod of products) {
     const sched = save.sellSchedule?.[prod.id];
     const row = document.createElement("div");
-    row.className = "inv-row mkt-row" + (prod.qty <= 0 ? " empty" : "");
+    row.className = "inv-row mkt-row";
     row.innerHTML = `
       <span class="icon">${prod.iconHtml}</span>
       <span class="info">
-        <div class="name">${prod.name}</div>
+        <div class="name">${escapeHtml(prod.name)}</div>
         <div class="qty">${prod.qtyLabel}</div>
+        <div class="mkt-peracre">${prod.perAcre}</div>
       </span>
       <span class="price">$${Math.round(prod.unitPrice).toLocaleString()}${prod.unit} ${priceBadge(prod.id)}</span>`;
 
     // Sell EVERYTHING of this product, wherever it sits, RIGHT NOW — a buyer
     // collects, so it takes the instant price (base less the pickup fee, no
-    // seasonal premium). The button label is the actual cash it pays.
+    // seasonal premium). The button label is the actual cash it pays. No
+    // disabled state any more: a row only exists when there's stock to sell.
     const value = Math.round(prod.qty * prod.unitPrice);
     const sellBtn = document.createElement("button");
     sellBtn.className = "primary mkt-sellbtn";
-    sellBtn.textContent = prod.qty > 0 ? `Sell · $${value.toLocaleString()}` : "Sell";
-    sellBtn.disabled = prod.qty <= 0;
+    sellBtn.textContent = `Sell · $${value.toLocaleString()}`;
     sellBtn.title = `Instant sale — ${Math.round(gameConfig.market.instantSellPenaltyPct * 100)}% below base price, and no seasonal bonus. Haul it yourself for the full price.`;
     sellBtn.addEventListener("click", () => {
       const before = save.money;
@@ -1754,6 +1793,9 @@ function refreshInventory(force = false) {
   buildMarketSection(rows);
 
   // --- Grain Silos ---
+  // Rectangular cards with the fill bar built in (maintainer request,
+  // 2026-07-24), replacing the old row + separate bar beneath it. Locate/sell
+  // appear on hover or selection, same rule as the Equipment tab's cards.
   const silos = save.buildings.filter((b) => b.kind === "silo");
   rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">🛢️ Grain Silos</div>`);
   if (silos.length === 0) {
@@ -1765,15 +1807,23 @@ function refreshInventory(force = false) {
     const cropCapacityTotal = crop ? siloCapacityForCrop(save, crop) : 0;
     // This silo's proportional share of the crop's pooled tons.
     const tons = crop && cropCapacityTotal > 0 ? (save.grain[crop] * capacity) / cropCapacityTotal : 0;
+    const pct = capacity > 0 ? Math.min(100, (tons / capacity) * 100) : 0;
+    const level = pct >= 95 ? "full" : pct >= 75 ? "high" : "ok";
+    const name = `Silo ${buildingIndex(silo)}`;
 
-    const row = document.createElement("div");
-    row.className = "inv-row inv-building";
-    row.innerHTML = `
-      <span class="icon">${BUILDING_ICON.silo}</span>
-      <span class="info">
-        <div class="name">Silo ${buildingIndex(silo)} · ${SIZE_LABEL[silo.size ?? "small"]}</div>
-        <div class="qty">${capacity.toLocaleString()} t capacity</div>
-      </span>`;
+    const card = document.createElement("div");
+    card.className = "store-card";
+    card.innerHTML = `
+      <div class="sc-head">
+        <span class="icon">${BUILDING_ICON.silo}</span>
+        <span class="sc-title">
+          <span class="sc-name">${name} · ${SIZE_LABEL[silo.size ?? "small"]}</span>
+          <span class="sc-sub">${crop ? `${gameConfig.crops[crop].emoji} ${escapeHtml(gameConfig.crops[crop].name)}` : "Not assigned"} · ${capacity.toLocaleString()} t capacity</span>
+        </span>
+      </div>
+      <div class="sc-bar"><div class="sc-fill ${level}" style="width:${pct.toFixed(1)}%"></div>
+        <span class="sc-bar-label">${crop ? `${tons.toFixed(1)} / ${capacity.toLocaleString()} t · ${pct.toFixed(0)}%` : "Pick a crop to start filling it"}</span>
+      </div>`;
 
     const select = document.createElement("select");
     select.className = "inv-crop-select";
@@ -1786,35 +1836,32 @@ function refreshInventory(force = false) {
     select.value = crop ?? "";
     select.addEventListener("change", () => {
       assignSiloCrop(save, silo.id, (select.value || undefined) as CropId | undefined);
-      refreshInventory();
+      refreshInventory(true);
     });
-    row.appendChild(select);
-    row.appendChild(locateButton(`Silo ${buildingIndex(silo)}`, silo.pos));
+    card.appendChild(select);
+
+    const actions = document.createElement("div");
+    actions.className = "sc-actions";
+    actions.appendChild(locateButton(name, silo.pos));
     const refund = buildingPrice("silo", silo.size);
-    row.appendChild(
+    actions.appendChild(
       iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, () => {
-        if (!confirm(`Sell Silo ${buildingIndex(silo)} for $${refund.toLocaleString()}?`)) return;
+        if (!confirm(`Sell ${name} for $${refund.toLocaleString()}?`)) return;
         sellBuilding(save, silo.id);
-        toast(`💰 Sold Silo ${buildingIndex(silo)} for $${refund.toLocaleString()}`);
-        refreshInventory();
+        toast(`💰 Sold ${name} for $${refund.toLocaleString()}`);
+        refreshInventory(true);
         refreshBuildingMarkers();
         updateHud();
       }),
     );
-    rows.appendChild(row);
-
-    if (!crop) {
-      rows.insertAdjacentHTML("beforeend", `<div class="silo-bar-empty">Not assigned — pick a crop above to start filling it.</div>`);
-      continue;
-    }
-    // Selling lives in the Market section now (2026-07-22) — a silo row is
-    // just assignment + fill level.
-    rows.appendChild(siloCapacityBar(gameConfig.crops[crop], tons, capacity));
+    card.appendChild(actions);
+    wireStorageSelection(card, `silo:${silo.id}`);
+    rows.appendChild(card);
   }
 
   // --- Bale storage structures (2026-07-17): now hold hauled bales (per
   // product), each with an optional product assignment (unassigned accepts
-  // any). A Barn caps; an Area is unlimited. ---
+  // any). Both kinds cap since 2026-07-24. ---
   const baleBuildings = save.buildings.filter((b) => b.kind === "baleBarn" || b.kind === "baleArea");
   if (baleBuildings.length > 0) {
     rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">📦 Bale Storage</div>`);
@@ -1822,15 +1869,33 @@ function refreshInventory(force = false) {
       const name = `${buildingDisplayName(b.kind)} ${buildingIndex(b)}`;
       const cap = baleStorageCapacityOf(b.kind as "baleBarn" | "baleArea");
       const stored = storedBalesTotal(b);
-      const capText = `${stored} / ${cap.toLocaleString()}`;
-      const row = document.createElement("div");
-      row.className = "inv-row inv-building";
-      row.innerHTML = `
-        <span class="icon">${BUILDING_ICON[b.kind]}</span>
-        <span class="info">
-          <div class="name">${name}</div>
-          <div class="qty">${capText} bales</div>
-        </span>`;
+      const pct = cap > 0 ? Math.min(100, (stored / cap) * 100) : 0;
+      const level = pct >= 95 ? "full" : pct >= 75 ? "high" : "ok";
+      // WHAT'S in there, per product (maintainer request, 2026-07-24) — round
+      // and square of the same crop are different products and priced apart, so
+      // "300 bales" alone doesn't tell you what you own.
+      const held = SELLABLE_BALES
+        .map((p) => ({ p, n: b.storedBales?.[p] ?? 0 }))
+        .filter((x) => x.n > 0);
+
+      const card = document.createElement("div");
+      card.className = "store-card";
+      card.innerHTML = `
+        <div class="sc-head">
+          <span class="icon">${BUILDING_ICON[b.kind]}</span>
+          <span class="sc-title">
+            <span class="sc-name">${name}</span>
+            <span class="sc-sub">${cap.toLocaleString()} bale capacity</span>
+          </span>
+        </div>
+        <div class="sc-bar"><div class="sc-fill ${level}" style="width:${pct.toFixed(1)}%"></div>
+          <span class="sc-bar-label">${stored.toLocaleString()} / ${cap.toLocaleString()} bales · ${pct.toFixed(0)}%</span>
+        </div>
+        ${held.length > 0
+          ? `<div class="sc-contents">${held.map((x) =>
+              `<span class="sc-chip">${baleIconSvg(11, gameConfig.baleProducts[x.p].color)} ${escapeHtml(gameConfig.baleProducts[x.p].name)} × ${x.n}</span>`,
+            ).join("")}</div>`
+          : `<div class="sc-contents empty">Empty</div>`}`;
 
       // Optional product assignment — mirrors the silo crop dropdown.
       const select = document.createElement("select");
@@ -1841,55 +1906,51 @@ function refreshInventory(force = false) {
       select.value = b.assignedProduct ?? "";
       select.addEventListener("change", () => {
         assignBaleStorageProduct(save, b.id, (select.value || undefined) as BaleProduct | undefined);
-        refreshInventory();
+        refreshInventory(true);
       });
-      row.appendChild(select);
-      row.appendChild(locateButton(name, b.pos));
+      card.appendChild(select);
+
+      const actions = document.createElement("div");
+      actions.className = "sc-actions";
+      actions.appendChild(locateButton(name, b.pos));
       const refund = buildingPrice(b.kind);
-      row.appendChild(
+      actions.appendChild(
         iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, () => {
           if (!confirm(`Sell ${name} for $${refund.toLocaleString()}?`)) return;
           sellBuilding(save, b.id);
           toast(`💰 Sold ${name} for $${refund.toLocaleString()}`);
-          refreshInventory();
+          refreshInventory(true);
           refreshBuildingMarkers();
           updateHud();
         }),
       );
-      rows.appendChild(row);
-
-      // Per-product stored tally — a compact counts line; selling lives in the
-      // Market section now (2026-07-22).
-      const held = SELLABLE_BALES
-        .map((p) => ({ p, n: b.storedBales?.[p] ?? 0 }))
-        .filter((x) => x.n > 0)
-        .map((x) => `${gameConfig.baleProducts[x.p].name} × ${x.n}`);
-      if (held.length > 0) {
-        rows.insertAdjacentHTML("beforeend", `<div class="silo-bar-empty">${held.join(" · ")}</div>`);
-      }
+      card.appendChild(actions);
+      wireStorageSelection(card, `bale:${b.id}`);
+      rows.appendChild(card);
     }
   }
 }
 
-/** A silo-capacity status bar for one crop: fills left→right, "X.X / Y t".
- * Color shifts gold → amber → red as it nears full; reads "No silo assigned"
- * (no fill) when the farm hasn't dedicated a silo to this crop yet. */
-function siloCapacityBar(cfg: (typeof gameConfig.crops)[CropId], tons: number, capacity: number): HTMLElement {
-  const wrap = document.createElement("div");
-  wrap.className = "silo-bar";
-  if (capacity <= 0) {
-    wrap.innerHTML = `<div class="silo-bar-empty">🛢️ No silo assigned to ${cfg.name.toLowerCase()} — build or assign one to track capacity</div>`;
-    return wrap;
-  }
-  const pct = Math.min(100, (tons / capacity) * 100);
-  const level = pct >= 95 ? "full" : pct >= 75 ? "high" : "ok";
-  wrap.innerHTML = `
-    <div class="silo-bar-track">
-      <div class="silo-bar-fill ${level}" style="width:${pct.toFixed(1)}%"></div>
-      <div class="silo-bar-label">${tons.toFixed(1)} / ${capacity.toLocaleString()} t</div>
-    </div>`;
-  return wrap;
+/** Which storage card is selected — same hover-or-select rule as the Equipment
+ * tab's cards (see `wireCardSelection`), kept separate so selecting a silo
+ * doesn't deselect a machine on another tab. */
+let selectedStorageCardId: string | null = null;
+
+function wireStorageSelection(card: HTMLElement, id: string): void {
+  if (selectedStorageCardId === id) card.classList.add("selected");
+  card.addEventListener("click", (e) => {
+    // Don't steal clicks meant for the buttons or the crop dropdown.
+    const el = e.target as HTMLElement;
+    if (el.closest(".sc-actions") || el.closest("select")) return;
+    selectedStorageCardId = selectedStorageCardId === id ? null : id;
+    refreshInventory(true);
+  });
 }
+
+/* REMOVED 2026-07-24: `siloCapacityBar`. The fill bar is drawn inside the
+ * storage CARD now (`.sc-bar`, see refreshInventory) rather than as a separate
+ * element hung underneath the row, so a silo's name, crop, capacity and fill
+ * are one object instead of two stacked ones. */
 
 // ---------------------------------------------------------------------------
 // Finance tab: loans (brief §8). One OPEN balance for the current campaign

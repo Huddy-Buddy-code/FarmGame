@@ -590,6 +590,66 @@
         padding: 5px 10px; border: 1.5px dashed var(--wood); border-radius: 999px;
       }
 
+      /* Per-acre economics under each Market row (2026-07-24): yield/acre and
+         gross/acre, so crops can be compared without leaving the tab. */
+      .mkt-peracre { font-size: 11px; color: var(--green-dark); font-weight: 600; }
+
+      /* --- Storage cards (2026-07-24): a silo or bale store as ONE rectangular
+         object — name, assignment, fill bar and (for bales) what's actually in
+         there — replacing the old row-plus-separate-bar pair. --------------- */
+      .store-card {
+        position: relative; display: flex; flex-direction: column; gap: 5px;
+        background: var(--cream-2); border: 1.5px solid var(--wood);
+        border-radius: 10px; padding: 8px 10px; margin: 5px 0; cursor: pointer;
+        transition: border-color 0.15s, box-shadow 0.15s;
+      }
+      .store-card.selected { border-color: var(--green-dark); box-shadow: 0 0 0 2px rgba(93, 138, 58, 0.28); }
+      .store-card .sc-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+      .store-card .sc-head .icon { font-size: 22px; line-height: 1; flex: 0 0 auto; }
+      .store-card .sc-title { display: flex; flex-direction: column; min-width: 0; }
+      .store-card .sc-name {
+        font-weight: 700; font-size: 13px; line-height: 1.15;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .store-card .sc-sub {
+        font-size: 11px; color: #8a7658; line-height: 1.15;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      /* Same fill-bar language as the old silo bar, now inside the card. */
+      .store-card .sc-bar {
+        position: relative; height: 20px; border-radius: 999px;
+        background: var(--cream); border: 1.5px solid var(--wood); overflow: hidden;
+      }
+      .store-card .sc-fill {
+        height: 100%; border-radius: 999px 0 0 999px; transition: width 0.4s ease;
+        background: linear-gradient(180deg, #f2c766, var(--gold));
+      }
+      .store-card .sc-fill.high { background: linear-gradient(180deg, #f0a84a, #d9821f); }
+      .store-card .sc-fill.full { background: linear-gradient(180deg, #e07d63, var(--red)); }
+      .store-card .sc-bar-label {
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        font-size: 11px; font-weight: 700; color: var(--wood-dark);
+        text-shadow: 0 1px 0 rgba(255,255,255,0.55);
+      }
+      /* What's in a bale store, per product — round and square of the same crop
+         are different products at different prices, so a bare total isn't enough. */
+      .store-card .sc-contents { display: flex; flex-wrap: wrap; gap: 4px; }
+      .store-card .sc-contents.empty { font-size: 11px; color: #8a7658; font-style: italic; }
+      .store-card .sc-chip {
+        display: inline-flex; align-items: center; gap: 3px;
+        font-size: 11px; padding: 1px 7px; border-radius: 999px;
+        background: var(--cream); border: 1.5px solid var(--wood);
+      }
+      .store-card .sc-chip svg { display: block; }
+      /* Locate/sell: hover-or-select, same rule as the Equipment tab. */
+      .store-card .sc-actions {
+        position: absolute; top: 6px; right: 8px; display: flex; gap: 3px;
+        visibility: hidden; opacity: 0; transition: opacity 0.12s;
+      }
+      .store-card:hover .sc-actions, .store-card.selected .sc-actions { visibility: visible; opacity: 1; }
+      .store-card .sc-actions button { padding: 2px 6px; font-size: 13px; }
+      .store-card .inv-crop-select { width: 100%; font-size: 11px; padding: 2px 4px; }
+
       /* ---------- Finance tab (loans) ---------- */
       #financetab h2 { margin: 0 0 2px; font-size: 18px; }
       #financetab .sub { font-size: 12px; color: #8a7658; margin-bottom: 10px; }
