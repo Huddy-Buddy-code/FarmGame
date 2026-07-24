@@ -19,6 +19,7 @@ import type { SimTime } from "./clock";
 import { START_MONTH, MONTHS_PER_YEAR, minutesPerMonth } from "./calendar";
 import { grainInstantPrice, baleInstantPrice, SELLABLE_GRAINS } from "./market";
 import type { MarketProduct } from "./market";
+import { baleTonsOf } from "./farming";
 
 export interface SaleResult {
   tons: number;
@@ -158,7 +159,7 @@ export function sellAllOfProduct(save: SaveState, product: MarketProduct, now: S
   if (bales > 0) {
     appendCompletedTask(save, {
       id: `autosell-${++autoSellSeq}`, type: "sellBales",
-      label: gameConfig.baleProducts[p].name, bales, tons: bales * gameConfig.forage.baleTons,
+      label: gameConfig.baleProducts[p].name, bales, tons: bales * baleTonsOf(p),
       revenue, completedAt: now,
     });
   }

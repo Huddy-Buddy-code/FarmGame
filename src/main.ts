@@ -55,7 +55,7 @@ import {
 import {
   tickFarming, growthProgress, yieldRange, productivityMultiplier, yieldModifierSteps, inPlantingWindow, canPlow,
   hasStandingCrop, inWeedingWindow, canFertilizeNow, isPerennial, canSeedPerennial,
-  isPerennialDormant, harvestMonthsRemaining, harvestWindowMonthsFor,
+  isPerennialDormant, harvestMonthsRemaining, harvestWindowMonthsFor, baleTonsOf, baleProductForField,
 } from "./sim/farming";
 import {
   ensureAgents, initTaskIds, enqueueTask, cancelTask, taskCost, tasksFor,
@@ -1012,7 +1012,11 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     info = implementInfoLines("bailer", size);
     // The baler's real hopper (like the combine): tons gathered toward the next
     // bale, resetting to 0 each time one ejects. Total = one bale's worth.
-    const baleTons = gameConfig.forage.baleTons;
+    // One bale's worth — product-dependent since square bales arrived.
+    const field = save.fields.find((f) => f.id === task.fieldId);
+    const balerImpl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
+    const square = !!balerImpl && !!gameConfig.equipment.bailer[balerImpl.size].makesSquareBales;
+    const baleTons = field ? baleTonsOf(baleProductForField(field, square)) : gameConfig.forage.baleTons;
     const cargo = impl?.cargoTons ?? 0;
     fill = {
       pct: baleTons > 0 ? Math.min(100, (cargo / baleTons) * 100) : 0,
@@ -2636,9 +2640,13 @@ function buildEquipShop(): void {
   line("Rake", rakeIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${gameConfig.equipment.rake[s].widthFt} ft · windrows forage`, price: implementPrice("rake", s), onBuy: buyImpl("rake", s),
   }])));
-  line("Baler", implementIconHtml("bailer", "medium", 26), {
-    medium: { spec: `${gameConfig.equipment.bailer.medium.widthFt} ft pickup · drops bales`, price: implementPrice("bailer", "medium"), onBuy: buyImpl("bailer", "medium") },
-  });
+  // Baler: three sizes as of 2026-07-24, and the size decides BALE SHAPE —
+  // Small/Medium are round balers, the Large is a large square baler whose
+  // bales are heavier and worth more per ton.
+  line("Baler", implementIconHtml("bailer", "medium", 26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.bailer[s].widthFt} ft pickup · ${gameConfig.equipment.bailer[s].makesSquareBales ? "square bales" : "round bales"}`,
+    price: implementPrice("bailer", s), onBuy: buyImpl("bailer", s),
+  }])));
   // Combine headers (2026-07-24): a combine can't cut without the right one —
   // corn head for corn, grain head for everything else. Hitch to the COMBINE,
   // and its class caps which size it can carry, same rule as a tractor.
@@ -3966,7 +3974,7 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
     const product = gameConfig.baleProducts[productId];
     const unitPrice = baleUnitPrice(productId, monthOf(now));
     const value = Math.round(bales * unitPrice);
-    const tons = (bales * gameConfig.forage.baleTons).toFixed(0);
+    const tons = (bales * baleTonsOf(productId)).toFixed(0);
     body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">📦 <b>${bales}</b> ${product.name} bales (${tons} t) · $${Math.round(unitPrice).toLocaleString()}/bale ${priceBadge(productId)}</div>`);
     const btn = document.createElement("button");
     btn.className = "primary";
@@ -3974,7 +3982,7 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
     btn.addEventListener("click", () => {
       const { bales: sold, revenue } = sellBales(save, field, clock.time());
       if (sold <= 0) return;
-      logSale("sellBales", { fieldId: field.id, label: product.name, bales: sold, tons: sold * gameConfig.forage.baleTons, revenue });
+      logSale("sellBales", { fieldId: field.id, label: product.name, bales: sold, tons: sold * baleTonsOf(productId), revenue });
       updateHud();
       refreshFieldPanel(true);
       updateBaleMarkers();

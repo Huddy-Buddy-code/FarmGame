@@ -30,7 +30,7 @@ import type { Meters } from "../geo/coords";
 import {
   inPlantingWindow, canPlow, applyPlow, applyPlant, applyHarvestDone, applyBaleDone,
   applyMowDone, hasStandingCrop, inWeedingWindow, canFertilizeNow,
-  isPerennial, balesPerAcreForField, canSeedPerennial, productivityMultiplier, baleProductForField,
+  isPerennial, balesPerAcreForField, canSeedPerennial, productivityMultiplier, baleProductForField, baleTonsOf,
 } from "./farming";
 import { buildCoveragePath, buildHeadlandCoveragePath, sampleAt, acresDoneAt, distanceAtAcres, TASK_HEADLANDS } from "./coverage";
 import type { CoveragePath } from "./coverage";
@@ -1535,7 +1535,7 @@ function sellHauledBales(save: SaveState, product: BaleProduct, n: number, now: 
     type: "sellBales",
     label: cfg.name,
     bales: n,
-    tons: n * gameConfig.forage.baleTons,
+    tons: n * baleTonsOf(product),
     revenue,
     completedAt: now,
   });
@@ -2635,7 +2635,10 @@ function tickAgent(
       const path = getActivePath(save, task, field, agent);
       const speed = (taskFieldSpeedKmh("bale") * 1000) / 60; // meters per sim-minute
       const baler = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
-      const baleTons = gameConfig.forage.baleTons;
+      // The Large baler is a large SQUARE baler (2026-07-24) — its bales are a
+      // different product: heavier, fewer per acre, worth more each.
+      const square = !!baler && !!gameConfig.equipment.bailer[baler.size].makesSquareBales;
+      const baleTons = baleTonsOf(baleProductForField(field, square));
       // Even-divide the field's forage into whole bales so the count stays
       // round(acres × balesPerAcre × productivity) — float-robust, and
       // identical to before now that productivity defaults to 1×. A
@@ -2644,7 +2647,7 @@ function tickAgent(
       // stover has no snapshot and falls back to the live value, which is
       // always 1× since fertilized was already reset by the harvest.
       const boost = field.lastCutProductivity ?? productivityMultiplier(field, now);
-      const totalBales = Math.max(1, Math.round(task.totalAcres * balesPerAcreForField(field) * boost));
+      const totalBales = Math.max(1, Math.round(task.totalAcres * balesPerAcreForField(field, square) * boost));
       const tonsPerAcre = task.totalAcres > 0 ? (totalBales * baleTons) / task.totalAcres : 0;
       if (!baler || tonsPerAcre <= 0) {
         budget = 0; // defensive: no baler hitched — shouldn't happen (auto-hitch)
@@ -2734,7 +2737,7 @@ function tickAgent(
         task.doneAcres = task.totalAcres;
         baler.cargoTons = 0;
         const baledCount = field.baleLocations?.length ?? totalBales;
-        completeTask(task, field, now, rand);
+        completeTask(task, field, now, rand, square);
         recordCompletion(save, task, field, agent, now, { tons: baledCount * baleTons, bales: baledCount });
         // Field Finances (2026-07-22): revenue is booked HERE, at bale time —
         // bales x the base config price. Simpler and consistent vs. tracing the
@@ -2878,7 +2881,7 @@ function tickAgent(
   }
 }
 
-function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => number): void {
+function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => number, square = false): void {
   switch (task.type) {
     case "plow":
       applyPlow(field);
@@ -2933,8 +2936,10 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
       break;
     case "bale":
       // Bales were dropped one-by-one into field.baleLocations as the baler
-      // worked; this just settles the field to mulched.
-      applyBaleDone(field);
+      // worked; this just settles the field to mulched. `square` says which
+      // baler did it (2026-07-24) — that's what fixes the product, and so the
+      // price and the tonnage, for everything downstream.
+      applyBaleDone(field, square);
       break;
     case "weed":
       // Clears the weed flush; no new one comes until the next crop goes in.

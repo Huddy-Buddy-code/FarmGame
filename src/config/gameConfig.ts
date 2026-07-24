@@ -30,7 +30,16 @@ export type CropId =
  * small grains (wheat/oats/barley, 2026-07-22) leave straw; "forage" is the
  * (currently unreachable — baling always follows a rake) unraked path the
  * maintainer called out. */
-export type BaleProduct = "cornStover" | "hay" | "alfalfaHay" | "straw" | "forage";
+export type BaleProduct =
+  | "cornStover" | "hay" | "alfalfaHay" | "straw" | "forage"
+  // SQUARE-baled variants (2026-07-24). Which one a field ends up with is
+  // decided by the baler that was hitched — the Large baler is a large square
+  // baler (see `equipment.bailer`). Square bales are heavier, so fewer come off
+  // an acre and each is worth more; they also stack and haul better, which is
+  // the small premium per ton on top. Forked as separate products rather than a
+  // shape flag because everything downstream — storage, the Market rows, the
+  // sell schedule — is already keyed by BaleProduct.
+  | "haySquare" | "alfalfaHaySquare" | "strawSquare";
 
 /** Equipment size classes. A tractor pulls implements of its class or smaller. */
 export type EquipmentSize = "small" | "medium" | "large";
@@ -196,9 +205,14 @@ export interface GameConfig {
      * feet. Same hitch rule as the plow. Sold in one size (25 ft). */
     rake: Record<EquipmentSize, { price: number; widthFt: number }>;
     /** Baler implement (collects windrowed forage into bales): price + width in
-     * feet. Same hitch rule; runs after (or alongside) the rake. Sold in one
-     * size (25 ft). */
-    bailer: Record<EquipmentSize, { price: number; widthFt: number }>;
+     * feet. Same hitch rule; runs after (or alongside) the rake.
+     *
+     * Three sizes as of 2026-07-24, and the size is what decides BALE SHAPE:
+     * Small and Medium are round balers, and the Large is a large SQUARE baler
+     * (`makesSquareBales`). That's the maintainer's "the baler you hitch decides
+     * shape", expressed as a tier rather than a separate implement kind — a
+     * small square baler isn't a machine that exists on this scale of farm. */
+    bailer: Record<EquipmentSize, { price: number; widthFt: number; makesSquareBales?: boolean }>;
     /** Mower implement (2026-07-13): CUTS a perennial forage field (grass/
      * alfalfa) — the "harvest" for those crops, in place of the combine. Leaves
      * cut material to rake + bale. Three real sizes as of 2026-07-24
@@ -321,6 +335,13 @@ export interface GameConfig {
     pricePerBale: number;
     balesPerAcre: number;
     color: "hay" | "alfalfa";
+    /** Weight of ONE bale of this product, tons. Round bales sit at
+     * `forage.baleTons`; square bales are ~1.5x heavier, which is why fewer of
+     * them come off an acre. Read through `baleTonsOf` (sim/farming.ts). */
+    tonsPerBale: number;
+    /** A square bale (2026-07-24) — drives the "Square" labelling and lets the
+     * round/square pair of a product be told apart in the UI. */
+    square?: boolean;
   }>;
 
   /** How much the visible yield range has narrowed by harvest-ready (0..1).
@@ -633,9 +654,11 @@ export const gameConfig: GameConfig = {
       large: { price: 90_000, widthFt: 50 },
     },
     bailer: {
-      small: { price: 130_000, widthFt: 25 },
+      small: { price: 90_000, widthFt: 15 },
       medium: { price: 130_000, widthFt: 25 },
-      large: { price: 130_000, widthFt: 25 },
+      // The Large Square Baler: pricier and wider, and its bales are worth more
+      // per ton — the payoff for a machine only a large tractor can pull.
+      large: { price: 260_000, widthFt: 30, makesSquareBales: true },
     },
     // Mower — three real sizes, all sold (maintainer spec, 2026-07-24).
     mower: {
@@ -712,16 +735,23 @@ export const gameConfig: GameConfig = {
   baleProducts: {
     // LEGACY (2026-07-23): corn no longer produces forage, so no new stover is
     // ever made. Kept so bales already in a save keep a name, price and tint.
-    cornStover: { name: "Corn Stover", pricePerBale: 45, balesPerAcre: 2.5, color: "hay" },
+    cornStover: { name: "Corn Stover", pricePerBale: 45, balesPerAcre: 2.5, color: "hay", tonsPerBale: 1 },
     // Grass hay: ~1.5 t/ac/cutting, round bale ≈ 1 t, ~$65/bale (2025 markets).
-    hay: { name: "Grass Hay", pricePerBale: 65, balesPerAcre: 1.5, color: "hay" },
+    hay: { name: "Grass Hay", pricePerBale: 65, balesPerAcre: 1.5, color: "hay", tonsPerBale: 1 },
     // Alfalfa hay: a bit denser + roughly 2× the value of grass (~$170 vs ~$110/t).
-    alfalfaHay: { name: "Alfalfa Hay", pricePerBale: 130, balesPerAcre: 1.6, color: "alfalfa" },
+    alfalfaHay: { name: "Alfalfa Hay", pricePerBale: 130, balesPerAcre: 1.6, color: "alfalfa", tonsPerBale: 1 },
     // Small-grain straw (wheat/oats/barley, 2026-07-22) — bulkier and cheaper
     // than feed hay; bedding, not fodder.
-    straw: { name: "Straw", pricePerBale: 35, balesPerAcre: 1.8, color: "hay" },
+    straw: { name: "Straw", pricePerBale: 35, balesPerAcre: 1.8, color: "hay", tonsPerBale: 1 },
     // Unraked cut forage (currently unreachable — baling always follows a rake).
-    forage: { name: "Forage", pricePerBale: 40, balesPerAcre: 1.5, color: "hay" },
+    forage: { name: "Forage", pricePerBale: 40, balesPerAcre: 1.5, color: "hay", tonsPerBale: 1 },
+    // --- SQUARE variants (2026-07-24). Each is its round twin at 1.5x the
+    // weight, so 1/1.5 the bales per acre, 1.5x the price per bale — plus ~10%
+    // per ton, because squares stack tight on a trailer and in a barn. The
+    // Large Square Baler is the only way to make them.
+    haySquare: { name: "Grass Hay (Square)", pricePerBale: 107, balesPerAcre: 1.0, color: "hay", tonsPerBale: 1.5, square: true },
+    alfalfaHaySquare: { name: "Alfalfa Hay (Square)", pricePerBale: 215, balesPerAcre: 1.07, color: "alfalfa", tonsPerBale: 1.5, square: true },
+    strawSquare: { name: "Straw (Square)", pricePerBale: 58, balesPerAcre: 1.2, color: "hay", tonsPerBale: 1.5, square: true },
   },
   buildings: {
     silo: {

@@ -41,15 +41,33 @@ function cutsThisYear(field: Field, now: SimTime): number {
  * crop is already cleared by harvest time, so fall back to `lastCrop` (set by
  * applyHarvestDone) — corn residue→stover, wheat/oats/barley→straw
  * (2026-07-22); pre-`lastCrop` legacy saves land on corn stover. */
-export function baleProductForField(field: Field): BaleProduct {
+export function baleProductForField(field: Field, square = false): BaleProduct {
   const crop = field.crop ?? field.lastCrop;
   const cfg = crop ? gameConfig.crops[crop] : undefined;
-  return cfg?.baleProduct ?? "cornStover";
+  const round = cfg?.baleProduct ?? "cornStover";
+  return square ? (SQUARE_OF[round] ?? round) : round;
+}
+
+/** The square-baled twin of each round product (2026-07-24). Corn stover and
+ * the unreachable "forage" have none — nothing makes them any more — so a
+ * square baler on those falls back to the round product. */
+const SQUARE_OF: Partial<Record<BaleProduct, BaleProduct>> = {
+  hay: "haySquare",
+  alfalfaHay: "alfalfaHaySquare",
+  straw: "strawSquare",
+};
+
+/** Weight of one bale of `product`, tons. Square bales are heavier than round
+ * ones, which is the whole reason fewer of them come off an acre — so anything
+ * converting bales to tonnage has to ask per product rather than reading the
+ * one global `forage.baleTons`. */
+export function baleTonsOf(product: BaleProduct): number {
+  return gameConfig.baleProducts[product].tonsPerBale;
 }
 
 /** Bales dropped per acre for this field's product (corn 2.5, grass 1.5, …). */
-export function balesPerAcreForField(field: Field): number {
-  return gameConfig.baleProducts[baleProductForField(field)].balesPerAcre;
+export function balesPerAcreForField(field: Field, square = false): number {
+  return gameConfig.baleProducts[baleProductForField(field, square)].balesPerAcre;
 }
 
 /** Winter months (Dec–Feb) — when a perennial stand goes dormant and its
@@ -233,11 +251,12 @@ export function applyHarvestDone(field: Field): void {
  * clean/mulched. The bales themselves were dropped one at a time by the baler as
  * it worked (see `tasks.ts`) into `field.baleLocations`, and stay there until
  * sold — so this only settles the field status/flags. */
-export function applyBaleDone(field: Field): void {
+export function applyBaleDone(field: Field, square = false): void {
   // Record what the bales are (drives sale price + marker tint) while the crop
   // is still readable — for perennials it stays set, for corn it's already
-  // cleared so this resolves to corn stover.
-  field.baleProduct = baleProductForField(field);
+  // cleared so this resolves to corn stover. `square` comes from the baler that
+  // actually did the work (2026-07-24).
+  field.baleProduct = baleProductForField(field, square);
   field.forageReady = undefined;
   field.windrowed = undefined;
   field.lastCutProductivity = undefined; // consumed by this bale run

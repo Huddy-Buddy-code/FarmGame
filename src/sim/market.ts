@@ -30,8 +30,12 @@ export const SELLABLE_GRAINS: CropId[] = (Object.keys(gameConfig.crops) as CropI
   (c) => gameConfig.crops[c].producesGrain !== false,
 );
 
-/** Bale products that are actually reachable/sellable (`forage` never is). */
-export const SELLABLE_BALES: BaleProduct[] = ["cornStover", "straw", "hay", "alfalfaHay"];
+/** Bale products that are actually reachable/sellable (`forage` never is).
+ * The square variants (2026-07-24) are made by the Large Square Baler. */
+export const SELLABLE_BALES: BaleProduct[] = [
+  "cornStover", "straw", "hay", "alfalfaHay",
+  "strawSquare", "haySquare", "alfalfaHaySquare",
+];
 
 /** The single peak-price month (0-11) — December, shared by every product. */
 export function peakSaleMonth(): number {

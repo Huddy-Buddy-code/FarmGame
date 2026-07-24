@@ -60,8 +60,12 @@ describe("sellable product lists", () => {
   it("grains exclude the perennial forage crops", () => {
     expect(SELLABLE_GRAINS).toEqual(["corn", "soybeans", "wheat", "rye", "oats", "barley", "canola", "sunflowers"]);
   });
-  it("bales exclude the unreachable forage product", () => {
-    expect(SELLABLE_BALES).toEqual(["cornStover", "straw", "hay", "alfalfaHay"]);
+  it("bales exclude the unreachable forage product, and include the square variants", () => {
+    expect(SELLABLE_BALES).toEqual([
+      "cornStover", "straw", "hay", "alfalfaHay",
+      "strawSquare", "haySquare", "alfalfaHaySquare",
+    ]);
+    expect(SELLABLE_BALES).not.toContain("forage");
   });
 });
 
