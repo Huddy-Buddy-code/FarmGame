@@ -55,7 +55,7 @@ import {
 import {
   tickFarming, growthProgress, yieldRange, productivityMultiplier, yieldModifierSteps, inPlantingWindow, canPlow,
   hasStandingCrop, inWeedingWindow, canFertilizeNow, isPerennial, canSeedPerennial,
-  isPerennialDormant, harvestMonthsRemaining,
+  isPerennialDormant, harvestMonthsRemaining, harvestWindowMonthsFor,
 } from "./sim/farming";
 import {
   ensureAgents, initTaskIds, enqueueTask, cancelTask, taskCost, tasksFor,
@@ -1768,14 +1768,14 @@ function refreshInventory(force = false) {
       const name = `${buildingDisplayName(b.kind)} ${buildingIndex(b)}`;
       const cap = baleStorageCapacityOf(b.kind as "baleBarn" | "baleArea");
       const stored = storedBalesTotal(b);
-      const capText = cap === Infinity ? "unlimited" : `${stored} / ${cap.toLocaleString()}`;
+      const capText = `${stored} / ${cap.toLocaleString()}`;
       const row = document.createElement("div");
       row.className = "inv-row inv-building";
       row.innerHTML = `
         <span class="icon">${BUILDING_ICON[b.kind]}</span>
         <span class="info">
           <div class="name">${name}</div>
-          <div class="qty">${capText} bales${cap === Infinity ? ` · ${stored} stored` : ""}</div>
+          <div class="qty">${capText} bales</div>
         </span>`;
 
       // Optional product assignment — mirrors the silo crop dropdown.
@@ -2596,8 +2596,9 @@ function buildEquipShop(): void {
   line("Planter", planterIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: widthSpec("planter", s), price: implementPrice("planter", s), onBuy: buyImpl("planter", s),
   }])));
-  // Sprayers only come in Medium/Large (a big-acreage tool).
-  line("Sprayer", sprayerIconSvg(26), Object.fromEntries((["medium", "large"] as EquipmentSize[]).map((s) => [s, {
+  // Sprayers now come in all three sizes — the 30 ft Small joined the shop
+  // 2026-07-24 (it existed in config but was never offered).
+  line("Sprayer", sprayerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${widthSpec("sprayer", s)} boom`, price: implementPrice("sprayer", s), onBuy: buyImpl("sprayer", s),
   }])));
   // Mower: cuts perennial forage (grass/alfalfa) — Small (10 ft) & Medium (20 ft).
@@ -2608,10 +2609,10 @@ function buildEquipShop(): void {
   line("Mulcher", mulcherIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${gameConfig.equipment.mulcher[s].widthFt} ft · shreds residue`, price: implementPrice("mulcher", s), onBuy: buyImpl("mulcher", s),
   }])));
-  // Rake & baler: single-size forage tools.
-  line("Rake", rakeIconSvg(26), {
-    small: { spec: `${gameConfig.equipment.rake.small.widthFt} ft · windrows forage`, price: implementPrice("rake", "small"), onBuy: buyImpl("rake", "small") },
-  });
+  // Rake: three sizes as of 2026-07-24 (15 / 30 / 50 ft).
+  line("Rake", rakeIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.rake[s].widthFt} ft · windrows forage`, price: implementPrice("rake", s), onBuy: buyImpl("rake", s),
+  }])));
   line("Baler", implementIconHtml("bailer", "medium", 26), {
     medium: { spec: `${gameConfig.equipment.bailer.medium.widthFt} ft pickup · drops bales`, price: implementPrice("bailer", "medium"), onBuy: buyImpl("bailer", "medium") },
   });
@@ -2622,13 +2623,13 @@ function buildEquipShop(): void {
   line("Hay Spikes", haySpikesIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
     spec: `${haySpikesCapacityBales(s)} bale${haySpikesCapacityBales(s) === 1 ? "" : "s"} · collects`, price: implementPrice("haySpikes", s), onBuy: buyImpl("haySpikes", s),
   }])));
-  // Bale Trailer: bulk bale hauler — Small (10) & Medium (20). Catalog preview
-  // shows the empty (0%) fill sprite — a fresh purchase starts empty.
+  // Bale Trailer: bulk bale hauler — Small (10) / Medium (20) / Large (30).
+  // Catalog preview shows the empty (0%) fill sprite — a fresh purchase starts empty.
   const baleTrailerCatalogIcon = (() => {
     const url = trailerFillImageUrl("baleTrailer", 0);
     return url ? machineImgTag(url, 26) : baleTrailerIconSvg(26);
   })();
-  line("Bale Trailer", baleTrailerCatalogIcon, Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
+  line("Bale Trailer", baleTrailerCatalogIcon, Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${baleTrailerCapacityBales(s)} bale cargo`, price: implementPrice("baleTrailer", s), onBuy: buyImpl("baleTrailer", s),
   }])));
 }
@@ -3112,9 +3113,10 @@ function rebuildCropCalendarGrid() {
       // HARVEST WINDOW (2026-07-23) — modulo a full year so an overwintering
       // crop lands back inside the display year instead of off the right edge.
       // This band is now load-bearing rather than decorative: past its right
-      // edge the crop withers, so it has to match `gameConfig.harvestWindowMonths`.
+      // edge the crop withers, so it has to match the crop's real window
+      // (per-crop since 2026-07-24 — oats and barley get a third month).
       const harvStart = disp((cfg.plantMonths[0]! + cfg.growMonths) % MONTHS_PER_YEAR);
-      bands += band("harv", harvStart, gameConfig.harvestWindowMonths);
+      bands += band("harv", harvStart, harvestWindowMonthsFor(cropId));
     }
     // A bale marker after the name for crops whose residue can be baled
     // (maintainer request, 2026-07-23), tinted by the product it makes.
@@ -4087,7 +4089,7 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
       "beforeend",
       `<div class="withered-note">
          <b>💀 ${lost ? `${lost.emoji} ${lost.name}` : "The crop"} withered</b>
-         <div class="small">It stood past its ${gameConfig.harvestWindowMonths}-month harvest window and was lost — no grain, no bales.
+         <div class="small">It stood past its ${field.lastCrop ? harvestWindowMonthsFor(field.lastCrop) : gameConfig.harvestWindowMonths}-month harvest window and was lost — no grain, no bales.
          Mulch it back in (worth ${Math.round(gameConfig.mulchBonusPct * 100)}% on the next crop) or plow it under to clear the field.</div>
        </div>`,
     );

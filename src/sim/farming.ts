@@ -360,9 +360,20 @@ function monthsSincePlantMonthStart(field: Field, now: SimTime): number | null {
 }
 
 /**
+ * How many months `crop` stays harvestable once ripe: its own
+ * `harvestWindowMonths` if it sets one, else the global default (2026-07-24 —
+ * oats and barley get a third month, being small grains that dry down and
+ * stand). One place, so the live wither gate, the countdown warning and the
+ * Schedule tab's legal months can never disagree.
+ */
+export function harvestWindowMonthsFor(crop: CropId): number {
+  return gameConfig.crops[crop].harvestWindowMonths ?? gameConfig.harvestWindowMonths;
+}
+
+/**
  * Has a ripe annual crop stood unharvested past the end of its harvest window
  * (2026-07-23)? The window opens the month the crop ripens and runs
- * `gameConfig.harvestWindowMonths` months; once it closes the crop is lost.
+ * `harvestWindowMonthsFor(crop)` months; once it closes the crop is lost.
  * Perennials never wither — a missed cutting is just skipped.
  */
 export function harvestWindowClosed(field: Field, now: SimTime): boolean {
@@ -370,7 +381,7 @@ export function harvestWindowClosed(field: Field, now: SimTime): boolean {
   const elapsed = monthsSincePlantMonthStart(field, now);
   if (elapsed === null) return false;
   const cfg = gameConfig.crops[field.crop];
-  return elapsed >= cfg.growMonths + gameConfig.harvestWindowMonths;
+  return elapsed >= cfg.growMonths + harvestWindowMonthsFor(field.crop);
 }
 
 /**
@@ -386,7 +397,7 @@ export function harvestMonthsRemaining(field: Field, now: SimTime): number | nul
   const cfg = gameConfig.crops[field.crop];
   const monthsIn = elapsed - cfg.growMonths;
   if (monthsIn < 0) return null; // not ripe yet
-  const left = Math.ceil(gameConfig.harvestWindowMonths - monthsIn) - 1;
+  const left = Math.ceil(harvestWindowMonthsFor(field.crop) - monthsIn) - 1;
   return Math.max(0, left);
 }
 

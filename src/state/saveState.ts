@@ -220,8 +220,7 @@ export interface Building {
   /** Bale-storage-only (baleBarn/baleArea, 2026-07-17): bales physically
    * stored here, counted per product (a bale is self-describing, so unlike a
    * silo a store can hold a mix). Filled by the bale-hauling relay
-   * (`sim/tasks.ts` haulBales). A Barn caps at `capacityBales`; an Area is
-   * unlimited (`gameConfig.buildings.baleArea.capacityBales === Infinity`). */
+   * (`sim/tasks.ts` haulBales). Both kinds cap at their `capacityBales`. */
   storedBales?: Partial<Record<BaleProduct, number>>;
   /** Bale-storage-only (optional): dedicate this store to ONE product — only
    * that product hauls in. Unassigned (undefined) accepts any product (the

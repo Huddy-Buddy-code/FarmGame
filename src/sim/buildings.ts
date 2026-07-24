@@ -116,14 +116,14 @@ export function isBaleStorage(kind: BuildingKind): kind is "baleBarn" | "baleAre
   return kind === "baleBarn" || kind === "baleArea";
 }
 
-/** Bale capacity of one storage building — the Barn's fixed cap, or `Infinity`
- * for an Area (outdoor storage is unlimited, maintainer request 2026-07-17). */
+/** Bale capacity of one storage building. Both kinds are capped as of
+ * 2026-07-24 — the outdoor Area used to be unlimited, which meant the hauler's
+ * "storage full, go sell it instead" fallback could never fire once one existed. */
 export function baleStorageCapacityOf(kind: "baleBarn" | "baleArea"): number {
   return gameConfig.buildings[kind].capacityBales;
 }
 
-/** Total bale storage across all owned Bale Barns + Bale Areas — `Infinity`
- * once any Area exists (an Area is uncapped). */
+/** Total bale storage across all owned Bale Barns + Bale Areas. */
 export function baleCapacity(save: SaveState): number {
   return save.buildings.reduce((sum, b) => (isBaleStorage(b.kind) ? sum + baleStorageCapacityOf(b.kind) : sum), 0);
 }
@@ -137,7 +137,7 @@ export function storedBalesTotal(building: Building): number {
   return n;
 }
 
-/** Free bale slots in one storage building — `Infinity` for an Area. */
+/** Free bale slots in one storage building. */
 export function baleStorageRoom(building: Building): number {
   if (!isBaleStorage(building.kind)) return 0;
   return baleStorageCapacityOf(building.kind) - storedBalesTotal(building);

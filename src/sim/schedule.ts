@@ -29,7 +29,7 @@
 
 import { gameConfig } from "../config/gameConfig";
 import type { CropId } from "../config/gameConfig";
-import { isPerennial } from "./farming";
+import { isPerennial, harvestWindowMonthsFor } from "./farming";
 import { MONTHS_PER_YEAR } from "./calendar";
 import type { FieldPlan } from "../state/saveState";
 
@@ -127,7 +127,7 @@ export function legalMonthsFor(type: ScheduleTaskType, crop: CropId, plantMonth?
   // offering a later month here would be offering the player a way to destroy
   // their own crop.
   if (type === "harvest") {
-    return rangeWrappedCapped(plantMonth + span, plantMonth + span + gameConfig.harvestWindowMonths - 1);
+    return rangeWrappedCapped(plantMonth + span, plantMonth + span + harvestWindowMonthsFor(crop) - 1);
   }
   // Mulch: from the HARVEST month (maintainer request, 2026-07-23 — it used to
   // start the month after) through the mulch window. Same reasoning as plow:

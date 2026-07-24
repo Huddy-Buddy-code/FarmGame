@@ -100,6 +100,13 @@ export interface CropConfig {
    * alfalfaHay for alfalfa). Corn's stover is handled separately (its crop is
    * cleared at harvest before baling). */
   baleProduct?: BaleProduct;
+  /** Per-crop override for [[GameConfig.harvestWindowMonths]] — how many months
+   * this crop stays harvestable once ripe (maintainer request, 2026-07-24:
+   * "extend Planting and Harvesting windows by one month for Oats & Barley").
+   * Omitted = the global default. The small grains are the forgiving ones: they
+   * ripen early, dry down in the field and sit a while, unlike corn or beans
+   * racing the weather. */
+  harvestWindowMonths?: number;
   /** A COVER CROP: sown in autumn and held through the winter (Winter Wheat,
    * Cereal Rye). Never weeded (maintainer decision, 2026-07-23) — weeds only
    * flush in spring and summer, and a stand that went in the previous autumn is
@@ -180,10 +187,10 @@ export interface GameConfig {
     planter: Record<EquipmentSize, { price: number; widthFt: number }>;
     /** Sprayer implements (weed control + fertilizing — same implement, either
      * task): price + working width in feet, by size. Same requirements as the
-     * plow/planter (a tractor needs one hitched). Design choice: only Medium
-     * and Large are sold in the shop (a sprayer is a big-acreage tool); `small`
-     * exists only so this record type-checks like the others and is never
-     * offered for purchase. */
+     * plow/planter (a tractor needs one hitched). All three sizes are sold; the
+     * 30 ft Small was added to the shop 2026-07-24 (it already existed here,
+     * unsellable, as a type-check placeholder) so a small farm has a sprayer it
+     * can actually justify. */
     sprayer: Record<EquipmentSize, { price: number; widthFt: number }>;
     /** Rake implement (windrows harvested forage into rows): price + width in
      * feet. Same hitch rule as the plow. Sold in one size (25 ft). */
@@ -373,8 +380,8 @@ export interface GameConfig {
     /** Indoor bale storage — pricier, presumably weatherproof (flavor; no
      * mechanical difference yet). */
     baleBarn: { price: number; capacityBales: number };
-    /** Outdoor bale storage — cheaper, unlimited capacity (`Infinity`); only
-     * the Barn caps (maintainer request, 2026-07-17). */
+    /** Outdoor bale storage — cheaper per bale than the Barn, and capped too
+     * (2026-07-24; it was unlimited from 2026-07-17). */
     baleArea: { price: number; capacityBales: number };
     /** Parks tractors/harvesters. `slots` = max machines. */
     tractorBarn: { price: number; slots: number };
@@ -473,8 +480,9 @@ export const gameConfig: GameConfig = {
       fertilizeCostPerAcre: 70, // light N — oats lodge if pushed hard
       baseYieldTonsPerAcre: 2.3, // ~130 bu/ac (32 lb bushels)
       yieldUncertainty: 0.3,
-      plantMonths: [2, 3], // Mar–Apr (early spring)
-      growMonths: 4, // ready the 1st of Jul/Aug
+      plantMonths: [2, 3, 4], // Mar–May — a month wider than the other springs (2026-07-24)
+      growMonths: 4, // ready the 1st of Jul/Aug/Sep
+      harvestWindowMonths: 3, // dries down and stands; a month longer than the default
       sellPricePerTon: 165,
       producesForage: true,
       baleProduct: "straw",
@@ -486,8 +494,9 @@ export const gameConfig: GameConfig = {
       fertilizeCostPerAcre: 105,
       baseYieldTonsPerAcre: 2.5, // ~105 bu/ac
       yieldUncertainty: 0.3,
-      plantMonths: [2, 3], // Mar–Apr
-      growMonths: 4, // ready the 1st of Jul/Aug
+      plantMonths: [2, 3, 4], // Mar–May (2026-07-24)
+      growMonths: 4, // ready the 1st of Jul/Aug/Sep
+      harvestWindowMonths: 3,
       sellPricePerTon: 195,
       producesForage: true,
       baleProduct: "straw",
@@ -586,17 +595,17 @@ export const gameConfig: GameConfig = {
       large: { price: 150_000, widthFt: 20 },
     },
     sprayer: {
-      small: { price: 50_000, widthFt: 30 }, // not sold — see field comment above
+      small: { price: 50_000, widthFt: 30 },
       medium: { price: 100_000, widthFt: 60 },
       large: { price: 200_000, widthFt: 120 },
     },
-    // Rake & baler are single-size tools (25 ft). All three size slots exist so
-    // they type-check like the other implements; only Medium is sold in the shop
-    // (and Medium is pullable by the starting medium tractor).
+    // Rake — three real sizes (maintainer spec, 2026-07-24). A wheel/rotary rake
+    // is cheap per foot: it has no crop-processing guts, it just moves cut
+    // forage sideways, so the big ones are still far cheaper than a baler.
     rake: {
-      small: { price: 60_000, widthFt: 25 },
-      medium: { price: 60_000, widthFt: 25 },
-      large: { price: 60_000, widthFt: 25 },
+      small: { price: 30_000, widthFt: 15 },
+      medium: { price: 55_000, widthFt: 30 },
+      large: { price: 90_000, widthFt: 50 },
     },
     bailer: {
       small: { price: 130_000, widthFt: 25 },
@@ -634,12 +643,12 @@ export const gameConfig: GameConfig = {
       medium: { price: 16_000, widthFt: 0, capacityBales: 2 },
       large: { price: 16_000, widthFt: 0, capacityBales: 2 },
     },
-    // Bale Trailer — the bulk hauler. Small 10 bales / Medium 20; large mirrors
-    // medium (type-check only, never offered).
+    // Bale Trailer — the bulk hauler. Small 10 / Medium 20 / Large 30 bales
+    // (Large added 2026-07-24).
     baleTrailer: {
       small: { price: 20_000, widthFt: 0, capacityBales: 10 },
       medium: { price: 38_000, widthFt: 0, capacityBales: 20 },
-      large: { price: 38_000, widthFt: 0, capacityBales: 20 },
+      large: { price: 55_000, widthFt: 0, capacityBales: 30 },
     },
   },
   hauling: {
@@ -680,9 +689,11 @@ export const gameConfig: GameConfig = {
       large: { price: 350_000, capacityTons: 1000 },
     },
     baleBarn: { price: 70_000, capacityBales: 300 },
-    // Outdoor bale storage — cheaper, and UNLIMITED capacity (maintainer
-    // request, 2026-07-17): only the indoor Barn caps how many bales fit.
-    baleArea: { price: 25_000, capacityBales: Infinity },
+    // Outdoor bale storage — cheaper than the Barn, and now CAPPED like it
+    // (maintainer request, 2026-07-24, replacing the unlimited capacity it had
+    // from 2026-07-17). A real number here is what makes the Sell Point
+    // fallback reachable: a hauler with nowhere to put its load sells it.
+    baleArea: { price: 25_000, capacityBales: 1000 },
     tractorBarn: { price: 60_000, slots: 3 },
     implementBarn: { price: 40_000, slots: 4 },
     farmYard: { price: 15_000 },
