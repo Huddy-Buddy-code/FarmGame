@@ -97,6 +97,7 @@ const APRIL_1 = minutesPerMonth();
  * 2026-07-11, narrowed to winter 2026-07-12: keeps auto-manage from re-plowing
  * right after harvest). */
 const WINTER_1 = 9 * minutesPerMonth();
+const JAN_1 = 10 * minutesPerMonth(); // the default plow month for a spring crop
 
 describe("calendar", () => {
   it("starts on March 1, Year 1", () => {
@@ -160,15 +161,20 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     expect(() => enqueueTask(save, field, "plow", WINTER_1)).not.toThrow();
   });
 
-  it("but auto-manage's own plowing still waits for winter", () => {
+  it("but auto-manage's own plowing waits for the month the schedule picked", () => {
+    // Plowing is legal any month the ground is free (2026-07-23), but
+    // auto-manage still holds off until the scheduled month — January by
+    // default — so a harvested field isn't turned over the moment it clears.
     const save = gameWithAgents();
     const field = freshField("stubble");
     field.autoManage = true;
     field.plans = [defaultPlan()];
     save.fields.push(field);
     autoManageField(save, field, APRIL_1);
-    expect(save.tasks).toHaveLength(0); // out of season — auto-manage waits
+    expect(save.tasks).toHaveLength(0); // April: corn is in the ground then
     autoManageField(save, field, WINTER_1);
+    expect(save.tasks).toHaveLength(0); // December: legal, but ahead of January
+    autoManageField(save, field, JAN_1);
     expect(save.tasks).toHaveLength(1);
     expect(save.tasks[0]!.type).toBe("plow");
   });
@@ -546,7 +552,7 @@ describe("equipment: sizes, implements, buy/sell/attach (brief §8 capital)", ()
 });
 
 describe("auto-manage (idle mode, player-requested)", () => {
-  it("waits out spring/summer/fall, plows only once winter opens, then plants/harvests itself", () => {
+  it("waits for its scheduled plow month, then plants/harvests itself", () => {
     const save = gameWithAgents();
     giveHaulingGear(save);
     const field = freshField("stubble");
@@ -554,16 +560,19 @@ describe("auto-manage (idle mode, player-requested)", () => {
     save.fields.push(field);
     const mpm = minutesPerMonth();
 
-    // March: plowing isn't in season (winter only) — auto-manage waits, nothing
-    // gets queued.
-    let now = runWorld(save, 0, APRIL_1 - MINUTES_PER_DAY, MINUTES_PER_DAY);
+    // April through September: corn occupies the ground in those months, so
+    // plowing isn't even legal — auto-manage waits, nothing gets queued.
+    // (Starting in April rather than March matters: March sits AFTER January in
+    // the plow window's order, so it would be a legitimate catch-up month.)
+    let now = runWorld(save, APRIL_1, 5 * mpm, MINUTES_PER_DAY);
     expect(field.status).toBe("stubble");
     expect(save.tasks).toHaveLength(0);
 
-    // Fast-forward to winter: auto-manage queues + finishes the plow.
+    // Fast-forward: auto-manage queues + finishes the plow at January (the
+    // default), give or take the days the pass itself takes.
     now = runUntil(save, now, () => field.status === "tilled", 12 * mpm);
     expect(field.status).toBe("tilled");
-    expect([11, 0, 1]).toContain(dateOf(now).month); // Dec–Feb
+    expect([0, 1, 2]).toContain(dateOf(now).month); // Jan, or just after
 
     // Sits tilled over winter; next spring's window opens and it plants.
     now = runUntil(save, now, () => field.crop === "corn", 10 * mpm);
@@ -579,14 +588,14 @@ describe("auto-manage (idle mode, player-requested)", () => {
     expect(save.grain.corn).toBeGreaterThan(0);
 
     // Fresh off harvest (summer) — the maintainer-requested behavior: it must
-    // NOT be replowed immediately, only once winter comes back around.
+    // NOT be replowed immediately, only when its scheduled month comes round.
     // (Ignore any still-finishing Unload Harvester trip — it's not a
     // lifecycle task and self-clears once the hopper's empty.)
     expect(save.tasks.filter((t) => t.type !== "unloadHarvester")).toHaveLength(0);
 
     now = runUntil(save, now, () => field.status === "tilled", 12 * mpm);
     expect(field.status).toBe("tilled");
-    expect([11, 0, 1]).toContain(dateOf(now).month);
+    expect([0, 1, 2]).toContain(dateOf(now).month);
   });
 
   it("silently waits (doesn't throw) when a step isn't affordable or in season", () => {

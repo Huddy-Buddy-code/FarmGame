@@ -83,11 +83,12 @@ export function canPlow(status: FieldStatus): boolean {
   return status === "stubble" || status === "harvested" || status === "mulched" || status === "withered";
 }
 
-/** Is `t` inside the plowing season (winter, `gameConfig.plowMonths`)?
- * Status-independent — combine with `canPlow` for the full check. */
-export function inPlowWindow(t: SimTime): boolean {
-  return gameConfig.plowMonths.includes(dateOf(t).month);
-}
+/* REMOVED 2026-07-23: `inPlowWindow` / `gameConfig.plowMonths`. Plowing was
+ * locked to a fixed Dec-Feb winter season; it's now schedulable any month the
+ * ground isn't occupied, derived per crop in `sim/schedule.ts`
+ * (`legalMonthsFor("plow", ...)` / `plowDueAt`). There is no global season left
+ * to ask about. */
+
 
 /** Does this field have a standing (not-yet-mature) crop in it? True for
  * planted/growing, false once it's ready/harvested or there's nothing in the

@@ -3605,6 +3605,12 @@ function refreshPlanEditor(field: Field, auto: boolean): void {
   const perennialField = isPerennial(field.plans[0]!.crop);
   if (perennialField && field.plans.length > 1) field.plans.length = 1;
   const plans = field.plans;
+  // Self-heal a stale bale toggle: the Rake/Bale column is hidden for crops
+  // with no bale product, so a flag left over from an earlier crop choice (or
+  // from before corn stopped making stover) would otherwise be stuck on with
+  // no way to clear it. Harmless in the sim — `forageDue` gates on the field
+  // actually having residue — but it would misreport the plan.
+  for (const p of plans) if (p.bale && !cropMakesBales(p.crop)) p.bale = false;
   const activeIdx = activeRotationIdx(field);
   const viewIdx = Math.min(perennialField ? 0 : scheduleViewStepIdx, plans.length - 1);
 
@@ -4273,7 +4279,9 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
   const autoCol = (icon: string, label: string, months: number[], toggleProp?: "fertilize" | "bale"): void => {
     cols.push({ icon, label, legal: new Set(), active: new Set(months), toggleProp, on: toggleProp ? !!plan[toggleProp] : true });
   };
-  taskCol("🚜", "Plow", "plow", undefined);
+  // Plow's window is derived from the crop's own cycle now (2026-07-23), so it
+  // needs the plant month like every other derived row.
+  taskCol("🚜", "Plow", "plow", plantMonth);
   taskCol("🌱", "Plant", "plant", undefined);
   if (perennialField) {
     const cfg = gameConfig.crops[plan.crop];
@@ -4288,8 +4296,13 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
     taskCol("🌾", "Harvest", "harvest", plantMonth);
     // Optional residue pass — an alternative to baling; off by default.
     taskCol("🍂", "Mulch", "mulch", plantMonth, "mulch");
-    const harvestEff = effectiveMonthFor("harvest", plan.crop, plan.schedule?.harvest, plantMonth);
-    autoCol("📦", "Rake / Bale", harvestEff !== undefined ? [harvestEff] : [], "bale");
+    // Rake/Bale only exists for crops that actually leave balable residue
+    // (maintainer request, 2026-07-23) — offering the toggle on soybeans or
+    // potatoes let the player schedule a pass that could never run.
+    if (cropMakesBales(plan.crop)) {
+      const harvestEff = effectiveMonthFor("harvest", plan.crop, plan.schedule?.harvest, plantMonth);
+      autoCol("📦", "Rake / Bale", harvestEff !== undefined ? [harvestEff] : [], "bale");
+    }
   }
 
   // --- Legend + vertical grid (months down the rows, tasks across the cols) ---

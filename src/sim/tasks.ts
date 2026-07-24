@@ -29,7 +29,7 @@ import { areaAcres, pointInPolygon } from "../geo/geometry";
 import type { Meters } from "../geo/coords";
 import {
   inPlantingWindow, canPlow, applyPlow, applyPlant, applyHarvestDone, applyBaleDone,
-  applyMowDone, inPlowWindow, hasStandingCrop, inWeedingWindow, canFertilizeNow,
+  applyMowDone, hasStandingCrop, inWeedingWindow, canFertilizeNow,
   isPerennial, balesPerAcreForField, canSeedPerennial, productivityMultiplier, baleProductForField,
 } from "./farming";
 import { buildCoveragePath, buildHeadlandCoveragePath, sampleAt, workDoneAt, distanceAtWork, TASK_HEADLANDS } from "./coverage";
@@ -44,6 +44,7 @@ import type { RoadNetwork } from "./roadNet";
 import { recordCash } from "./ledger";
 import { recordFieldCash, recordFieldCrop } from "./fieldLedger";
 import { grainUnitPrice, baleUnitPrice, monthOf, SELLABLE_GRAINS } from "./market";
+import { effectiveMonthFor, plowDueAt } from "./schedule";
 
 const ACRE_M2 = 4046.8564224;
 
@@ -2869,7 +2870,10 @@ function defaultCrop(): CropId {
 
 /** A sensible default plan for an auto-managed field with none defined yet. */
 export function defaultPlan(): FieldPlan {
-  return { crop: defaultCrop(), bale: true };
+  const crop = defaultCrop();
+  // Bale only when the crop actually leaves balable residue (2026-07-23) — this
+  // was a flat `true`, which became meaningless once corn stopped making stover.
+  return { crop, bale: !!gameConfig.crops[crop].producesForage };
 }
 
 /** The rotation step currently running on `field`: `plans[rotationIndex % len]`
@@ -3028,6 +3032,18 @@ export function blockedWork(save: SaveState): BlockedWork[] {
   return out;
 }
 
+/**
+ * Is the plow due this month for the step the ground is being prepared for?
+ * Replaces the old fixed Dec–Feb `inPlowWindow` season (2026-07-23): the window
+ * is now derived from the crop's own cycle — anything after the ground clears
+ * and before that crop goes in — defaulting to January, or to the month after
+ * harvest for a crop that overwinters.
+ */
+function plowDue(now: SimTime, upcoming: FieldPlan): boolean {
+  const plantMonth = effectiveMonthFor("plant", upcoming.crop, upcoming.schedule?.plant);
+  return plowDueAt(upcoming.crop, dateOf(now).month, upcoming.schedule?.plow, plantMonth);
+}
+
 /** Field Schedule tab (2026-07-21): does the current month satisfy this
  * task's schedule override, if any? Undefined = no override set = today's
  * behavior (fire the moment the underlying gate opens). A set override
@@ -3089,7 +3105,7 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       // request, 2026-07-16) — still waits for the winter plow window. Plow and
       // plant both read the UPCOMING step's schedule: they're prep for its crop.
       if (canPlow(field.status)) {
-        if (inPlowWindow(now) && monthMatches(now, upcoming.schedule?.plow)) {
+        if (plowDue(now, upcoming)) {
           tryEnqueue(save, field, "plow", now);
         }
       } else if (monthMatches(now, plan.schedule?.plant)) {
@@ -3131,7 +3147,7 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
         plan.mulch &&
         !field.autoMulchDone &&
         canMulch(save, field) &&
-        !inPlowWindow(now) &&
+        !plowDue(now, upcoming) &&
         monthMatches(now, plan.schedule?.mulch)
       ) {
         if (tryEnqueue(save, field, "mulch", now)) {
@@ -3144,7 +3160,7 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       // Auto-manage (unlike the manual Queue Plow button) still waits for
       // winter — enqueueTask itself no longer season-gates plowing. The plow
       // is ground prep for the UPCOMING crop, so it reads that step's schedule.
-      if (inPlowWindow(now) && monthMatches(now, upcoming.schedule?.plow)) {
+      if (plowDue(now, upcoming)) {
         tryEnqueue(save, field, "plow", now);
       }
       break;
@@ -3161,16 +3177,16 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
         plan.mulch &&
         !field.autoMulchDone &&
         canMulch(save, field) &&
-        !inPlowWindow(now) &&
+        !plowDue(now, upcoming) &&
         monthMatches(now, plan.schedule?.mulch)
       ) {
         // Optional residue pass (annuals we aren't baling): shred the residue
         // back in the month(s) after harvest, before the winter plow window
-        // opens. `!inPlowWindow` means a late harvest that lands in plow season
+        // opens. `!plowDue` means a late harvest that lands on the plow month
         // just skips straight to plowing. Completing it flips the field to
         // stubble, so next tick falls through to the plow branch.
         if (tryEnqueue(save, field, "mulch", now)) field.autoMulchDone = true;
-      } else if (inPlowWindow(now) && monthMatches(now, upcoming.schedule?.plow)) {
+      } else if (plowDue(now, upcoming)) {
         // Plow under — discard any un-baled forage so the plow isn't gated on it
         // (the plan opted out of baling, or there's no gear for it). Still
         // waits for winter, same as the stubble/mulched case above.

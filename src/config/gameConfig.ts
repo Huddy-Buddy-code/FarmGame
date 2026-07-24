@@ -113,11 +113,9 @@ export interface GameConfig {
 
   /** Cost to plow/till, per acre (fuel + wear; brief §8 variable costs). */
   plowCostPerAcre: number;
-  /** 0-based months (0=Jan) plowing is allowed in. Winter only (maintainer
-   * decision, 2026-07-11; narrowed to winter 2026-07-12) — keeps auto-manage
-   * from re-plowing the instant a field is harvested; ground rests until the
-   * field naturally comes back around to plowable. */
-  plowMonths: number[];
+  /* REMOVED 2026-07-23: `plowMonths`. Plowing is no longer a fixed season —
+   * the window is derived per crop from when the ground is actually free
+   * (`sim/schedule.ts`), so there's no global month list to tune. */
   /** Cost to weed, per acre — same pay-on-queue pattern as plow. Fertilize
    * moved to a per-crop cost ([[CropConfig.fertilizeCostPerAcre]]) since real
    * fertilizer need varies far more by crop than weeding chemicals do. */
@@ -537,7 +535,6 @@ export const gameConfig: GameConfig = {
   },
 
   plowCostPerAcre: 20,
-  plowMonths: [11, 0, 1], // Dec–Feb (winter only)
   weedCostPerAcre: 15,
   mowCostPerAcre: 12,
   mulchCostPerAcre: 8,
