@@ -3813,38 +3813,74 @@ function refreshPlanEditor(field: Field, auto: boolean): void {
   });
   head.appendChild(pasteBtn);
 
-  // --- The sequence, as chips -----------------------------------------------
+  // --- The sequence, as a VERTICAL list starting at the current crop --------
+  // Maintainer request, 2026-07-24: "Lock Current crop on top (clearly labelled
+  // Current Crop), then have the next one under, then next under that." So the
+  // list is drawn in ROTATION order beginning at the active step, rather than
+  // in raw array order — what the player wants to see is what's growing and
+  // what's coming, not where each step happens to sit in the array.
+  //
+  // The array index travels with each row (`realIdx`): `scheduleViewStepIdx`
+  // and `removeRotationStep` both address the array, and quietly feeding either
+  // of them a display position would change which crop the field grows.
   container.insertAdjacentHTML(
     "beforeend",
     perennialField
       ? `<div class="plan-hint">Perennial stand — one crop, cut every year (no rotation).</div>`
-      : `<div class="plan-hint">Runs left to right, then loops. ● marks the crop growing now; click any crop to schedule it.</div>`,
+      : `<div class="plan-hint">The rotation runs top to bottom, then loops. Click a crop to schedule it.</div>`,
   );
+
+  // The layout is two columns: the crop list on the left, the picker for
+  // whichever crop is selected on the right (maintainer request: "move the drop
+  // down to the right of these crop icons/buttons").
+  const layout = document.createElement("div");
+  layout.className = "plan-layout";
 
   const chips = document.createElement("div");
   chips.className = "crop-chips";
-  plans.forEach((plan, i) => {
+
+  const order = plans.map((_, i) => (activeIdx + i) % plans.length);
+  order.forEach((realIdx, place) => {
+    const plan = plans[realIdx]!;
     const cfg = gameConfig.crops[plan.crop];
+    const isCurrent = realIdx === activeIdx;
+
+    const rowEl = document.createElement("div");
+    rowEl.className = "crop-row";
+    if (!perennialField) {
+      // The pointer sits on the step the field is ON, which after a plow is the
+      // crop about to go in rather than one that's growing — so the top row is
+      // only called "Current Crop" when something actually IS growing.
+      const topLabel = field.crop ? "Current Crop" : "Planting Next";
+      rowEl.insertAdjacentHTML(
+        "beforeend",
+        `<span class="crop-place${isCurrent ? " now" : ""}">${
+          isCurrent ? topLabel : place === 1 ? "Next" : `Then (${place})`
+        }</span>`,
+      );
+    }
+
     const chip = document.createElement("button");
-    chip.className = "crop-chip" + (i === viewIdx ? " selected" : "") + (i === activeIdx ? " current" : "");
-    chip.title = i === activeIdx ? `${cfg.name} — growing now` : `${cfg.name} — step ${i + 1}`;
+    chip.className = "crop-chip" + (realIdx === viewIdx ? " selected" : "") + (isCurrent ? " current" : "");
+    chip.title = isCurrent ? `${cfg.name} — growing now` : `${cfg.name} — step ${realIdx + 1}`;
     chip.innerHTML =
-      `<span class="cc-emoji">${cfg.emoji}</span><span class="cc-name">${cfg.name}</span>` +
+      `<span class="cc-emoji">${cfg.emoji}</span><span class="cc-name">${escapeHtml(cfg.name)}</span>` +
       (cropMakesBales(plan.crop) ? baleIconSvg(12, gameConfig.baleProducts[cfg.baleProduct ?? "straw"].color) : "");
     chip.addEventListener("click", () => {
-      scheduleViewStepIdx = i;
+      scheduleViewStepIdx = realIdx;
       lastPlansKey = "";
       lastScheduleCalKey = "";
       refreshFieldPanel(true);
     });
-    chips.appendChild(chip);
+    rowEl.appendChild(chip);
+    chips.appendChild(rowEl);
   });
 
   // Perennial stands don't rotate — no "add step" button (maintainer request).
   if (!perennialField) {
     const add = document.createElement("button");
     add.className = "chip-add";
-    add.textContent = "＋";
+    add.textContent = "＋ Add a crop";
     add.disabled = plans.length >= 5;
     add.title = plans.length >= 5 ? "A rotation holds at most 5 crops" : "Add another crop to the rotation";
     add.addEventListener("click", () => {
@@ -3858,7 +3894,7 @@ function refreshPlanEditor(field: Field, auto: boolean): void {
     });
     chips.appendChild(add);
   }
-  container.appendChild(chips);
+  layout.appendChild(chips);
 
   // --- Crop picker + remove, for whichever chip is selected ------------------
   const viewed = plans[viewIdx]!;
@@ -3907,7 +3943,8 @@ function refreshPlanEditor(field: Field, auto: boolean): void {
     editPlans();
   });
   edit.appendChild(del);
-  container.appendChild(edit);
+  layout.appendChild(edit);
+  container.appendChild(layout);
 }
 
 /** Rebuild just the field panel's shared header (title/sub/status) — shown
@@ -4117,46 +4154,9 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
     }
   }
 
-  // Queue Plow is ALWAYS offered, any time of year, whether or not the field
-  // has a (even perennial) crop standing on it (maintainer request,
-  // 2026-07-16): the normal case (bare/harvested/mulched ground) just queues
-  // it; anywhere else — including an established grass/alfalfa stand — it's
-  // a manual "start over" that forfeits the standing crop/residue. This is
-  // the ONLY way to clear a perennial; the automatic lifecycle never plows
-  // one under. Auto-manage's own plowing still waits for winter — see the
-  // season check in autoManageField.
-  const plowableNow = canPlow(eff) && !isPerennial(field.crop) && !(eff === "harvested" && forageDue(save, field));
-  if (!auto && !activeTask) {
-    const cost = taskCost(field, "plow");
-    body.insertAdjacentHTML(
-      "beforeend",
-      `<div class="small" style="margin-top:8px">${
-        plowableNow ? "Plow to prepare for planting." : "Plow now to clear this field and start over."
-      }</div>`,
-    );
-    const btn = document.createElement("button");
-    btn.className = "primary";
-    btn.innerHTML = `🚜 Queue Plow <span class="small">$${cost.toLocaleString()}</span>`;
-    if (plowableNow) {
-      btn.addEventListener("click", () => queueFromPanel(field, "plow"));
-    } else {
-      btn.addEventListener("click", () => {
-        if (!confirm(`Plowing ${fieldLabel(field)} now clears its current crop and any residue. Continue?`)) return;
-        try {
-          forcePlow(save, field, clock.time());
-          updateHud();
-          fieldMsg("");
-          toast(`🚜 ${fieldLabel(field)} plowed under and restarted`);
-          refreshQueuePanel();
-          refreshFieldPanel(true);
-          updateBaleMarkers();
-        } catch (err) {
-          fieldMsg((err as Error).message);
-        }
-      });
-    }
-    actions.appendChild(btn);
-  }
+  /* MOVED 2026-07-24 to the Field Schedule tab (`renderQueuePlow`) at the
+   * maintainer's request — plowing is configured there, so the manual
+   * "plow now" override belongs beside it rather than buried in Field View. */
 
   // Plant chooser: both annuals and perennials (grass/alfalfa) need tilled
   // ground (maintainer request, 2026-07-16 — perennials used to seed
@@ -4329,6 +4329,59 @@ function refreshFieldScheduleTab(field: Field, _now: number, _force: boolean): v
   // dropdowns aren't rebuilt under the cursor on every tick.
   refreshPlanEditor(field, auto);
   refreshScheduleCalendar(field, auto);
+  renderQueuePlow(field);
+}
+
+/**
+ * The manual "plow now" control, moved here from Field View (maintainer
+ * request, 2026-07-24) — plowing is scheduled on this tab, so the override that
+ * ignores the schedule belongs next to it.
+ *
+ * Offered ALWAYS: any month, whether or not something is standing on the field,
+ * and — unlike its old home — whether or not the field is auto-managed. On an
+ * auto field it's the "don't wait for the scheduled month" escape hatch; the
+ * automatic plow still runs to the calendar (see `plowDue`, sim/tasks.ts).
+ *
+ * On bare/harvested/mulched ground it just queues a plow. Anywhere else it's a
+ * destructive restart that forfeits the standing crop and any residue — which
+ * is the ONLY way to clear a perennial stand, since the automatic lifecycle
+ * never plows one under. That branch confirms first.
+ */
+function renderQueuePlow(field: Field): void {
+  const host = $("fp-schedule-plow");
+  host.innerHTML = "";
+  const eff = effectiveStatus(save, field);
+  const activeTask = save.tasks.find((t) => t.fieldId === field.id && t.status === "active");
+  if (activeTask) return; // something's already working this field
+
+  const plowableNow = canPlow(eff) && !isPerennial(field.crop) && !(eff === "harvested" && forageDue(save, field));
+  const cost = taskCost(field, "plow");
+  host.insertAdjacentHTML(
+    "beforeend",
+    `<div class="small">${plowableNow ? "Plow to prepare for planting." : "Plow now to clear this field and start over."}</div>`,
+  );
+  const btn = document.createElement("button");
+  btn.className = "primary";
+  btn.innerHTML = `🚜 Queue Plow <span class="small">$${cost.toLocaleString()}</span>`;
+  if (plowableNow) {
+    btn.addEventListener("click", () => queueFromPanel(field, "plow"));
+  } else {
+    btn.addEventListener("click", () => {
+      if (!confirm(`Plowing ${fieldLabel(field)} now clears its current crop and any residue. Continue?`)) return;
+      try {
+        forcePlow(save, field, clock.time());
+        updateHud();
+        fieldMsg("");
+        toast(`🚜 ${fieldLabel(field)} plowed under and restarted`);
+        refreshQueuePanel();
+        refreshFieldPanel(true);
+        updateBaleMarkers();
+      } catch (err) {
+        fieldMsg((err as Error).message);
+      }
+    });
+  }
+  host.appendChild(btn);
 }
 
 // --- Field Schedule calendar (maintainer request, 2026-07-21; rotated to a

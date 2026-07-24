@@ -342,7 +342,20 @@
       .rot-btn:disabled { opacity: 0.35; cursor: default; }
 
       /* The sequence itself: chips left to right, wrapping at the panel width. */
-      .crop-chips { display: flex; flex-wrap: wrap; align-items: stretch; gap: 4px; }
+      /* The rotation reads top-to-bottom now (maintainer request, 2026-07-24),
+         with the growing crop pinned first, and the crop picker sits to its
+         RIGHT rather than underneath. */
+      .plan-layout { display: flex; align-items: flex-start; gap: 8px; }
+      .crop-chips { display: flex; flex-direction: column; align-items: stretch; gap: 4px; flex: 1 1 auto; min-width: 0; }
+      .crop-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+      .crop-row .crop-chip { flex: 1 1 auto; min-width: 0; }
+      /* "Current Crop" / "Next" / "Then (2)" — a fixed-width gutter so the
+         chips line up in a column instead of stair-stepping. */
+      .crop-place {
+        flex: 0 0 74px; font-size: 10px; line-height: 1.1; color: #8a7658;
+        text-transform: uppercase; letter-spacing: 0.03em; text-align: right;
+      }
+      .crop-place.now { color: var(--green-dark); font-weight: 700; }
       .crop-chip {
         display: flex; align-items: center; gap: 4px; cursor: pointer;
         font-size: 12px; font-family: inherit; padding: 4px 7px;
@@ -360,6 +373,8 @@
         content: ""; width: 6px; height: 6px; border-radius: 50%;
         background: var(--green-dark); flex-shrink: 0;
       }
+      #fp-schedule-plow { margin-top: 10px; }
+      #fp-schedule-plow .small { margin-bottom: 6px; }
       .chip-add {
         font-size: 13px; line-height: 1; padding: 4px 9px; cursor: pointer;
         border: 1.5px dashed var(--wood); border-radius: 999px;
@@ -368,7 +383,7 @@
       .chip-add:disabled { opacity: 0.35; cursor: default; }
 
       /* Crop picker + remove for whichever chip is selected. */
-      .chip-edit { display: flex; align-items: center; gap: 5px; margin-top: 6px; }
+      .chip-edit { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
       .chip-edit .plan-crop {
         flex: 1; min-width: 0; font-size: 12px; padding: 4px 6px;
         border: 1.5px solid var(--wood); border-radius: 6px; background: var(--cream);
@@ -1280,6 +1295,9 @@
           <div id="fp-plans"></div>
           <div id="fp-schedule-grid"></div>
           <div id="fp-schedule-msg"></div>
+          <!-- Manual "plow now" override — moved here from Field View
+               2026-07-24, since plowing is scheduled on this tab. -->
+          <div id="fp-schedule-plow"></div>
         </div>
 
         <div id="fp-finances-tab" class="fp-tabpanel" style="display: none">
