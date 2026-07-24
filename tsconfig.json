@@ -14,6 +14,12 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
+    // Vite does all the bundling; tsc is ONLY ever a type checker here. Without
+    // this, `npm run build` ("tsc && vite build") emitted a .js next to every
+    // .ts in src/ — and since Vite resolves .js before .ts, those stale
+    // artifacts silently SHADOWED the real sources, so tests ran against
+    // whatever the last build emitted (2026-07-23).
+    "noEmit": true,
     "types": ["vite/client"]
   },
   "include": ["src", "vite.config.ts"]

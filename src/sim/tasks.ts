@@ -2422,6 +2422,27 @@ export function advanceRotation(field: Field): void {
 }
 
 /**
+ * Drop step `idx` from a field's rotation, keeping `rotationIndex` pointing at
+ * the SAME step object it pointed at before wherever possible.
+ *
+ * Worth its own function (and its own tests) because getting it wrong is
+ * invisible but real: naively splicing without fixing the pointer silently
+ * shifts which crop the field is growing. Removing a step BEFORE the running
+ * one slides everything down by one; removing the running step itself has
+ * nowhere to stay, so it lands on whatever moved into that slot (clamped, since
+ * removing the last step wraps to the front). Refuses to empty the sequence.
+ */
+export function removeRotationStep(field: Field, idx: number): void {
+  const plans = field.plans;
+  if (!plans || plans.length <= 1 || idx < 0 || idx >= plans.length) return;
+  const active = rotationStep(field, plans.length);
+  plans.splice(idx, 1);
+  if (active > idx) field.rotationIndex = active - 1;
+  else if (active === idx) field.rotationIndex = active % plans.length;
+  else field.rotationIndex = active;
+}
+
+/**
  * Which step's crop auto-manage should put in the ground next.
  *
  * Normally the NEXT step — the current one is what's standing (or what just

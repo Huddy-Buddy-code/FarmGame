@@ -62,7 +62,7 @@ import {
   isFieldHarvesting, effectiveStatus, tickTasks, autoManageAll, autoManageField,
   buyAgent, sellAgent, buyImplement, sellImplement, attachImplement, detachImplement,
   agentPrice, implementPrice, canPull, implementName, getCoveragePath,
-  reorderTask, estimateTaskHours, forageDue, canMulch, defaultPlan, forcePlow,
+  reorderTask, estimateTaskHours, forageDue, canMulch, defaultPlan, forcePlow, removeRotationStep,
   harvesterCapacityTons, grainTrailerCapacityTons, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
   appendCompletedTask, haySpikesCapacityBales, baleTrailerCapacityBales, queueHaulBales, fieldHasLooseBales,
 } from "./sim/tasks";
@@ -3456,96 +3456,196 @@ function activeRotationIdx(field: Field): number {
 /** Render the field's rotation sequence into #fp-plans — one row per step, each
  * with a crop. Own change-detection so its dropdowns aren't rebuilt under the
  * cursor on every tick. */
+/** Does this crop leave residue a player can bale (straw or hay)? Drives the
+ * bale marker on a rotation chip (maintainer request, 2026-07-23). */
+function cropMakesBales(crop: CropId): boolean {
+  return !!gameConfig.crops[crop].producesForage;
+}
+
+/** Clipboard for the Schedule tab's rotation Copy/Paste. Deliberately a plain
+ * module variable, not save state: it's a transient editing convenience, and
+ * persisting it would mean a rotation copied three sessions ago silently
+ * survives into a farm it was never meant for. */
+let rotationClipboard: { name?: string; plans: FieldPlan[] } | null = null;
+
 function refreshPlanEditor(field: Field, auto: boolean): void {
+  const head = $("fp-rotation-head");
   const container = $("fp-plans");
   // Keyed on the rotation POINTER, not the campaign year — the year no longer
-  // selects the active step, so a year turn is not a reason to rebuild.
-  const key = [field.id, auto ? 1 : 0, activeRotationIdx(field), JSON.stringify(field.plans ?? [])].join("|");
+  // selects the active step, so a year turn is not a reason to rebuild. The
+  // viewed step and clipboard state are in the key too: both change what's drawn.
+  const key = [
+    field.id, auto ? 1 : 0, activeRotationIdx(field), scheduleViewStepIdx,
+    field.rotationName ?? "", rotationClipboard ? 1 : 0, JSON.stringify(field.plans ?? []),
+  ].join("|");
   if (key === lastPlansKey) return;
   lastPlansKey = key;
+  head.innerHTML = "";
   container.innerHTML = "";
   if (!auto) return;
 
   if (!field.plans || field.plans.length === 0) field.plans = [defaultPlan()];
   // A perennial stand (grass/alfalfa) is planted once and never rotated — its
-  // "plan" is a single row (no per-year rotation). Collapse to plans[0].
+  // "plan" is a single step. Collapse to plans[0].
   const perennialField = isPerennial(field.plans[0]!.crop);
   if (perennialField && field.plans.length > 1) field.plans.length = 1;
   const plans = field.plans;
   const activeIdx = activeRotationIdx(field);
+  const viewIdx = Math.min(perennialField ? 0 : scheduleViewStepIdx, plans.length - 1);
 
+  // --- Rotation name + Copy / Paste -----------------------------------------
+  const nameInput = document.createElement("input");
+  nameInput.className = "rot-name";
+  nameInput.type = "text";
+  nameInput.maxLength = 40;
+  nameInput.placeholder = "Name this rotation…";
+  nameInput.value = field.rotationName ?? "";
+  // Commit on blur/Enter rather than per keystroke: `editPlans` re-renders, and
+  // rebuilding the input mid-word would drop the cursor.
+  const commitName = () => {
+    const v = nameInput.value.trim();
+    const next = v === "" ? undefined : v;
+    if (next !== field.rotationName) {
+      field.rotationName = next;
+      editPlans();
+    }
+  };
+  nameInput.addEventListener("blur", commitName);
+  nameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") nameInput.blur();
+  });
+  head.appendChild(nameInput);
+
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "rot-btn";
+  copyBtn.textContent = "⧉";
+  copyBtn.title = "Copy this rotation";
+  copyBtn.addEventListener("click", () => {
+    // Deep copy so later edits to this field don't mutate what's on the clipboard.
+    rotationClipboard = { name: field.rotationName, plans: JSON.parse(JSON.stringify(plans)) as FieldPlan[] };
+    toast(`⧉ Copied rotation${field.rotationName ? ` "${field.rotationName}"` : ""}`);
+    lastPlansKey = "";
+    refreshFieldPanel(true);
+  });
+  head.appendChild(copyBtn);
+
+  const pasteBtn = document.createElement("button");
+  pasteBtn.className = "rot-btn";
+  pasteBtn.textContent = "⎘";
+  pasteBtn.disabled = !rotationClipboard;
+  pasteBtn.title = rotationClipboard
+    ? `Paste rotation${rotationClipboard.name ? ` "${rotationClipboard.name}"` : ""} onto this field`
+    : "Copy a rotation from another field first";
+  pasteBtn.addEventListener("click", () => {
+    if (!rotationClipboard) return;
+    // Deep copy on the way OUT too, so one clipboard can be pasted onto many
+    // fields without them sharing plan objects.
+    field.plans = JSON.parse(JSON.stringify(rotationClipboard.plans)) as FieldPlan[];
+    field.rotationName = rotationClipboard.name;
+    // The pasted sequence is a different length/shape — restart it rather than
+    // leaving the pointer indexing into a step that no longer means the same thing.
+    field.rotationIndex = 0;
+    scheduleViewStepIdx = 0;
+    toast(`⎘ Pasted rotation onto ${fieldLabel(field)}`);
+    editPlans();
+  });
+  head.appendChild(pasteBtn);
+
+  // --- The sequence, as chips -----------------------------------------------
   container.insertAdjacentHTML(
     "beforeend",
     perennialField
-      ? `<div class="plan-hint">Perennial stand — one plan, cut every year (no rotation).</div>`
-      : `<div class="plan-hint">Rotation — ${plans.length} step${plans.length === 1 ? "" : "s"}, looping. Step ${activeIdx + 1} is current.</div>`,
+      ? `<div class="plan-hint">Perennial stand — one crop, cut every year (no rotation).</div>`
+      : `<div class="plan-hint">Runs left to right, then loops. ● marks the crop growing now; click any crop to schedule it.</div>`,
   );
 
-  // The weed/fertilize/bale toggles used to live here as per-row buttons; they
-  // moved onto the Schedule calendar below (maintainer request, 2026-07-21) —
-  // the plan editor is now just crop-per-year + rotation-year management.
+  const chips = document.createElement("div");
+  chips.className = "crop-chips";
   plans.forEach((plan, i) => {
-    const row = document.createElement("div");
-    row.className = "plan-row" + (i === activeIdx ? " active" : "");
-
-    const yr = document.createElement("span");
-    yr.className = "plan-yr";
-    yr.textContent = "Yr" + (i + 1);
-    row.appendChild(yr);
-
-    const sel = document.createElement("select");
-    sel.className = "plan-crop";
-    for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
-      const opt = document.createElement("option");
-      opt.value = cropId;
-      opt.textContent = `${gameConfig.crops[cropId].emoji} ${gameConfig.crops[cropId].name}`;
-      if (cropId === plan.crop) opt.selected = true;
-      sel.appendChild(opt);
-    }
-    sel.addEventListener("change", () => {
-      plan.crop = sel.value as CropId;
-      if (!gameConfig.crops[plan.crop].producesForage) plan.bale = false; // baling is forage-only
-      // Switching TO a perennial collapses any rotation to this single plan;
-      // perennials also default to baling (hay) and never weed.
-      if (isPerennial(plan.crop)) {
-        field.plans = [plan];
-        plan.weed = false;
-        plan.bale = true;
-      }
-      editPlans();
+    const cfg = gameConfig.crops[plan.crop];
+    const chip = document.createElement("button");
+    chip.className = "crop-chip" + (i === viewIdx ? " selected" : "") + (i === activeIdx ? " current" : "");
+    chip.title = i === activeIdx ? `${cfg.name} — growing now` : `${cfg.name} — step ${i + 1}`;
+    chip.innerHTML =
+      `<span class="cc-emoji">${cfg.emoji}</span><span class="cc-name">${cfg.name}</span>` +
+      (cropMakesBales(plan.crop) ? baleIconSvg(12, gameConfig.baleProducts[cfg.baleProduct ?? "straw"].color) : "");
+    chip.addEventListener("click", () => {
+      scheduleViewStepIdx = i;
+      lastPlansKey = "";
+      lastScheduleCalKey = "";
+      refreshFieldPanel(true);
     });
-    row.appendChild(sel);
-
-    if (plans.length > 1) {
-      const del = document.createElement("button");
-      del.className = "plan-del";
-      del.textContent = "✕";
-      del.title = "Remove this rotation year";
-      del.addEventListener("click", () => {
-        plans.splice(i, 1);
-        editPlans();
-      });
-      row.appendChild(del);
-    }
-    container.appendChild(row);
+    chips.appendChild(chip);
   });
 
-  // Perennial stands don't rotate — no "add year" button (maintainer request).
+  // Perennial stands don't rotate — no "add step" button (maintainer request).
   if (!perennialField) {
     const add = document.createElement("button");
-    add.className = "plan-add";
-    add.textContent = "＋ Add rotation year";
+    add.className = "chip-add";
+    add.textContent = "＋";
     add.disabled = plans.length >= 5;
+    add.title = plans.length >= 5 ? "A rotation holds at most 5 crops" : "Add another crop to the rotation";
     add.addEventListener("click", () => {
       if (plans.length >= 5) return;
-      // Default the new year to a DIFFERENT, non-perennial crop for an easy rotation.
+      // Default the new step to a DIFFERENT, non-perennial crop for an easy rotation.
       const crops = (Object.keys(gameConfig.crops) as CropId[]).filter((c) => !gameConfig.crops[c].perennial);
       const nextCrop = crops.find((c) => c !== plans[plans.length - 1]!.crop) ?? crops[0]!;
-      plans.push({ crop: nextCrop, bale: !!gameConfig.crops[nextCrop].producesForage });
+      plans.push({ crop: nextCrop, bale: cropMakesBales(nextCrop) });
+      scheduleViewStepIdx = plans.length - 1; // jump to the new step's schedule
       editPlans();
     });
-    container.appendChild(add);
+    chips.appendChild(add);
   }
+  container.appendChild(chips);
+
+  // --- Crop picker + remove, for whichever chip is selected ------------------
+  const viewed = plans[viewIdx]!;
+  const edit = document.createElement("div");
+  edit.className = "chip-edit";
+
+  const sel = document.createElement("select");
+  sel.className = "plan-crop";
+  for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
+    const opt = document.createElement("option");
+    opt.value = cropId;
+    opt.textContent = `${gameConfig.crops[cropId].emoji} ${gameConfig.crops[cropId].name}`;
+    if (cropId === viewed.crop) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  sel.addEventListener("change", () => {
+    viewed.crop = sel.value as CropId;
+    if (!cropMakesBales(viewed.crop)) viewed.bale = false; // baling is forage-only
+    // Switching TO a perennial collapses the rotation to this single step;
+    // perennials also default to baling (hay) and never weed.
+    if (isPerennial(viewed.crop)) {
+      field.plans = [viewed];
+      field.rotationIndex = 0;
+      scheduleViewStepIdx = 0;
+      viewed.weed = false;
+      viewed.bale = true;
+    }
+    // The new crop's legal months are different — a month override carried over
+    // from the old crop would be re-validated away silently, so clear it here
+    // and let the calendar show real defaults.
+    viewed.schedule = undefined;
+    editPlans();
+  });
+  edit.appendChild(sel);
+
+  const del = document.createElement("button");
+  del.className = "plan-del";
+  del.textContent = "✕";
+  del.disabled = plans.length <= 1;
+  del.title = plans.length <= 1 ? "A rotation needs at least one crop" : "Remove this crop from the rotation";
+  del.addEventListener("click", () => {
+    // Pointer arithmetic lives in the sim (removeRotationStep) — getting it
+    // wrong silently changes which crop the field is growing.
+    removeRotationStep(field, viewIdx);
+    scheduleViewStepIdx = Math.min(viewIdx, (field.plans?.length ?? 1) - 1);
+    editPlans();
+  });
+  edit.appendChild(del);
+  container.appendChild(edit);
 }
 
 /** Rebuild just the field panel's shared header (title/sub/status) — shown
@@ -3947,13 +4047,13 @@ function refreshFieldScheduleTab(field: Field, _now: number, _force: boolean): v
 
 // --- Field Schedule calendar (maintainer request, 2026-07-21; rotated to a
 //     VERTICAL layout 2026-07-21 to save horizontal space) -------------------
-/** Which rotation-year (plans[] index) the calendar is currently showing —
- * independent of which year is actually ACTIVE right now (the maintainer
- * asked for "active year only, with a year switcher", so the player can
- * still page ahead/back to view or edit a future/past year's schedule).
- * Reset to the active year whenever a different field is selected. */
+/** Which rotation STEP (plans[] index) the calendar is currently showing —
+ * independent of which step is actually running right now, so the player can
+ * view/edit any step's schedule. Driven by the crop chips (2026-07-23, which
+ * replaced the old ‹ Yr N › stepper). Reset to the running step whenever a
+ * different field is selected. */
 let scheduleViewFieldId: string | null = null;
-let scheduleViewYearIdx = 0;
+let scheduleViewStepIdx = 0;
 /** The Schedule calendar's own drag state — kept separate from the Work
  * Queue's `draggingTaskId` (different domain/shape), mirroring its
  * dragstart/dragover/drop pattern. */
@@ -3989,13 +4089,11 @@ interface ScheduleColumn {
 
 let lastScheduleCalKey = "";
 function refreshScheduleCalendar(field: Field, auto: boolean): void {
-  const yearBar = $("fp-schedule-year");
   const host = $("fp-schedule-grid");
   const msg = $("fp-schedule-msg");
   if (!auto) {
     // The schedule only drives the auto-manager — say so rather than leaving
     // the tab blank when the field is under manual control.
-    yearBar.innerHTML = "";
     host.innerHTML = `<div class="fp-sched-hint">Turn on <b>Auto-manage</b> above to lay out this field's task schedule. The schedule tells the auto-manager which month to run each step — it has no effect while you drive the field manually from the View tab.</div>`;
     msg.textContent = "";
     lastScheduleCalKey = "";
@@ -4006,47 +4104,20 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
   const perennialField = isPerennial(plans[0]!.crop);
   const activeIdx = activeRotationIdx(field);
 
+  // Which step the calendar shows is driven by the crop chips above
+  // (2026-07-23) — the old ‹ Yr N › stepper is gone. Landing on a new field
+  // starts on whatever step is actually running.
   if (scheduleViewFieldId !== field.id) {
     scheduleViewFieldId = field.id;
-    scheduleViewYearIdx = activeIdx;
+    scheduleViewStepIdx = activeIdx;
   }
-  if (scheduleViewYearIdx >= plans.length) scheduleViewYearIdx = plans.length - 1;
-  const viewIdx = perennialField ? 0 : scheduleViewYearIdx;
+  if (scheduleViewStepIdx >= plans.length) scheduleViewStepIdx = plans.length - 1;
+  const viewIdx = perennialField ? 0 : scheduleViewStepIdx;
   const plan = plans[viewIdx]!;
 
   const key = [field.id, viewIdx, activeIdx, plans.length, JSON.stringify(plan)].join("|");
   if (key === lastScheduleCalKey) return;
   lastScheduleCalKey = key;
-
-  // --- Year switcher (only for a multi-year rotation) ---
-  yearBar.innerHTML = "";
-  if (!perennialField && plans.length > 1) {
-    const bar = document.createElement("div");
-    bar.className = "fp-sched-yearbar";
-    const prev = document.createElement("button");
-    prev.textContent = "‹";
-    prev.disabled = viewIdx <= 0;
-    prev.addEventListener("click", () => {
-      scheduleViewYearIdx = viewIdx - 1;
-      lastScheduleCalKey = "";
-      refreshFieldPanel(true);
-    });
-    const label = document.createElement("span");
-    label.textContent = `Yr ${viewIdx + 1}` + (viewIdx === activeIdx ? " ·" : "");
-    label.title = viewIdx === activeIdx ? "The rotation year running now" : "";
-    const next = document.createElement("button");
-    next.textContent = "›";
-    next.disabled = viewIdx >= plans.length - 1;
-    next.addEventListener("click", () => {
-      scheduleViewYearIdx = viewIdx + 1;
-      lastScheduleCalKey = "";
-      refreshFieldPanel(true);
-    });
-    bar.appendChild(prev);
-    bar.appendChild(label);
-    bar.appendChild(next);
-    yearBar.appendChild(bar);
-  }
 
   // --- Build the task columns for this plan ---
   const plantMonth = effectiveMonthFor("plant", plan.crop, plan.schedule?.plant);
@@ -4071,8 +4142,10 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
     autoCol("🌾", "Mow", cfg.harvestMonths ?? []);
     autoCol("📦", "Rake / Bale", cfg.harvestMonths ?? [], "bale");
   } else {
-    taskCol("💦", "Weed", "weed", plantMonth, "weed");
+    // Fertilize before Weed (maintainer request, 2026-07-23) — it's also the
+    // order they open in: fertilize is legal from plant+1, weeding from plant+2.
     taskCol("🌿", "Fertilize", "fertilize", plantMonth, "fertilize");
+    taskCol("💦", "Weed", "weed", plantMonth, "weed");
     taskCol("🌾", "Harvest", "harvest", plantMonth);
     // Optional residue pass — an alternative to baling; off by default.
     taskCol("🍂", "Mulch", "mulch", plantMonth, "mulch");
@@ -4101,22 +4174,44 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
     grid.insertAdjacentHTML("beforeend", `<div class="fp-vcal-head" title="${c.label}">${c.icon}</div>`);
   }
 
+  // A crop whose cycle runs past February (Winter Wheat: plant Sep, harvest
+  // Jun) puts its later tasks ABOVE its plant row in this fixed Mar→Feb grid.
+  // Mark those rows so the wrap reads as intended rather than as a bug
+  // (maintainer chose the fixed grid over a plant-month-relative one).
+  const rowOf = (m: number) => SCHEDULE_MONTH_ORDER.indexOf(m);
+  const plantRow = plantMonth !== undefined ? rowOf(plantMonth) : -1;
+  const wrapsTheYear =
+    plantRow >= 0 && cols.some((c) => [...c.active].some((m) => rowOf(m) < plantRow));
+
   // One row per month: a season-tinted month label + each task's cell.
+  let wrapMarked = false;
   for (const m of SCHEDULE_MONTH_ORDER) {
     const season = seasonOfMonth(m);
     const firstOfSeason = m === 2 || m === 5 || m === 8 || m === 11;
+    // Rows above the plant row belong to the FOLLOWING calendar year.
+    const nextYear = wrapsTheYear && rowOf(m) < plantRow;
     const monthCell = document.createElement("div");
-    monthCell.className = `fp-vmonth ${season}`;
+    monthCell.className = `fp-vmonth ${season}` + (nextYear ? " next-year" : "");
+    if (nextYear) monthCell.title = `${MONTH_SHORT[m]} of the following year — this crop overwinters`;
     monthCell.innerHTML = `<span class="fp-vmonth-ico">${firstOfSeason ? SCHEDULE_SEASON_ICON[season] : ""}</span><span>${MONTH_SHORT[m]}</span>`;
     grid.appendChild(monthCell);
     for (const c of cols) grid.appendChild(scheduleCell(c, m, plan, msg));
+    // A divider after the last next-year row, i.e. where the following year
+    // hands back to the planting year.
+    if (nextYear && !wrapMarked && rowOf(m) === plantRow - 1) {
+      wrapMarked = true;
+      grid.insertAdjacentHTML(
+        "beforeend",
+        `<div class="fp-vcal-wrap" style="grid-column: 1 / -1">↑ next year · ↓ planting year</div>`,
+      );
+    }
   }
 
-  // --- Defaults button: clear this year's month overrides (automatic timing). ---
+  // --- Defaults button: clear this step's month overrides (automatic timing). ---
   const def = document.createElement("button");
   def.className = "fp-sched-defaults";
   def.textContent = "↺ Reset to automatic timing";
-  def.title = "Clear your month overrides for this year — each task goes back to running at its earliest natural time";
+  def.title = `Clear your month overrides for ${gameConfig.crops[plan.crop].name} — each task goes back to running at its earliest natural time`;
   def.disabled = !plan.schedule || Object.keys(plan.schedule).length === 0;
   def.addEventListener("click", () => {
     plan.schedule = {};

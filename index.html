@@ -290,49 +290,65 @@
       .auto-note { font-size: 12px; color: #8a7658; margin-top: 8px; }
       .sell-row { margin-top: 4px; }
 
-      /* ---------- Rotation planner ---------- */
-      #fp-plans:not(:empty) { margin-top: 8px; }
+      /* ---------- Rotation sequence (chips) — 2026-07-23 ----------
+         Replaced the per-campaign-year dropdown rows. The chips ARE the
+         sequence AND the calendar's step selector: click one to schedule it. */
+      #fp-plans:not(:empty) { margin-top: 6px; }
       .plan-hint { font-size: 11px; color: #8a7658; margin: 2px 0 6px; }
-      .plan-row {
-        display: flex; align-items: center; gap: 5px; margin-bottom: 5px;
+
+      /* Rotation name + Copy/Paste, above the chips. */
+      .rot-head { display: flex; align-items: center; gap: 4px; margin-top: 8px; }
+      .rot-name {
+        flex: 1; min-width: 0; font-size: 12px; font-weight: 600; padding: 4px 6px;
+        border: 1.5px solid var(--wood); border-radius: 6px; background: var(--cream);
+        color: var(--wood); font-family: inherit;
       }
-      .plan-row.active .plan-yr { background: var(--green); color: #fff; border-color: var(--green-dark); }
-      .plan-yr {
-        font-size: 11px; font-weight: 700; min-width: 30px; text-align: center;
-        padding: 3px 4px; border: 1.5px solid var(--wood); border-radius: 6px;
-        background: var(--cream-2); color: var(--wood); flex-shrink: 0;
+      .rot-name::placeholder { font-weight: 400; color: #a8977c; }
+      .rot-btn {
+        font-size: 12px; line-height: 1; padding: 5px 7px; cursor: pointer; flex-shrink: 0;
+        border: 1.5px solid var(--wood); border-radius: 6px;
+        background: var(--cream-2); color: var(--wood); font-family: inherit;
       }
-      .plan-crop {
+      .rot-btn:disabled { opacity: 0.35; cursor: default; }
+
+      /* The sequence itself: chips left to right, wrapping at the panel width. */
+      .crop-chips { display: flex; flex-wrap: wrap; align-items: stretch; gap: 4px; }
+      .crop-chip {
+        display: flex; align-items: center; gap: 4px; cursor: pointer;
+        font-size: 12px; font-family: inherit; padding: 4px 7px;
+        border: 1.5px solid var(--wood); border-radius: 999px;
+        background: var(--cream-2); color: var(--wood); max-width: 100%;
+      }
+      .crop-chip .cc-emoji { font-size: 14px; line-height: 1; }
+      .crop-chip .cc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .crop-chip svg { flex-shrink: 0; display: block; }
+      /* Being VIEWED in the calendar below. */
+      .crop-chip.selected { background: var(--gold); border-width: 2px; padding: 3px 6px; font-weight: 700; }
+      /* Actually running on the field right now — a dot, so it can coexist
+         with .selected instead of competing with it for the same styling. */
+      .crop-chip.current::after {
+        content: ""; width: 6px; height: 6px; border-radius: 50%;
+        background: var(--green-dark); flex-shrink: 0;
+      }
+      .chip-add {
+        font-size: 13px; line-height: 1; padding: 4px 9px; cursor: pointer;
+        border: 1.5px dashed var(--wood); border-radius: 999px;
+        background: var(--cream); color: var(--wood); font-family: inherit;
+      }
+      .chip-add:disabled { opacity: 0.35; cursor: default; }
+
+      /* Crop picker + remove for whichever chip is selected. */
+      .chip-edit { display: flex; align-items: center; gap: 5px; margin-top: 6px; }
+      .chip-edit .plan-crop {
         flex: 1; min-width: 0; font-size: 12px; padding: 4px 6px;
         border: 1.5px solid var(--wood); border-radius: 6px; background: var(--cream);
         color: var(--wood); font-family: inherit;
       }
-      .plan-op {
-        font-size: 13px; line-height: 1; padding: 4px 5px; cursor: pointer;
-        border: 1.5px solid var(--wood); border-radius: 6px;
-        background: var(--cream-2); opacity: 0.4; flex-shrink: 0;
-      }
-      .plan-op.on { opacity: 1; background: var(--gold); border-color: var(--wood); }
-      .plan-op:disabled { cursor: default; opacity: 0.15; }
       .plan-del {
         font-size: 13px; line-height: 1; padding: 4px 6px; cursor: pointer; flex-shrink: 0;
         border: 1.5px solid var(--wood); border-radius: 6px; background: var(--cream-2); color: var(--red);
       }
-      .plan-add {
-        width: 100%; font-size: 12px; padding: 5px; margin-top: 2px; cursor: pointer;
-        border: 1.5px dashed var(--wood); border-radius: 6px; background: var(--cream);
-        color: var(--wood); font-family: inherit;
-      }
-      .plan-add:disabled { opacity: 0.4; cursor: default; }
-
-      /* ---------- Field Schedule calendar (maintainer request, 2026-07-21) ---------- */
-      .fp-sched-yearbar {
-        display: flex; align-items: center; justify-content: center; gap: 10px;
-        margin: 10px 0 4px;
-      }
-      .fp-sched-yearbar button { padding: 2px 10px; font-size: 14px; }
-      .fp-sched-yearbar button:disabled { opacity: 0.3; cursor: default; }
-      .fp-sched-yearbar span { font-size: 13px; font-weight: 700; min-width: 46px; text-align: center; }
+      .plan-del:disabled { opacity: 0.3; cursor: default; }
 
       /* Shown when Auto-manage is off (the schedule only drives auto-manage). */
       .fp-sched-hint { font-size: 12px; color: #8a7658; margin: 10px 2px; line-height: 1.45; }
@@ -368,6 +384,20 @@
       .fp-vmonth.summer { background: #f5c95d; }
       .fp-vmonth.fall   { background: #d98e4a; }
       .fp-vmonth.winter { background: #bcd8e8; }
+      /* An overwintering crop (Winter Wheat: plant Sep, harvest Jun) wraps the
+         fixed Mar->Feb grid, so its later months sit ABOVE its plant row. Fade
+         + stripe those rows and divide them off, so the wrap reads as deliberate
+         rather than as a scheduling bug (2026-07-23). */
+      .fp-vmonth.next-year {
+        opacity: 0.62;
+        background-image: repeating-linear-gradient(
+          -45deg, rgba(255,255,255,0.45) 0 3px, transparent 3px 6px);
+      }
+      .fp-vcal-wrap {
+        font-size: 9px; font-weight: 700; letter-spacing: 0.02em; text-align: center;
+        color: #8a7658; padding: 2px 0 3px; margin: 1px 0 2px;
+        border-top: 1.5px dashed var(--wood); opacity: 0.85;
+      }
       /* Every cell gets a faint track so the grid reads as a grid (a task's own
          months then stand out against it). */
       .fp-cal-cell {
@@ -1131,8 +1161,8 @@
               <span class="slider"></span>
             </label>
           </div>
+          <div id="fp-rotation-head"></div>
           <div id="fp-plans"></div>
-          <div id="fp-schedule-year"></div>
           <div id="fp-schedule-grid"></div>
           <div id="fp-schedule-msg"></div>
         </div>

@@ -3,3 +3,8 @@ dist
 .vite
 *.local
 .DS_Store
+
+# Belt-and-braces: tsc is noEmit (see tsconfig.json), but if it ever emits
+# again, these shadow the .ts sources in Vite's resolution order.
+src/**/*.js
+vite.config.js

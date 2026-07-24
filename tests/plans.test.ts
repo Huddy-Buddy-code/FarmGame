@@ -4,7 +4,7 @@ import type { Meters } from "../src/geo/coords";
 import { newGame } from "../src/state/saveState";
 import type { Field, SaveState } from "../src/state/saveState";
 import { tickFarming } from "../src/sim/farming";
-import { ensureAgents, buyImplement, tickTasks, autoManageAll, activePlan, advanceRotation, planToPlant, cancelTask } from "../src/sim/tasks";
+import { ensureAgents, buyImplement, tickTasks, autoManageAll, activePlan, advanceRotation, planToPlant, cancelTask, removeRotationStep } from "../src/sim/tasks";
 import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
 import { minutesPerMonth } from "../src/sim/calendar";
 
@@ -77,6 +77,50 @@ describe("activePlan — an ordered sequence, advanced by rotationIndex", () => 
   it("falls back to a default corn plan when a field has none", () => {
     const field: Field = { id: "f", parcelId: "p", boundary, status: "stubble" };
     expect(activePlan(field).crop).toBe("corn");
+  });
+});
+
+describe("removeRotationStep — the pointer follows the step it was on", () => {
+  const threeStep = (idx: number): Field => ({
+    id: "f", parcelId: "p", boundary, status: "growing",
+    plans: [{ crop: "corn" }, { crop: "soybeans" }, { crop: "wheat" }],
+    rotationIndex: idx,
+  });
+
+  it("removing a step BEFORE the running one keeps the same crop growing", () => {
+    const field = threeStep(2); // running wheat
+    removeRotationStep(field, 0); // drop corn
+    expect(activePlan(field).crop).toBe("wheat");
+    expect(field.rotationIndex).toBe(1);
+  });
+
+  it("removing a step AFTER the running one leaves the pointer alone", () => {
+    const field = threeStep(0); // running corn
+    removeRotationStep(field, 2); // drop wheat
+    expect(activePlan(field).crop).toBe("corn");
+    expect(field.rotationIndex).toBe(0);
+  });
+
+  it("removing the RUNNING step lands on whatever took its slot", () => {
+    const field = threeStep(1); // running soybeans
+    removeRotationStep(field, 1);
+    expect(field.plans!.map((p) => p.crop)).toEqual(["corn", "wheat"]);
+    expect(activePlan(field).crop).toBe("wheat"); // slid into slot 1
+  });
+
+  it("removing the running LAST step wraps to the front instead of pointing off the end", () => {
+    const field = threeStep(2); // running wheat, the last step
+    removeRotationStep(field, 2);
+    expect(field.rotationIndex).toBe(0);
+    expect(activePlan(field).crop).toBe("corn");
+  });
+
+  it("refuses to empty the sequence", () => {
+    const field: Field = {
+      id: "f", parcelId: "p", boundary, status: "stubble", plans: [{ crop: "corn" }],
+    };
+    removeRotationStep(field, 0);
+    expect(field.plans).toHaveLength(1);
   });
 });
 
