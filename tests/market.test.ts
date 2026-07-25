@@ -88,12 +88,23 @@ describe("farm-wide auto-sell (the master toggle)", () => {
     for (const p of ALL_MARKET_PRODUCTS) expect(effectiveSellPlan(save, p).auto, p).toBe(true);
   });
 
-  it("a product's own row overrides it", () => {
+  it("the master WINS over a product's own row while it's on", () => {
+    // Precedence was the other way round when this landed; the maintainer
+    // inverted it 2026-07-24 — "when they hit the master toggle it overrides
+    // all the individual ones and moves them to on". The UI hides the
+    // per-product controls while the master is on for exactly this reason.
     const save = newGame();
     save.sellAll = { month: 11, auto: true };
     save.sellSchedule = { corn: { month: 5, auto: false } };
-    expect(effectiveSellPlan(save, "corn")).toEqual({ month: 5, auto: false, fromAll: false });
-    expect(effectiveSellPlan(save, "soybeans").auto).toBe(true); // untouched, still follows
+    expect(effectiveSellPlan(save, "corn")).toEqual({ month: 11, auto: true, fromAll: true });
+  });
+
+  it("per-product rows take over again once the master is off", () => {
+    const save = newGame();
+    save.sellAll = { month: 11, auto: false };
+    save.sellSchedule = { corn: { month: 5, auto: true } };
+    expect(effectiveSellPlan(save, "corn")).toEqual({ month: 5, auto: true, fromAll: false });
+    expect(effectiveSellPlan(save, "soybeans").auto).toBe(false); // no row, master off
   });
 
   it("off by default — a fresh farm sells nothing automatically", () => {
@@ -114,7 +125,7 @@ describe("farm-wide auto-sell (the master toggle)", () => {
     expect(save.money - before).toBe(Math.round(40 * grainInstantPrice("soybeans")));
   });
 
-  it("respects a per-product OFF while the master is on", () => {
+  it("sells a product whose own row says OFF, because the master outranks it", () => {
     const save = newGame();
     save.grain.corn = 40;
     save.grain.soybeans = 40;
@@ -122,8 +133,20 @@ describe("farm-wide auto-sell (the master toggle)", () => {
     save.sellSchedule = { corn: { month: 11, auto: false } };
     save.sellLastMonthAbs = 8;
     tickAutoSell(save, 9 * minutesPerMonth());
-    expect(save.grain.corn).toBe(40); // held back by its own setting
-    expect(save.grain.soybeans).toBe(0); // followed the master
+    expect(save.grain.corn).toBe(0); // master overrode the row
+    expect(save.grain.soybeans).toBe(0);
+  });
+
+  it("a held-back product stays held back once the master is off", () => {
+    const save = newGame();
+    save.grain.corn = 40;
+    save.grain.soybeans = 40;
+    save.sellAll = { month: 11, auto: false };
+    save.sellSchedule = { soybeans: { month: 11, auto: true } };
+    save.sellLastMonthAbs = 8;
+    tickAutoSell(save, 9 * minutesPerMonth());
+    expect(save.grain.corn).toBe(40); // no row, master off — nothing happens
+    expect(save.grain.soybeans).toBe(0); // its own row said sell
   });
 
   it("sells on the MASTER's month, not the peak, when one is chosen", () => {

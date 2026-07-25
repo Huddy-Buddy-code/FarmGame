@@ -867,9 +867,14 @@ export const gameConfig: GameConfig = {
   },
   buildings: {
     silo: {
-      small: { price: 90_000, capacityBushels: 10_000 },
-      medium: { price: 200_000, capacityBushels: 25_000 },
-      large: { price: 350_000, capacityBushels: 50_000 },
+      // Priced at real installed rates (2026-07-24) — roughly $3.50/bu at
+      // 10,000 falling to $2.70/bu at 50,000, the usual bulk curve as fixed
+      // costs (foundation, fan, unload auger) spread over more grain. They used
+      // to run $9.00/$8.00/$7.00 per bushel, ~2.6x real and the only thing in
+      // the game priced away from reality.
+      small: { price: 35_000, capacityBushels: 10_000 },
+      medium: { price: 75_000, capacityBushels: 25_000 },
+      large: { price: 135_000, capacityBushels: 50_000 },
     },
     baleBarn: { price: 70_000, capacityBales: 300 },
     // Outdoor bale storage — cheaper than the Barn, and now CAPPED like it

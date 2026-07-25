@@ -55,9 +55,15 @@ export function effectiveSellPlan(
   save: { sellSchedule?: Record<string, { month: number; auto: boolean }>; sellAll?: { month: number; auto: boolean } },
   product: MarketProduct,
 ): { month: number; auto: boolean; fromAll: boolean } {
+  // The master WINS while it's on (maintainer decision, 2026-07-24: "when they
+  // hit the master toggle it overrides all the individual ones and moves them
+  // to on"). Per-product rows only speak when the master is off — which is why
+  // the UI hides them while it's on: a visible control that couldn't change
+  // anything would be a lie.
+  if (save.sellAll?.auto) return { month: save.sellAll.month, auto: true, fromAll: true };
   const own = save.sellSchedule?.[product];
   if (own) return { ...own, fromAll: false };
-  return { month: save.sellAll?.month ?? peakSaleMonth(), auto: !!save.sellAll?.auto, fromAll: true };
+  return { month: save.sellAll?.month ?? peakSaleMonth(), auto: false, fromAll: true };
 }
 
 /** The single peak-price month (0-11) — December, shared by every product. */

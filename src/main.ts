@@ -1679,7 +1679,9 @@ function buildMarketSection(rows: HTMLElement): void {
     <span class="icon">🔁</span>
     <span class="info">
       <div class="name">Auto-sell everything</div>
-      <div class="qty">Every crop and bale, including ones you haven't grown yet</div>
+      <div class="qty">${allPlan.auto
+        ? "On — every product sells this month; individual settings are off while this is on"
+        : "Every crop and bale, including ones you haven't grown yet"}</div>
     </span>`;
 
   const allSelect = document.createElement("select");
@@ -1701,6 +1703,12 @@ function buildMarketSection(rows: HTMLElement): void {
   allCb.checked = allPlan.auto;
   allCb.addEventListener("change", () => {
     save.sellAll = { month: allPlan.month, auto: allCb.checked };
+    // Switching it ON wipes the per-product rows rather than sitting on top of
+    // them (maintainer decision, 2026-07-24) — "overrides all the individual
+    // ones and moves them to on". Leaving stale overrides underneath would mean
+    // turning the master back off silently restored settings the player can no
+    // longer see, since the rows are hidden while it's on.
+    if (allCb.checked) save.sellSchedule = {};
     refreshInventory(true);
   });
   allToggle.appendChild(allCb);
@@ -1825,6 +1833,16 @@ function buildMarketSection(rows: HTMLElement): void {
     });
     row.appendChild(haulBtn);
 
+    // While the master is on it OWNS every product, so the per-product controls
+    // are hidden rather than shown doing nothing (maintainer decision,
+    // 2026-07-24: "then hides the individual toggles"). A short note takes
+    // their place so the row doesn't look like it lost a feature.
+    if (allPlan.auto) {
+      row.insertAdjacentHTML("beforeend", `<span class="mkt-following">auto · ${MONTH_SHORT[allPlan.month]}</span>`);
+      rows.appendChild(row);
+      continue;
+    }
+
     // Auto-sell: pick the month, flip the switch — tickAutoSell does the rest.
     const select = document.createElement("select");
     select.className = "mkt-month";
@@ -1853,6 +1871,12 @@ function buildMarketSection(rows: HTMLElement): void {
     cb.addEventListener("change", () => {
       const s = (save.sellSchedule ??= {});
       s[prod.id] = { month: sched.month, auto: cb.checked };
+      // Turning ANY product off drops the master too (maintainer decision,
+      // 2026-07-24), so "sell everything" can never be showing as on while
+      // something is deliberately held back. Unreachable through the UI as it
+      // stands — the rows are hidden while the master is on — but it keeps the
+      // two honest for a save that arrives in that state.
+      if (!cb.checked && save.sellAll?.auto) save.sellAll = { ...save.sellAll, auto: false };
       refreshInventory(true);
     });
     toggle.appendChild(cb);
