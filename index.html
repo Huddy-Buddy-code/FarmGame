@@ -342,56 +342,58 @@
       .rot-btn:disabled { opacity: 0.35; cursor: default; }
 
       /* The sequence itself: chips left to right, wrapping at the panel width. */
-      /* The rotation reads top-to-bottom now (maintainer request, 2026-07-24),
-         with the growing crop pinned first, and the crop picker sits to its
-         RIGHT rather than underneath. */
-      .plan-layout { display: flex; align-items: flex-start; gap: 8px; }
-      .crop-chips { display: flex; flex-direction: column; align-items: stretch; gap: 4px; flex: 1 1 auto; min-width: 0; }
+      /* The rotation reads top-to-bottom (maintainer request, 2026-07-24) with
+         the growing crop pinned first. Each row is SELF-CONTAINED as of the
+         follow-up pass: label, a big icon button that picks whose schedule the
+         calendar shows, that row's own crop dropdown, and its own remove. */
+      .crop-chips { display: flex; flex-direction: column; align-items: stretch; gap: 5px; }
       .crop-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
-      .crop-row .crop-chip { flex: 1 1 auto; min-width: 0; }
-      /* "Current Crop" / "Next" / "Then (2)" — a fixed-width gutter so the
-         chips line up in a column instead of stair-stepping. */
+      /* "Current" / "Next" / "Then" — a fixed-width LEFT-aligned gutter, so the
+         icons line up in a column instead of stair-stepping. */
       .crop-place {
-        flex: 0 0 74px; font-size: 10px; line-height: 1.1; color: #8a7658;
-        text-transform: uppercase; letter-spacing: 0.03em; text-align: right;
+        flex: 0 0 58px; font-size: 10px; line-height: 1.1; color: #8a7658;
+        text-transform: uppercase; letter-spacing: 0.03em; text-align: left;
       }
       .crop-place.now { color: var(--green-dark); font-weight: 700; }
+      /* The crop button is now an ICON only — the name is in the row's dropdown,
+         so repeating it here would only cost width in a narrow panel. Sized up
+         per request; square, so a bale badge doesn't stretch it. */
       .crop-chip {
-        display: flex; align-items: center; gap: 4px; cursor: pointer;
-        font-size: 12px; font-family: inherit; padding: 4px 7px;
-        border: 1.5px solid var(--wood); border-radius: 999px;
-        background: var(--cream-2); color: var(--wood); max-width: 100%;
+        display: flex; align-items: center; justify-content: center; gap: 3px;
+        cursor: pointer; font-family: inherit; flex: 0 0 auto;
+        width: 46px; height: 40px; padding: 0;
+        border: 1.5px solid var(--wood); border-radius: 10px;
+        background: var(--cream-2); color: var(--wood);
       }
-      .crop-chip .cc-emoji { font-size: 14px; line-height: 1; }
-      .crop-chip .cc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .crop-chip .cc-emoji { font-size: 24px; line-height: 1; }
       .crop-chip svg { flex-shrink: 0; display: block; }
       /* Being VIEWED in the calendar below. */
-      .crop-chip.selected { background: var(--gold); border-width: 2px; padding: 3px 6px; font-weight: 700; }
+      .crop-chip.selected { background: var(--gold); border-width: 2.5px; }
       /* Actually running on the field right now — a dot, so it can coexist
          with .selected instead of competing with it for the same styling. */
       .crop-chip.current::after {
-        content: ""; width: 6px; height: 6px; border-radius: 50%;
+        content: ""; width: 7px; height: 7px; border-radius: 50%;
         background: var(--green-dark); flex-shrink: 0;
       }
       #fp-schedule-plow { margin-top: 10px; }
       #fp-schedule-plow .small { margin-bottom: 6px; }
       .chip-add {
-        font-size: 13px; line-height: 1; padding: 4px 9px; cursor: pointer;
+        align-self: flex-start; margin-left: 64px;
+        font-size: 13px; line-height: 1; padding: 6px 12px; cursor: pointer;
         border: 1.5px dashed var(--wood); border-radius: 999px;
         background: var(--cream); color: var(--wood); font-family: inherit;
       }
       .chip-add:disabled { opacity: 0.35; cursor: default; }
 
-      /* Crop picker + remove for whichever chip is selected. */
-      .chip-edit { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
-      .chip-edit .plan-crop {
-        flex: 1; min-width: 0; font-size: 12px; padding: 4px 6px;
-        border: 1.5px solid var(--wood); border-radius: 6px; background: var(--cream);
+      /* One crop dropdown PER ROW, and one remove button per row. */
+      .crop-row .plan-crop {
+        flex: 1 1 auto; min-width: 0; font-size: 12.5px; padding: 6px 6px;
+        border: 1.5px solid var(--wood); border-radius: 8px; background: var(--cream);
         color: var(--wood); font-family: inherit;
       }
       .plan-del {
-        font-size: 13px; line-height: 1; padding: 4px 6px; cursor: pointer; flex-shrink: 0;
-        border: 1.5px solid var(--wood); border-radius: 6px; background: var(--cream-2); color: var(--red);
+        font-size: 13px; line-height: 1; padding: 7px 7px; cursor: pointer; flex-shrink: 0;
+        border: 1.5px solid var(--wood); border-radius: 8px; background: var(--cream-2); color: var(--red);
       }
       .plan-del:disabled { opacity: 0.3; cursor: default; }
 

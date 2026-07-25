@@ -3875,11 +3875,9 @@ function refreshPlanEditor(field: Field, auto: boolean): void {
   head.appendChild(pasteBtn);
 
   // --- The sequence, as a VERTICAL list starting at the current crop --------
-  // Maintainer request, 2026-07-24: "Lock Current crop on top (clearly labelled
-  // Current Crop), then have the next one under, then next under that." So the
-  // list is drawn in ROTATION order beginning at the active step, rather than
-  // in raw array order — what the player wants to see is what's growing and
-  // what's coming, not where each step happens to sit in the array.
+  // Maintainer request, 2026-07-24: the rotation reads top to bottom from
+  // whatever is growing now, rather than in raw array order — what matters is
+  // what's in the ground and what's coming, not where a step sits in the array.
   //
   // The array index travels with each row (`realIdx`): `scheduleViewStepIdx`
   // and `removeRotationStep` both address the array, and quietly feeding either
@@ -3890,12 +3888,6 @@ function refreshPlanEditor(field: Field, auto: boolean): void {
       ? `<div class="plan-hint">Perennial stand — one crop, cut every year (no rotation).</div>`
       : `<div class="plan-hint">The rotation runs top to bottom, then loops. Click a crop to schedule it.</div>`,
   );
-
-  // The layout is two columns: the crop list on the left, the picker for
-  // whichever crop is selected on the right (maintainer request: "move the drop
-  // down to the right of these crop icons/buttons").
-  const layout = document.createElement("div");
-  layout.className = "plan-layout";
 
   const chips = document.createElement("div");
   chips.className = "crop-chips";
@@ -3910,23 +3902,26 @@ function refreshPlanEditor(field: Field, auto: boolean): void {
     rowEl.className = "crop-row";
     if (!perennialField) {
       // The pointer sits on the step the field is ON, which after a plow is the
-      // crop about to go in rather than one that's growing — so the top row is
-      // only called "Current Crop" when something actually IS growing.
-      const topLabel = field.crop ? "Current Crop" : "Planting Next";
+      // crop about to go in rather than one that's growing — so the top row
+      // only claims to be "current" when something actually IS growing.
+      const topLabel = field.crop ? "Current" : "Next up";
       rowEl.insertAdjacentHTML(
         "beforeend",
         `<span class="crop-place${isCurrent ? " now" : ""}">${
-          isCurrent ? topLabel : place === 1 ? "Next" : `Then (${place})`
+          isCurrent ? topLabel : place === 1 ? "Next" : "Then"
         }</span>`,
       );
     }
 
+    // The icon button picks which step the calendar below is showing. It's the
+    // crop's emoji only — the name lives in this row's own dropdown, so
+    // repeating it here would just cost width in a narrow panel.
     const chip = document.createElement("button");
     chip.className = "crop-chip" + (realIdx === viewIdx ? " selected" : "") + (isCurrent ? " current" : "");
-    chip.title = isCurrent ? `${cfg.name} — growing now` : `${cfg.name} — step ${realIdx + 1}`;
+    chip.title = `${cfg.name} — show this crop's schedule`;
     chip.innerHTML =
-      `<span class="cc-emoji">${cfg.emoji}</span><span class="cc-name">${escapeHtml(cfg.name)}</span>` +
-      (cropMakesBales(plan.crop) ? baleIconSvg(12, gameConfig.baleProducts[cfg.baleProduct ?? "straw"].color) : "");
+      `<span class="cc-emoji">${cfg.emoji}</span>` +
+      (cropMakesBales(plan.crop) ? baleIconSvg(13, gameConfig.baleProducts[cfg.baleProduct ?? "straw"].color) : "");
     chip.addEventListener("click", () => {
       scheduleViewStepIdx = realIdx;
       lastPlansKey = "";
@@ -3934,6 +3929,55 @@ function refreshPlanEditor(field: Field, auto: boolean): void {
       refreshFieldPanel(true);
     });
     rowEl.appendChild(chip);
+
+    // A dropdown PER ROW (maintainer request, 2026-07-24), replacing the single
+    // shared picker that only edited whichever step happened to be selected.
+    const sel = document.createElement("select");
+    sel.className = "plan-crop";
+    for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
+      const opt = document.createElement("option");
+      opt.value = cropId;
+      opt.textContent = `${gameConfig.crops[cropId].emoji} ${gameConfig.crops[cropId].name}`;
+      if (cropId === plan.crop) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener("change", () => {
+      plan.crop = sel.value as CropId;
+      if (!cropMakesBales(plan.crop)) plan.bale = false; // baling is forage-only
+      // Switching TO a perennial collapses the rotation to this single step;
+      // perennials also default to baling (hay) and never weed.
+      if (isPerennial(plan.crop)) {
+        field.plans = [plan];
+        field.rotationIndex = 0;
+        scheduleViewStepIdx = 0;
+        plan.weed = false;
+        plan.bale = true;
+      }
+      // The new crop's legal months are different — a month override carried
+      // over from the old crop would be re-validated away silently, so clear it
+      // here and let the calendar show real defaults.
+      plan.schedule = undefined;
+      editPlans();
+    });
+    rowEl.appendChild(sel);
+
+    // ...and its own remove button, now that a row is self-contained. A single
+    // shared ✕ acting on "the selected one" made no sense once every row had
+    // its own controls.
+    const del = document.createElement("button");
+    del.className = "plan-del";
+    del.textContent = "✕";
+    del.disabled = plans.length <= 1;
+    del.title = plans.length <= 1 ? "A rotation needs at least one crop" : `Remove ${cfg.name} from the rotation`;
+    del.addEventListener("click", () => {
+      // Pointer arithmetic lives in the sim (removeRotationStep) — getting it
+      // wrong silently changes which crop the field is growing.
+      removeRotationStep(field, realIdx);
+      scheduleViewStepIdx = Math.min(scheduleViewStepIdx, (field.plans?.length ?? 1) - 1);
+      editPlans();
+    });
+    rowEl.appendChild(del);
+
     chips.appendChild(rowEl);
   });
 
@@ -3955,57 +3999,7 @@ function refreshPlanEditor(field: Field, auto: boolean): void {
     });
     chips.appendChild(add);
   }
-  layout.appendChild(chips);
-
-  // --- Crop picker + remove, for whichever chip is selected ------------------
-  const viewed = plans[viewIdx]!;
-  const edit = document.createElement("div");
-  edit.className = "chip-edit";
-
-  const sel = document.createElement("select");
-  sel.className = "plan-crop";
-  for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
-    const opt = document.createElement("option");
-    opt.value = cropId;
-    opt.textContent = `${gameConfig.crops[cropId].emoji} ${gameConfig.crops[cropId].name}`;
-    if (cropId === viewed.crop) opt.selected = true;
-    sel.appendChild(opt);
-  }
-  sel.addEventListener("change", () => {
-    viewed.crop = sel.value as CropId;
-    if (!cropMakesBales(viewed.crop)) viewed.bale = false; // baling is forage-only
-    // Switching TO a perennial collapses the rotation to this single step;
-    // perennials also default to baling (hay) and never weed.
-    if (isPerennial(viewed.crop)) {
-      field.plans = [viewed];
-      field.rotationIndex = 0;
-      scheduleViewStepIdx = 0;
-      viewed.weed = false;
-      viewed.bale = true;
-    }
-    // The new crop's legal months are different — a month override carried over
-    // from the old crop would be re-validated away silently, so clear it here
-    // and let the calendar show real defaults.
-    viewed.schedule = undefined;
-    editPlans();
-  });
-  edit.appendChild(sel);
-
-  const del = document.createElement("button");
-  del.className = "plan-del";
-  del.textContent = "✕";
-  del.disabled = plans.length <= 1;
-  del.title = plans.length <= 1 ? "A rotation needs at least one crop" : "Remove this crop from the rotation";
-  del.addEventListener("click", () => {
-    // Pointer arithmetic lives in the sim (removeRotationStep) — getting it
-    // wrong silently changes which crop the field is growing.
-    removeRotationStep(field, viewIdx);
-    scheduleViewStepIdx = Math.min(viewIdx, (field.plans?.length ?? 1) - 1);
-    editPlans();
-  });
-  edit.appendChild(del);
-  layout.appendChild(edit);
-  container.appendChild(layout);
+  container.appendChild(chips);
 }
 
 /** Rebuild just the field panel's shared header (title/sub/status) — shown
