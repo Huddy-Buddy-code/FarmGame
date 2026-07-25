@@ -1079,13 +1079,25 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
       primary: `${cargo.toFixed(2)} / ${baleTons} t`,
       secondary: "toward the next bale",
     };
+  } else if (agent.kind === "windrower") {
+    // Self-propelled: it IS the mower (maintainer note, 2026-07-24), so this row
+    // describes the MACHINE rather than claiming a hitched implement it doesn't
+    // have. It was rendering a phantom "Mower - Medium" at 25 ft — an implement
+    // the farm may not own, at a width that isn't the windrower's.
+    iconSvg = machineIconHtml("windrower", agent.size, IMPLEMENT_QUEUE_ICON_PX);
+    info = {
+      name: "Windrower",
+      detail: `${gameConfig.equipment.windrower.widthFt} ft Working Width · self-propelled`,
+    };
   } else {
     const kind = TASK_IMPLEMENT[task.type];
     if (!kind) return "";
     const impl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === kind);
-    const size = impl?.size ?? "medium";
-    iconSvg = implementIconHtml(kind, size, IMPLEMENT_QUEUE_ICON_PX);
-    info = implementInfoLines(kind, size);
+    // No row rather than a fabricated one: `size ?? "medium"` used to invent an
+    // implement (and a width) for any machine that wasn't actually carrying one.
+    if (!impl) return "";
+    iconSvg = implementIconHtml(kind, impl.size, IMPLEMENT_QUEUE_ICON_PX);
+    info = implementInfoLines(kind, impl.size);
   }
 
   // The relay's Bale Trailer gets its own row (its fill + what it's doing) so

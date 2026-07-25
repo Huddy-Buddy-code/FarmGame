@@ -870,11 +870,18 @@ export function estimateTaskHours(save: SaveState, task: FarmTask): number {
 
   const kind = TASK_IMPLEMENT[task.type];
   const nominalHarvesterSize = save.agents.find((a) => a.kind === "harvester")?.size ?? "medium";
+  // A cut on a farm that owns a Self-Propelled Windrower will be taken by it —
+  // it gets first refusal (see the pickup gate) and carries no implement, so it
+  // cuts at its OWN width. Without this the estimate fell through to a Mower
+  // the farm might not even own, at a nominal "medium" 25 ft (2026-07-24).
+  const windrowerTakesIt = task.type === "mow" && save.agents.some((a) => a.kind === "windrower");
   const widthFt = task.type === "harvest"
     ? gameConfig.equipment.harvester[nominalHarvesterSize].widthFt
-    : (save.implements.find((i) => i.kind === kind)?.size
-        ? IMPLEMENT_CONFIG[kind!][save.implements.find((i) => i.kind === kind)!.size].widthFt
-        : IMPLEMENT_CONFIG[kind!].medium.widthFt);
+    : windrowerTakesIt
+      ? gameConfig.equipment.windrower.widthFt
+      : (save.implements.find((i) => i.kind === kind)?.size
+          ? IMPLEMENT_CONFIG[kind!][save.implements.find((i) => i.kind === kind)!.size].widthFt
+          : IMPLEMENT_CONFIG[kind!].medium.widthFt);
   const widthM = widthFt * FEET_TO_METERS;
   const rateAcresPerHr = (speedMPerHr * widthM) / ACRE_M2;
   return rateAcresPerHr > 0 ? remainingAcres / rateAcresPerHr : 0;

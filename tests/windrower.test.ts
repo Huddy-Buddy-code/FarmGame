@@ -19,7 +19,7 @@ import type { Field, SaveState } from "../src/state/saveState";
 import { tickFarming } from "../src/sim/farming";
 import {
   buyAgent, buyImplement, enqueueTask, tickTasks, blockedWork, agentCanDoTask,
-  agentPrice, windrowerWidthM,
+  agentPrice, windrowerWidthM, estimateTaskHours,
 } from "../src/sim/tasks";
 import { buyBuildingAt } from "../src/sim/buildings";
 import { minutesPerMonth } from "../src/sim/calendar";
@@ -193,6 +193,56 @@ describe("it goes home when it's done", () => {
     run(save, MAY_1, () => false, 200_000);
     expect(samePos(extra.pos, barn.pos)).toBe(false);
   });
+});
+
+describe("it carries no implement — it IS the mower", () => {
+  it("never gets a mower hitched to it", () => {
+    const save = newGame();
+    save.money = 10_000_000;
+    const w = buyAgent(save, "windrower", "large", [0, 0]);
+    buyImplement(save, "mower", "medium"); // sitting in the yard, and staying there
+    const field = hayField();
+    save.fields.push(field);
+    enqueueTask(save, field, "mow", MAY_1);
+
+    run(save, MAY_1, () => field.status === "harvested");
+    expect(field.status).toBe("harvested");
+    expect(save.implements.some((i) => i.attachedTo === w.id)).toBe(false);
+  });
+
+  it("a queued cut is estimated at the WINDROWER's 40 ft, not a mower's width", () => {
+    // estimateTaskHours looked up an owned Mower and, finding none, fell back
+    // to a nominal "medium" 25 ft — so the Work Queue quoted a job length for
+    // an implement the farm doesn't own (2026-07-24).
+    const save = newGame();
+    save.money = 10_000_000;
+    buyAgent(save, "windrower", "large", [0, 0]);
+    const field = hayField();
+    save.fields.push(field);
+    const task = enqueueTask(save, field, "mow", MAY_1);
+
+    const hours = estimateTaskHours(save, task);
+    // Same acreage at 40 ft vs the mower fallback's 25 ft: the windrower's
+    // estimate has to be the shorter one, in the right proportion.
+    const mowerFallbackFt = gameConfig.equipment.mower.medium.widthFt;
+    const windrowerFt = gameConfig.equipment.windrower.widthFt;
+    expect(hours).toBeGreaterThan(0);
+    expect(windrowerFt).toBeGreaterThan(mowerFallbackFt); // guards the premise
+    // hours scale inversely with width
+    const impliedFt = mowerFallbackFt * (estimateWithMowerOnly(save, field) / hours);
+    expect(impliedFt).toBeCloseTo(windrowerFt, 0);
+  });
+
+  /** The same estimate on a farm with a Mower and no windrower, for comparison. */
+  function estimateWithMowerOnly(_save: SaveState, field: Field): number {
+    const save = newGame();
+    save.money = 10_000_000;
+    buyAgent(save, "tractor", "medium", [0, 0]);
+    buyImplement(save, "mower", "medium");
+    const f = { ...field, id: "field-2" };
+    save.fields.push(f);
+    return estimateTaskHours(save, enqueueTask(save, f, "mow", MAY_1));
+  }
 });
 
 describe("mower sizes", () => {
