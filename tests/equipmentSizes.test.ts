@@ -19,6 +19,7 @@ import type { Field } from "../src/state/saveState";
 import { harvestWindowMonthsFor, harvestWindowClosed, inPlantingWindow } from "../src/sim/farming";
 import { legalMonthsFor } from "../src/sim/schedule";
 import { buyBuildingAt } from "../src/sim/buildings";
+import { ensureAgents, buyImplement, enqueueTask, estimateTaskHours } from "../src/sim/tasks";
 import { baleStorageCapacityOf, baleStorageRoom, baleCapacity } from "../src/sim/buildings";
 import { minutesPerMonth, MONTHS_PER_YEAR, START_MONTH } from "../src/sim/calendar";
 
@@ -92,6 +93,51 @@ describe("new implement sizes", () => {
       expect(cfg.medium.price, `${kind} medium price`).toBeGreaterThan(cfg.small.price);
       expect(cfg.large.price, `${kind} large price`).toBeGreaterThan(cfg.medium.price);
     }
+  });
+});
+
+describe("the heavy passes run slower than the default", () => {
+  // 2026-07-24: `fieldSpeedKmh` was the ONE speed for every non-forage pass,
+  // which made it a compromise — right for planting and spraying, roughly
+  // double a real combine. Harvest and plow now have their own.
+  it("harvest and plow are 7 km/h, below the shared default", () => {
+    expect(gameConfig.work.harvestSpeedKmh).toBe(7);
+    expect(gameConfig.work.plowSpeedKmh).toBe(7);
+    expect(gameConfig.work.harvestSpeedKmh).toBeLessThan(gameConfig.work.fieldSpeedKmh);
+    expect(gameConfig.work.plowSpeedKmh).toBeLessThan(gameConfig.work.fieldSpeedKmh);
+  });
+
+  it("a combine really is quoted more hours than a planter over the same ground", () => {
+    // The behavioural half — the config number has to actually reach the sim.
+    // Same field, same implement width, so speed is the only difference.
+    const save = newGame();
+    save.money = 20_000_000;
+    ensureAgents(save, [0, 0]);
+    buyImplement(save, "cornHeader", "medium");
+    const acres = 40;
+    const side = Math.sqrt(acres * 4046.8564224);
+    const boundary: Meters[] = [[0, 0], [side, 0], [side, side], [0, side]];
+
+    const ready: Field = {
+      id: "f-h", parcelId: "p", boundary, status: "ready", crop: "corn",
+      trueYieldTonsPerAcre: 6,
+      plantedAt: -gameConfig.crops.corn.growMonths * minutesPerMonth(),
+    };
+    const tilled: Field = { id: "f-p", parcelId: "p", boundary, status: "tilled" };
+    save.fields.push(ready, tilled);
+
+    const harvestHours = estimateTaskHours(save, enqueueTask(save, ready, "harvest", timeForMonth(7)));
+    const plantHours = estimateTaskHours(save, enqueueTask(save, tilled, "plant", timeForMonth(3), "corn"));
+    expect(harvestHours).toBeGreaterThan(0);
+    expect(plantHours).toBeGreaterThan(0);
+    // Harvest is slower per metre; the planter is also narrower, so this only
+    // asserts the direction the speed change is responsible for.
+    const harvestWidth = gameConfig.equipment.cornHeader.medium.widthFt;
+    const plantWidth = gameConfig.equipment.planter.medium.widthFt;
+    const harvestRate = gameConfig.work.harvestSpeedKmh * harvestWidth;
+    const plantRate = gameConfig.work.fieldSpeedKmh * plantWidth;
+    // acres/hour scales with speed x width; compare the quoted hours against it.
+    expect(plantHours / harvestHours).toBeCloseTo(harvestRate / plantRate, 1);
   });
 });
 

@@ -1019,6 +1019,10 @@ function isStartable(task: FarmTask, field: Field): boolean {
 function taskFieldSpeedKmh(type: TaskType): number {
   if (type === "rake") return gameConfig.forage.rakeSpeedKmh;
   if (type === "bale") return gameConfig.forage.baleSpeedKmh;
+  // The heavy passes got their own speeds 2026-07-24 — the shared default is
+  // tuned for planting and spraying and was roughly double a real combine.
+  if (type === "harvest") return gameConfig.work.harvestSpeedKmh;
+  if (type === "plow") return gameConfig.work.plowSpeedKmh;
   return gameConfig.work.fieldSpeedKmh;
 }
 

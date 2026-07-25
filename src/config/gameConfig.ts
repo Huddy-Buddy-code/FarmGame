@@ -187,8 +187,23 @@ export interface GameConfig {
    * WIDTH (a wider tool = fewer, longer-spaced lanes = a shorter route = a faster
    * job). Nothing here is an abstract acres/hour rate any more. */
   work: {
-    /** In-field working speed while driving the coverage lanes, km/h. */
+    /**
+     * DEFAULT in-field working speed while driving the coverage lanes, km/h,
+     * for any pass without its own figure below.
+     *
+     * It was the single speed for every non-forage pass until 2026-07-24, which
+     * made it a compromise: right for planting (8-16 km/h) and spraying, and
+     * far too quick for the heavy work. Passes that need their own now have it,
+     * the same way rake and bale always have (see `forage`).
+     */
     fieldSpeedKmh: number;
+    /** Combine speed, km/h (maintainer decision, 2026-07-24). A combine cuts at
+     * 3-6.5 km/h in the real world; at the old shared 12 a medium corn head
+     * did 27 ac/hr against a real 12-18, and the error grew with header width. */
+    harvestSpeedKmh: number;
+    /** Plowing speed, km/h. Tillage is the slowest pass on the farm — it's
+     * moving soil, not gathering a crop. */
+    plowSpeedKmh: number;
     /** Point-to-point travel speed between the yard and a field, km/h
      * (straight-line for now; real-road routing plugs in later, brief §9). */
     travelSpeedKmh: number;
@@ -678,6 +693,8 @@ export const gameConfig: GameConfig = {
     // (10 ft) plow on a ~30-acre field takes a few sim-hours — in the ballpark
     // of the old flat rate, now emerging from width × field size.
     fieldSpeedKmh: 12,
+    harvestSpeedKmh: 7,
+    plowSpeedKmh: 7,
     travelSpeedKmh: 22,
   },
   equipment: {
