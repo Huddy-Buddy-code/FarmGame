@@ -463,11 +463,14 @@ function machineIconHtml(kind: string, size: EquipmentSize | undefined, px: numb
   return (AGENT_ICON[kind] ?? tractorIconSvg)(px);
 }
 
-/** Combines run 30% bigger than the base 60px map icon (maintainer request,
- * 2026-07-21) — they're the biggest machine on the farm and were reading too
- * close in size to a tractor at the shared size. */
+/** Map-icon size per machine kind. The base is 60px; the big self-propelled
+ * machines run 30% larger, because at the shared size they read as tractors.
+ * Combines got this 2026-07-21, the windrower 2026-07-24 (maintainer request) —
+ * it's a full self-propelled machine, not a tractor with a mower on the back,
+ * and it should look like one on the map. */
+const BIG_MAP_ICON_KINDS = new Set<string>(["harvester", "windrower"]);
 function agentIconPx(kind: string): number {
-  return kind === "harvester" ? 78 : 60;
+  return BIG_MAP_ICON_KINDS.has(kind) ? 78 : 60;
 }
 
 /** A tractor's own map icon: the composite "Hay Spikes" sprite (empty or
