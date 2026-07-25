@@ -340,9 +340,9 @@ export function ensureAgents(save: SaveState, home: Meters): void {
     save.headersGranted = true;
   }
   for (const a of save.agents) {
-    if (a.kind === "tractor" || a.kind === "harvester") {
+    if (parksInBarn(a)) {
       a.size ??= "medium"; // pre-size saves default to medium
-      a.purchaseCost ??= agentPrice(a.kind, a.size);
+      a.purchaseCost ??= agentPrice(a.kind as EquipmentKind, a.size);
     }
   }
   // De-dup display names (older saves numbered by live count, which could collide
@@ -509,6 +509,21 @@ function availableImplementFor(save: SaveState, tractor: Agent, kind: ImplementK
  * it hitch) that implement? Used both for task assignment and UI hints. */
 function tractorCanUse(save: SaveState, tractor: Agent, kind: ImplementKind): boolean {
   return !!attachedImplement(save, tractor.id, kind) || !!availableImplementFor(save, tractor, kind);
+}
+
+/**
+ * A POWER UNIT — a machine the player buys and parks, as opposed to an
+ * implement it tows. All three park in a Tractor Barn (or the Farm Yard)
+ * between jobs and all three count against a barn's slots.
+ *
+ * Worth a named predicate rather than an inline "tractor or harvester": that
+ * phrase was written in three places before the windrower existed, and every
+ * one of them silently excluded it — it never drove home after a cut, and a
+ * barn it was parked in counted as having a free slot (maintainer report,
+ * 2026-07-24).
+ */
+function parksInBarn(agent: Agent): boolean {
+  return agent.kind === "tractor" || agent.kind === "harvester" || agent.kind === "windrower";
 }
 
 /** A tractor free to be given a new job right now. */
@@ -1291,7 +1306,7 @@ function clearAgentRoute(agentId: string): void {
  * position of their own (they ride hitched or sit in the abstract "yard"),
  * so only tractors/harvesters home. */
 function homeTargetFor(save: SaveState, agent: Agent): Meters | undefined {
-  if (agent.kind !== "tractor" && agent.kind !== "harvester") return undefined;
+  if (!parksInBarn(agent)) return undefined;
   // A full (or leftover-loaded) combine waits for its Grain Trailer — it
   // shouldn't wander off toward a barn mid-wait.
   if (agent.kind === "harvester" && (agent.grainOnboard ?? 0) > 0) return undefined;
@@ -1301,11 +1316,7 @@ function homeTargetFor(save: SaveState, agent: Agent): Meters | undefined {
   for (const barn of save.buildings) {
     if (barn.kind !== "tractorBarn") continue;
     const occupied = save.agents.filter(
-      (a) =>
-        a.id !== agent.id &&
-        (a.kind === "tractor" || a.kind === "harvester") &&
-        a.state === "idle" &&
-        samePos(a.pos, barn.pos),
+      (a) => a.id !== agent.id && parksInBarn(a) && a.state === "idle" && samePos(a.pos, barn.pos),
     ).length;
     if (occupied >= slots) continue;
     const d = Math.hypot(barn.pos[0] - agent.pos[0], barn.pos[1] - agent.pos[1]);

@@ -21,6 +21,7 @@ import {
   buyAgent, buyImplement, enqueueTask, tickTasks, blockedWork, agentCanDoTask,
   agentPrice, windrowerWidthM,
 } from "../src/sim/tasks";
+import { buyBuildingAt } from "../src/sim/buildings";
 import { minutesPerMonth } from "../src/sim/calendar";
 import { gameConfig, FEET_TO_METERS } from "../src/config/gameConfig";
 
@@ -134,6 +135,63 @@ describe("the specialist gets first refusal on a cut", () => {
     run(save, MAY_1, () => save.tasks.some((t) => t.type === "mow" && t.status === "active"), 20_000);
     const task = save.tasks.find((t) => t.type === "mow")!;
     expect(save.agents.find((a) => a.id === task.agentId)?.kind).toBe("tractor");
+  });
+});
+
+describe("it goes home when it's done", () => {
+  /** Maintainer report, 2026-07-24: "The Windrower is not returning to Machine
+   * Storage or Farm Yard when task is complete." homeTargetFor() enumerated the
+   * power units as tractor-or-harvester, so the windrower fell through and just
+   * stopped wherever it finished cutting. */
+  function mowAndIdle(build: (save: SaveState) => Meters) {
+    const save = newGame();
+    save.money = 10_000_000;
+    const home = build(save);
+    const windrower = buyAgent(save, "windrower", "large", [0, 0]);
+    const field = hayField();
+    // Well away from home, so "drove back" is unambiguous.
+    field.boundary = boundary.map(([x, y]) => [x + 4000, y + 4000] as Meters);
+    save.fields.push(field);
+    enqueueTask(save, field, "mow", MAY_1);
+
+    run(save, MAY_1, () => field.status === "harvested");
+    expect(field.status).toBe("harvested");
+    // Then let it drive home.
+    run(save, MAY_1, () => windrower.state === "idle" && samePos(windrower.pos, home), 400_000);
+    return { save, windrower, home };
+  }
+
+  const samePos = (a: Meters, b: Meters) => Math.hypot(a[0] - b[0], a[1] - b[1]) < 2;
+
+  it("parks in the Tractor Barn after a cut", () => {
+    const { windrower, home } = mowAndIdle((save) => buyBuildingAt(save, "tractorBarn", [0, 0]).pos);
+    expect(windrower.state).toBe("idle");
+    expect(samePos(windrower.pos, home)).toBe(true);
+  });
+
+  it("falls back to the Farm Yard when there's no barn", () => {
+    const { windrower, home } = mowAndIdle((save) => buyBuildingAt(save, "farmYard", [0, 0]).pos);
+    expect(windrower.state).toBe("idle");
+    expect(samePos(windrower.pos, home)).toBe(true);
+  });
+
+  it("counts against a barn's slots, so it can't be over-filled", () => {
+    // The occupancy check enumerated power units the same way homeTargetFor
+    // did, so a parked windrower was invisible to it — a full barn would have
+    // accepted more machines on top.
+    const save = newGame();
+    save.money = 20_000_000;
+    const barn = buyBuildingAt(save, "tractorBarn", [0, 0]);
+    const slots = gameConfig.buildings.tractorBarn.slots;
+    for (let i = 0; i < slots; i++) {
+      const w = buyAgent(save, "windrower", "large", [0, 0]);
+      w.pos = [barn.pos[0], barn.pos[1]];
+      w.state = "idle";
+    }
+    // One more machine, parked out in a field, should NOT be sent to the barn.
+    const extra = buyAgent(save, "tractor", "medium", [5000, 5000]);
+    run(save, MAY_1, () => false, 200_000);
+    expect(samePos(extra.pos, barn.pos)).toBe(false);
   });
 });
 
