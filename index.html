@@ -631,6 +631,9 @@
       .store-card .sc-bar-label {
         position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
         font-size: 11px; font-weight: 700; color: var(--wood-dark);
+        /* Same clip-on-wrap trap as .impl-fill-label. Left at 11px because this
+           card runs the full panel width, not the queue's ~200px column. */
+        white-space: nowrap;
         text-shadow: 0 1px 0 rgba(255,255,255,0.55);
       }
       /* What's in a bale store, per product — round and square of the same crop
@@ -1073,7 +1076,13 @@
       }
       .impl-fill-label {
         position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-        font-size: 11px; font-weight: 700; color: var(--wood-dark);
+        font-size: 9.5px; font-weight: 700; color: var(--wood-dark);
+        letter-spacing: -0.1px;
+        /* nowrap is load-bearing, not tidiness: the longest reading
+           ("1,000 / 1,000 bu · 100%") was wrapping onto a second line and the
+           bar's own overflow:hidden then cut it in half (maintainer screenshot,
+           2026-07-24). Shrinking the type alone would only postpone that. */
+        white-space: nowrap;
         text-shadow: 0 1px 0 rgba(255,255,255,0.55);
       }
       /* REMOVED 2026-07-24: `.impl-total`. The total moved onto the bar itself
