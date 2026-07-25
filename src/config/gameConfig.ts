@@ -306,6 +306,28 @@ export interface GameConfig {
      * just caps how many get spawned, so a big fleet doesn't pile onto one
      * field and starve everything else. */
     maxCrewSize: number;
+    /**
+     * ON-THE-GO UNLOADING (maintainer request, 2026-07-24: "get the grain carts
+     * to fill from the harvester while it is moving, like it does in real
+     * life"). A cart is called out to meet the combine once its tank is this
+     * full, and pulls alongside while it keeps CUTTING — the combine only stops
+     * dead if it brims over before a cart reaches it.
+     *
+     * 0.85 leaves roughly a tank-and-a-half of cutting time for the cart to
+     * cross the field, which is what stops the combine idling.
+     */
+    callCartAtFraction: number;
+    /** How fast grain crosses from the combine's tank into the cart, tons per
+     * sim-minute. Replaces the old fixed `loadMinutes` pause for GRAIN — a rate
+     * is what makes an on-the-move transfer legible, since the pair stay
+     * side-by-side for as long as it takes. (`loadMinutes` still times the bale
+     * relay, which really is a stop-and-load.) */
+    unloadTonsPerMinute: number;
+    /** How close a cart has to be to the combine to count as "alongside" and
+     * start moving grain, in meters. Not zero, because the target is moving:
+     * the cart keeps station within this gap rather than chasing an exact
+     * position it can never hold. */
+    alongsideMeters: number;
   };
 
   /** Forage baling (maintainer request, 2026-07-11). After a forage crop is
@@ -749,9 +771,13 @@ export const gameConfig: GameConfig = {
     },
   },
   hauling: {
-    loadMinutes: 0.17, // ≈ 10 s at 1×
+    loadMinutes: 0.17, // ≈ 10 s at 1× — bale relay only; grain uses a rate now
     dumpMinutes: 0.17,
     maxCrewSize: 3,
+    callCartAtFraction: 0.85,
+    // ~1 sim-minute to empty a Large (500 bu ≈ 14 t corn) tank.
+    unloadTonsPerMinute: 14,
+    alongsideMeters: 15,
   },
   forage: {
     rakeSpeedKmh: 13, // slightly faster than the baler

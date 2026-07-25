@@ -1808,6 +1808,42 @@ function hasFreeBaleTrailerTractor(save: SaveState): boolean {
   );
 }
 
+/** Tons currently aboard the cart working `task`. */
+function cartCargoOf(save: SaveState, task: FarmTask): number {
+  const cart = save.implements.find((i) => i.attachedTo === task.agentId && i.kind === "grainTrailer");
+  return cart?.cargoTons ?? 0;
+}
+
+/**
+ * The ONE cart allowed to approach `harvesterId` right now. Everyone else on
+ * the crew waits at the field entrance (maintainer request, 2026-07-24: "the
+ * second cart should always wait at field entrance until the first is full").
+ *
+ * Picked as the most-loaded cart still in the field, so whoever is closest to
+ * full keeps topping up and leaves the rotation soonest — a second cart can
+ * never cut in front of a half-loaded one and strand it mid-fill. Ties (two
+ * empty carts at the start of a harvest) fall back to creation order, so the
+ * choice is stable rather than flapping tick to tick.
+ *
+ * Carts already on their way to the silo are excluded, which is exactly what
+ * hands the baton over: the moment the leader fills up and departs, the next
+ * cart in the queue becomes active.
+ */
+function activeCartTaskFor(save: SaveState, harvesterId: string): FarmTask | undefined {
+  const inField = save.tasks.filter(
+    (t) =>
+      t.type === "unloadHarvester" &&
+      t.harvesterAgentId === harvesterId &&
+      !!t.agentId &&
+      t.unloadPhase !== "toSilo" &&
+      t.unloadPhase !== "dumping",
+  );
+  if (inField.length <= 1) return inField[0];
+  return inField.sort(
+    (a, b) => cartCargoOf(save, b) - cartCargoOf(save, a) || a.id.localeCompare(b.id, undefined, { numeric: true }),
+  )[0];
+}
+
 /** Is there an idle tractor that could take a Grain Trailer right now? Gates
  * growing a cart crew — see `ensureUnloadTask`. */
 function hasFreeCartTractor(save: SaveState): boolean {
@@ -2123,28 +2159,41 @@ function tickAgent(
       const speed = (gameConfig.work.travelSpeedKmh * 1000) / 60; // meters per sim-minute
 
       if (task.unloadPhase === "onloading") {
-        agent.state = "working";
-        const timer = task.phaseTimer ?? gameConfig.hauling.loadMinutes;
-        const used = Math.min(timer, budget);
-        budget -= used;
-        const left = timer - used;
-        if (left > 1e-9) {
-          task.phaseTimer = left;
-          continue;
-        }
+        // ON THE GO (maintainer request, 2026-07-24). This used to be a fixed
+        // pause next to a stationary combine, then one instant transfer. Now
+        // the cart keeps station alongside while the combine KEEPS CUTTING, and
+        // grain crosses at a rate — which is both how it works on a real farm
+        // and, with bushel-sized tanks, the difference between a combine that
+        // cuts continuously and one that idles at the end of every tank.
         const cap = grainTrailerCapacityTons(trailer.size, task.crop);
         const room = Math.max(0, cap - (trailer.cargoTons ?? 0));
-        const amount = Math.min(room, harvester.grainOnboard ?? 0);
-        harvester.grainOnboard = (harvester.grainOnboard ?? 0) - amount;
-        trailer.cargoTons = (trailer.cargoTons ?? 0) + amount;
+        const available = harvester.grainOnboard ?? 0;
+        if (room <= 1e-9 || available <= 1e-9) {
+          // Cart full, or the tank's dry — back to the staging decision, which
+          // sends it to the silo if it's full and otherwise keeps it waiting
+          // for the combine's next tankful.
+          task.phaseTimer = undefined;
+          task.unloadPhase = "staging";
+          continue;
+        }
+        // The combine is a MOVING target, so "arrived" is a gap, not a point —
+        // chasing an exact position it can never hold would leave the cart
+        // permanently travelling and never transferring.
+        const gap = Math.hypot(harvester.pos[0] - agent.pos[0], harvester.pos[1] - agent.pos[1]);
+        if (gap > gameConfig.hauling.alongsideMeters) {
+          agent.state = "traveling";
+          budget = driveToward(save, agent, harvester.pos, speed, budget);
+          continue;
+        }
+        agent.state = "working";
+        const rate = gameConfig.hauling.unloadTonsPerMinute;
+        const minutesNeeded = Math.min(room, available) / rate;
+        const used = Math.min(minutesNeeded, budget);
+        budget -= used;
+        const moved = Math.min(Math.min(room, available), used * rate);
+        harvester.grainOnboard = available - moved;
+        trailer.cargoTons = (trailer.cargoTons ?? 0) + moved;
         trailer.cargoCrop = task.crop; // captured at task creation — see ensureUnloadTask
-        task.phaseTimer = undefined;
-        // Multi-load grain-cart behavior (maintainer request, 2026-07-13):
-        // don't run to the silo after every drain — drop back into the
-        // staging decision, which sends the cart to the silo only when IT'S
-        // full (or the harvest is over), and otherwise parks it back at the
-        // gate to service the combine's next stop.
-        task.unloadPhase = "staging";
         continue;
       }
 
@@ -2220,7 +2269,10 @@ function tickAgent(
       // (maintainer requests, 2026-07-13).
       {
         const cap = harvesterCapacityTons(harvester.size ?? "medium", task.crop);
-        const combineFull = (harvester.grainOnboard ?? 0) >= cap - 1e-9;
+        // The call-out threshold, not "brim full" (2026-07-24): a cart is sent
+        // for at `callCartAtFraction` so it can be alongside BEFORE the tank
+        // fills, and the pair then run together while the combine keeps cutting.
+        const combineWantsCart = (harvester.grainOnboard ?? 0) >= cap * gameConfig.hauling.callCartAtFraction - 1e-9;
         const combineEmpty = (harvester.grainOnboard ?? 0) <= 1e-9;
         const stillCutting = save.tasks.some(
           (t) => t.type === "harvest" && t.status === "active" && t.agentId === harvester.id,
@@ -2257,13 +2309,19 @@ function tickAgent(
           continue;
         }
 
-        if (!combineFull && stillCutting) {
+        // ONE cart on the combine at a time (maintainer request, 2026-07-24).
+        // Whoever is carrying the most keeps the job until it's full and
+        // leaves; every other cart on the crew waits at the field entrance.
+        const iAmActive = activeCartTaskFor(save, harvester.id)?.id === task.id;
+
+        if (!iAmActive || (!combineWantsCart && stillCutting)) {
           task.unloadPhase = "staging";
-          // A cart that's already carrying grain has been to the combine —
-          // it waits right where it drained it (maintainer request,
-          // 2026-07-13), not back at the gate. Only a still-empty cart
-          // stages at the field's gate on its way in.
-          if (cargo > 1e-9) {
+          // The ACTIVE cart, part-loaded, waits right where it last drained the
+          // combine (maintainer request, 2026-07-13) — it's mid-job and the
+          // combine will come back round to it. A cart that ISN'T active goes
+          // and sits at the gate whatever it's carrying, so it stays out of the
+          // working pair's way.
+          if (iAmActive && cargo > 1e-9) {
             agent.state = "working";
             budget = 0;
             continue;
@@ -2291,14 +2349,15 @@ function tickAgent(
           continue;
         }
         task.unloadPhase = "toHarvester";
-        const target = harvester.pos;
         agent.state = "traveling";
-        if (!samePos(agent.pos, target)) {
-          budget = driveToward(save, agent, target, speed, budget);
+        // Alongside, not on top of — the combine is still moving, and
+        // `onloading` keeps station from here (see above).
+        const gap = Math.hypot(harvester.pos[0] - agent.pos[0], harvester.pos[1] - agent.pos[1]);
+        if (gap > gameConfig.hauling.alongsideMeters) {
+          budget = driveToward(save, agent, harvester.pos, speed, budget);
           continue;
         }
         task.unloadPhase = "onloading";
-        task.phaseTimer = gameConfig.hauling.loadMinutes;
         agent.state = "working";
         continue;
       }
