@@ -2219,15 +2219,19 @@ function tickAgent(
         const trailerFull = cargo >= trailerCap - 1e-9;
 
         // Head for the silo: cart full; carrying a partial load with the
-        // harvest over and the combine drained (nothing more coming); or —
-        // with the combine fully drained — already ≥75% full, since a
-        // nearly-full cart would have almost no room at the combine's next
-        // stop (maintainer request, 2026-07-13).
-        const siloRunAt = trailerCap * gameConfig.hauling.cartSiloRunFraction;
+        // harvest over and the combine drained (nothing more coming).
+        //
+        // A cart used to ALSO leave early once it was ≥ cartSiloRunFraction
+        // (75%) full — the idea being that a nearly-full cart has almost no
+        // room left at the combine's next stop. The maintainer dropped that
+        // 2026-07-24 ("have the trailer return to storage at 100% now, not the
+        // lower limit we had"), and it matters more than it used to: with
+        // bushel-based capacities a cart is several hoppers' worth, so leaving
+        // at 75% wasted a quarter of every round trip in a season where hauling
+        // is already the bottleneck.
         if (
           trailerFull ||
-          (cargo > 1e-9 && !stillCutting && combineEmpty) ||
-          (cargo >= siloRunAt - 1e-9 && combineEmpty)
+          (cargo > 1e-9 && !stillCutting && combineEmpty)
         ) {
           task.unloadPhase = "toSilo";
           continue;

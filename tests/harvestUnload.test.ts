@@ -198,12 +198,12 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     const gates: Meters[] = [[side / 2, 0], [side / 2, side]];
     field.accessPoints = gates;
     save.fields.push(field);
-    // A Large cart is several hoppers' worth, so one drain leaves it far under
-    // the 75% silo-run threshold — it should stay put and top off.
+    // A Large cart is several hoppers' worth, so no single drain comes close to
+    // filling it — it should stay put and top off until it's full.
     buyImplement(save, "grainTrailer", "large");
     const HOPPER = harvesterCapacityTons("medium", "corn");
     const CART = grainTrailerCapacityTons("large", "corn");
-    expect(HOPPER / CART).toBeLessThan(gameConfig.hauling.cartSiloRunFraction);
+    expect(CART).toBeGreaterThan(HOPPER * 2);
     // A large tractor to pull the large cart (the starting medium can't).
     const hauler = buyAgent(save, "tractor", "large", [0, 0]);
     const silo = buyBuildingAt(save, "silo", [-800, -800], "large");
@@ -230,50 +230,53 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     }
     expect(waitedInPlaceWithCargo).toBe(true);
     expect(waitedAtGateWithCargo).toBe(false);
-    // First silo delivery is SEVERAL hopper stops' worth, not one drain. It
-    // won't be a brim-full cart: the cart tops off in whole hopper drains and
-    // leaves for the silo as soon as it crosses cartSiloRunFraction, so it
-    // departs at whatever the last whole drain put it at.
+    // First silo delivery is SEVERAL hopper stops' worth, not one drain — and
+    // since 2026-07-24 it's a BRIM-FULL cart. The cart used to leave once it
+    // crossed 75%; now it tops off until there's no room left. The final drain
+    // is partial (the combine keeps whatever doesn't fit), so this lands on
+    // capacity exactly.
     expect(save.grain.corn).toBeGreaterThan(HOPPER * 2);
-    expect(save.grain.corn).toBeGreaterThanOrEqual(CART * gameConfig.hauling.cartSiloRunFraction);
-    expect(save.grain.corn).toBeLessThanOrEqual(CART + 0.5);
+    expect(save.grain.corn).toBeCloseTo(CART, 1);
   });
 
-  it("a cart ≥75% full after fully draining the combine makes a silo run instead of waiting in-field", () => {
+  it("a nearly-full cart still waits in-field for the last of a load (2026-07-24)", () => {
+    // The inverse of the rule this used to test. A cart ≥75% full after
+    // draining the combine used to set off for the silo; the maintainer dropped
+    // that, so it now holds out for a genuinely full load. With bushel
+    // capacities a cart is several hoppers' worth, and leaving at 75% threw away
+    // a quarter of every round trip.
     const save = gameWithAgents(); // medium combine
     const field = readyField(40, 6);
     const side = Math.sqrt(40 * 4046.8564224);
     field.accessPoints = [[side / 2, 0], [side / 2, side]];
     save.fields.push(field);
     // A Small cart is a touch BIGGER than a medium hopper, so one drain empties
-    // the combine and leaves the cart ~88% full — over the threshold.
+    // the combine and still leaves the cart short of full.
     buyImplement(save, "grainTrailer", "small");
     const HOPPER = harvesterCapacityTons("medium", "corn");
     const CART = grainTrailerCapacityTons("small", "corn");
     expect(CART).toBeGreaterThan(HOPPER);
-    expect(HOPPER / CART).toBeGreaterThanOrEqual(gameConfig.hauling.cartSiloRunFraction);
     const silo = buyBuildingAt(save, "silo", [-800, -800], "large");
     assignSiloCrop(save, silo.id, "corn");
 
     let now = APRIL_1;
     enqueueTask(save, field, "harvest", now);
     now = runUntil(save, now, () => save.grain.corn > 0, 400_000, 5);
-    // Delivered that single drain while the harvest was still running — it did
-    // NOT sit in the field holding most of a cart.
-    expect(save.grain.corn).toBeGreaterThan(HOPPER * 0.9);
-    expect(save.grain.corn).toBeLessThanOrEqual(HOPPER + 0.5);
-    expect(save.tasks.some((t) => t.type === "harvest")).toBe(true);
+    // The first delivery is a FULL cart, not the single drain it would have
+    // been under the old rule.
+    expect(save.grain.corn).toBeCloseTo(CART, 1);
+    expect(save.grain.corn).toBeGreaterThan(HOPPER); // more than one hopper's worth
   });
 
   it("partial cart heads to the silo once the harvest is over and the combine is drained", () => {
     const save = gameWithAgents();
-    // Sized so the whole crop never fills the hopper (so the ONLY stop is the
-    // end of the field) AND stays under the cart's 75% silo-run threshold (so
-    // there's no early run either). Both derived, not guessed.
+    // Sized so the whole crop never fills either the hopper or the cart — so
+    // the ONLY thing that can send the cart to the silo is the harvest ending.
+    // Derived, not guessed.
     buyImplement(save, "grainTrailer", "medium");
     const HOPPER = harvesterCapacityTons("medium", "corn");
     const CART = grainTrailerCapacityTons("medium", "corn");
-    const totalTons = Math.min(HOPPER, CART * gameConfig.hauling.cartSiloRunFraction) * 0.7;
+    const totalTons = Math.min(HOPPER, CART) * 0.7;
     const acres = totalTons / 6;
     const field = readyField(acres, 6);
     const side = Math.sqrt(acres * 4046.8564224);

@@ -293,11 +293,12 @@ export interface GameConfig {
   hauling: {
     loadMinutes: number;
     dumpMinutes: number;
-    /** After fully draining the combine, a cart at or above this fraction of
-     * its capacity makes a silo run right away instead of waiting in-field —
-     * a nearly-full cart would have almost no room at the combine's next
-     * stop (maintainer request, 2026-07-13). */
-    cartSiloRunFraction: number;
+    /* REMOVED 2026-07-24: `cartSiloRunFraction`. A cart used to leave for the
+     * silo once it was ≥75% full rather than waiting to fill. It now waits for
+     * 100% (maintainer request) — with bushel capacities a cart is several
+     * hoppers' worth, so leaving early threw away a quarter of every round trip
+     * in the part of the season that's already the bottleneck. A part-full cart
+     * still runs when the harvest ends; see `sim/tasks.ts`. */
     /** How many rigs may work one hauling job at once — grain carts servicing a
      * single combine, or bale haulers clearing a single field (maintainer
      * request, 2026-07-23). Crews are parallel TASKS rather than one task with
@@ -750,7 +751,6 @@ export const gameConfig: GameConfig = {
   hauling: {
     loadMinutes: 0.17, // ≈ 10 s at 1×
     dumpMinutes: 0.17,
-    cartSiloRunFraction: 0.75,
     maxCrewSize: 3,
   },
   forage: {
