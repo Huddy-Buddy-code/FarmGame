@@ -73,7 +73,7 @@ import { buildRoadNetwork } from "./sim/roadNet";
 import type { RoadNetwork } from "./sim/roadNet";
 import { defaultAccessPoints } from "./sim/access";
 import {
-  MACHINE_ICON, IMPLEMENT_ICON_SVG, tractorIconSvg, baleIconSvg,
+  MACHINE_ICON, IMPLEMENT_ICON_SVG, tractorIconSvg, baleIconSvg, squareBaleIconSvg,
   plowIconSvg, planterIconSvg, sprayerIconSvg, rakeIconSvg, grainTrailerIconSvg,
   grainHeaderIconSvg, mowerIconSvg, mulcherIconSvg, haySpikesIconSvg, baleTrailerIconSvg,
 } from "./ui/icons";
@@ -686,30 +686,46 @@ function updateAgentMarkers(): void {
 // ---------------------------------------------------------------------------
 const MAX_BALE_MARKERS = 600; // per-field perf ceiling; real fields sit well under this
 
-function makeBaleMarker(p: Meters, color: "hay" | "alfalfa"): maplibregl.Marker {
+/**
+ * The icon for a bale PRODUCT — round or rectangular, tinted for hay / alfalfa
+ * / straw (maintainer request, 2026-07-24: "make sure the Square Bales have an
+ * icon on the Field and Inventory for a rectangular hay, straw, or alfalfa
+ * bale").
+ *
+ * Round and square are separate products at separate prices, so telling them
+ * apart at a glance is the whole job. Everywhere a bale is drawn goes through
+ * here, so the two can never disagree about shape.
+ */
+function baleIconFor(product: BaleProduct, px: number): string {
+  const cfg = gameConfig.baleProducts[product];
+  return cfg.square ? squareBaleIconSvg(px, cfg.color) : baleIconSvg(px, cfg.color);
+}
+
+function makeBaleMarker(p: Meters, product: BaleProduct): maplibregl.Marker {
   const el = document.createElement("div");
   el.className = "bale-dot";
-  el.innerHTML = baleIconSvg(14, color);
+  el.innerHTML = baleIconFor(product, 14);
   return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p)).addTo(mapRef!);
 }
 
-/** The bale marker tint for a field, from its product (hay/corn = light brown,
- * alfalfa = green). */
-function baleColorOf(field: Field): "hay" | "alfalfa" {
-  return gameConfig.baleProducts[field.baleProduct ?? "cornStover"].color;
+/** What a field's dropped bales ARE — drives both the marker shape and its tint. */
+function baleProductOf(field: Field): BaleProduct {
+  return field.baleProduct ?? "cornStover";
 }
 
 /** Markers for a field's bales — all of them, or an EVEN subsample if a field
  * somehow tops the ceiling (uniform coverage, never a bare last corner). */
-function baleMarkersFor(locs: Meters[], color: "hay" | "alfalfa"): maplibregl.Marker[] {
-  if (locs.length <= MAX_BALE_MARKERS) return locs.map((p) => makeBaleMarker(p, color));
+function baleMarkersFor(locs: Meters[], product: BaleProduct): maplibregl.Marker[] {
+  if (locs.length <= MAX_BALE_MARKERS) return locs.map((p) => makeBaleMarker(p, product));
   const out: maplibregl.Marker[] = [];
-  for (let i = 0; i < MAX_BALE_MARKERS; i++) out.push(makeBaleMarker(locs[Math.floor((i * locs.length) / MAX_BALE_MARKERS)]!, color));
+  for (let i = 0; i < MAX_BALE_MARKERS; i++) out.push(makeBaleMarker(locs[Math.floor((i * locs.length) / MAX_BALE_MARKERS)]!, product));
   return out;
 }
 
-// `count` = how many baleLocations the markers currently represent.
-const baleMarkers = new Map<string, { count: number; markers: maplibregl.Marker[] }>();
+// `count` = how many baleLocations the markers currently represent. `product`
+// too, since it decides the SHAPE drawn: a field re-baled with the other baler
+// has to redraw, not just append (2026-07-24).
+const baleMarkers = new Map<string, { count: number; product: BaleProduct; markers: maplibregl.Marker[] }>();
 
 function updateBaleMarkers(): void {
   if (!mapRef) return;
@@ -718,19 +734,23 @@ function updateBaleMarkers(): void {
     const locs = field.baleLocations ?? [];
     if (locs.length === 0) continue;
     wanted.add(field.id);
-    const color = baleColorOf(field);
+    const product = baleProductOf(field);
     const existing = baleMarkers.get(field.id);
-    if (existing && existing.count === locs.length) continue; // no change
-    if (!existing) {
-      baleMarkers.set(field.id, { count: locs.length, markers: baleMarkersFor(locs, color) });
+    if (existing && existing.count === locs.length && existing.product === product) continue; // no change
+    if (!existing || existing.product !== product) {
+      // New field, or its bales changed shape/product — redraw rather than
+      // append, or a square-baled field would keep the round icons it started
+      // the season with.
+      if (existing) for (const m of existing.markers) m.remove();
+      baleMarkers.set(field.id, { count: locs.length, product, markers: baleMarkersFor(locs, product) });
     } else if (locs.length > existing.count && locs.length <= MAX_BALE_MARKERS) {
       // Common case while baling: just add markers for the NEW drops.
-      for (let i = existing.count; i < locs.length; i++) existing.markers.push(makeBaleMarker(locs[i]!, color));
+      for (let i = existing.count; i < locs.length; i++) existing.markers.push(makeBaleMarker(locs[i]!, product));
       existing.count = locs.length;
     } else {
       // Shrank (some sold), or crossed the subsample ceiling — rebuild.
       for (const m of existing.markers) m.remove();
-      baleMarkers.set(field.id, { count: locs.length, markers: baleMarkersFor(locs, color) });
+      baleMarkers.set(field.id, { count: locs.length, product, markers: baleMarkersFor(locs, product) });
     }
   }
   // Drop markers for fields that were sold or had their bales sold.
@@ -1685,7 +1705,7 @@ function buildMarketSection(rows: HTMLElement): void {
     const balesPerAcre = cfg.balesPerAcre * cuttings;
     const unitPrice = baleUnitPrice(p, month);
     products.push({
-      id: p, name: cfg.name, iconHtml: baleIconSvg(20, cfg.color), unit: "/bale",
+      id: p, name: cfg.name, iconHtml: baleIconFor(p, 20), unit: "/bale",
       unitPrice,
       qty: stored + inField,
       qtyLabel: `${parts.join(" · ")} bales`,
@@ -1933,7 +1953,7 @@ function refreshInventory(force = false) {
         </div>
         ${held.length > 0
           ? `<div class="sc-contents">${held.map((x) =>
-              `<span class="sc-chip">${baleIconSvg(11, gameConfig.baleProducts[x.p].color)} ${escapeHtml(gameConfig.baleProducts[x.p].name)} × ${x.n}</span>`,
+              `<span class="sc-chip">${baleIconFor(x.p, 11)} ${escapeHtml(gameConfig.baleProducts[x.p].name)} × ${x.n}</span>`,
             ).join("")}</div>`
           : `<div class="sc-contents empty">Empty</div>`}`;
 
@@ -4186,7 +4206,12 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
     const unitPrice = baleUnitPrice(productId, monthOf(now));
     const value = Math.round(bales * unitPrice);
     const tons = (bales * baleTonsOf(productId)).toFixed(0);
-    body.insertAdjacentHTML("beforeend", `<div class="small" style="margin-top:8px">📦 <b>${bales}</b> ${product.name} bales (${tons} t) · $${Math.round(unitPrice).toLocaleString()}/bale ${priceBadge(productId)}</div>`);
+    // The real bale icon, not a generic box — round vs rectangular is the whole
+    // point once both balers exist (2026-07-24).
+    body.insertAdjacentHTML(
+      "beforeend",
+      `<div class="small fp-bales" style="margin-top:8px">${baleIconFor(productId, 16)} <b>${bales}</b> ${product.name} bales (${tons} t) · $${Math.round(unitPrice).toLocaleString()}/bale ${priceBadge(productId)}</div>`,
+    );
     const btn = document.createElement("button");
     btn.className = "primary";
     btn.innerHTML = `💰 Sell Bales <span class="small">$${value.toLocaleString()}</span>`;

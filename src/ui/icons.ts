@@ -228,6 +228,27 @@ const BALE_TINTS: Record<"hay" | "alfalfa", { fill: string; stroke: string; band
 };
 
 /** A round bale seen end-on: wound cylinder, tinted by product (`color`). */
+/**
+ * A SQUARE (big rectangular) bale — the Square Baler's product (2026-07-24).
+ * Same tints as the round one so hay / alfalfa / straw still read by colour;
+ * only the silhouette changes, which is the whole point: on the map and in the
+ * Inventory a player needs to see at a glance which of the two they're holding,
+ * since they're separate products at separate prices.
+ *
+ * Drawn end-on-ish: a rectangular block with two twine bands across it and a
+ * hint of the cut-stem end face, so it reads as a bale rather than a crate.
+ */
+export function squareBaleIconSvg(size = 14, color: "hay" | "alfalfa" = "hay"): string {
+  const t = BALE_TINTS[color];
+  return svg(size, `
+    <rect x="3" y="9" width="26" height="15" rx="1.6" fill="${t.fill}" stroke="${t.stroke}" stroke-width="1.4"/>
+    <path d="M3.4 13 H28.6 M3.4 20 H28.6" stroke="${t.band}" stroke-width="1" fill="none"/>
+    <rect x="11" y="9.6" width="3" height="13.8" fill="none" stroke="${t.stroke}" stroke-width="0.9"/>
+    <rect x="19" y="9.6" width="3" height="13.8" fill="none" stroke="${t.stroke}" stroke-width="0.9"/>
+    <rect x="3" y="9" width="6.2" height="15" rx="1.6" fill="${t.core}" stroke="${t.stroke}" stroke-width="0.9"/>
+  `);
+}
+
 export function baleIconSvg(size = 14, color: "hay" | "alfalfa" = "hay"): string {
   const t = BALE_TINTS[color];
   return svg(size, `

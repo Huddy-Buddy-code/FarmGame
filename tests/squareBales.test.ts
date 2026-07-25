@@ -23,6 +23,7 @@ import { tickFarming, baleProductForField, balesPerAcreForField, baleTonsOf } fr
 import { buyAgent, buyImplement, enqueueTask, tickTasks } from "../src/sim/tasks";
 import { buyBuildingAt } from "../src/sim/buildings";
 import { SELLABLE_BALES } from "../src/sim/market";
+import { baleIconSvg, squareBaleIconSvg } from "../src/ui/icons";
 import { minutesPerMonth } from "../src/sim/calendar";
 import { gameConfig } from "../src/config/gameConfig";
 import type { BaleProduct } from "../src/config/gameConfig";
@@ -145,6 +146,41 @@ describe("baling a field for real", () => {
     // are whole numbers and the last partial bale is discarded.
     expect(tons(square.field)).toBeGreaterThan(tons(round.field) * 0.8);
     expect(tons(square.field)).toBeLessThan(tons(round.field) * 1.2);
+  });
+});
+
+describe("square bales look square", () => {
+  // Maintainer request, 2026-07-24: "make sure the Square Bales have an icon on
+  // the Field and Inventory for a rectangular hay, straw, or alfalfa bale."
+  // main.ts routes every bale drawn — map markers, Market rows, storage chips,
+  // the field panel — through one `baleIconFor(product)` that reads this flag,
+  // so the flag is what's worth pinning here; the SVGs themselves are checked
+  // for being genuinely different shapes.
+  it("every square product is flagged square, and every round one isn't", () => {
+    for (const [round, square] of ROUND_TO_SQUARE) {
+      expect(gameConfig.baleProducts[square].square, square).toBe(true);
+      expect(gameConfig.baleProducts[round].square, round).toBeFalsy();
+    }
+    expect(gameConfig.baleProducts.cornStover.square).toBeFalsy();
+  });
+
+  it("the round icon is drawn with ellipses and the square one with rects", () => {
+    const round = baleIconSvg(14, "hay");
+    const square = squareBaleIconSvg(14, "hay");
+    expect(round).toContain("<ellipse");
+    expect(round).not.toContain("<rect");
+    expect(square).toContain("<rect");
+    expect(square).not.toContain("<ellipse");
+    expect(square).not.toBe(round);
+  });
+
+  it("both shapes keep the product's tint, so colour still reads the crop", () => {
+    // Shape says round-or-square; colour still has to say hay-or-alfalfa.
+    expect(squareBaleIconSvg(14, "alfalfa")).not.toBe(squareBaleIconSvg(14, "hay"));
+    // ...and alfalfa's square icon shares its tint with alfalfa's round one.
+    const alfalfaTint = /fill="(#[0-9a-fA-F]+)"/.exec(baleIconSvg(14, "alfalfa"))?.[1];
+    expect(alfalfaTint).toBeTruthy();
+    expect(squareBaleIconSvg(14, "alfalfa")).toContain(alfalfaTint!);
   });
 });
 

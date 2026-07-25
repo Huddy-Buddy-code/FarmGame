@@ -646,6 +646,10 @@
         background: var(--cream); border: 1.5px solid var(--wood);
       }
       .store-card .sc-chip svg { display: block; }
+      /* Inline bale icon in the field panel's readout — baseline-align it with
+         the text it sits in rather than letting it push the line height. */
+      .fp-bales { display: flex; align-items: center; gap: 5px; }
+      .fp-bales svg { flex-shrink: 0; display: block; }
       /* Locate/sell: hover-or-select, same rule as the Equipment tab. */
       .store-card .sc-actions {
         position: absolute; top: 6px; right: 8px; display: flex; gap: 3px;
