@@ -489,6 +489,18 @@ export interface SaveState {
    * of that product is sold the moment the clock reaches that month
    * (`tickAutoSell`, sim/economy.ts). */
   sellSchedule?: Record<string, { month: number; auto: boolean }>;
+  /**
+   * Farm-wide auto-sell DEFAULT (maintainer request, 2026-07-24: "give me a
+   * toggle to auto sell all crops — this includes current, and any future
+   * adds").
+   *
+   * A product with its own `sellSchedule` row uses that; everything else falls
+   * back to this. Storing it as a default rather than stamping `auto: true`
+   * across every product is what makes "future adds" work: a crop the player
+   * has never grown has no row, so it inherits this the first time it lands in
+   * store.
+   */
+  sellAll?: { month: number; auto: boolean };
   /** Highest months-since-epoch already processed by `tickAutoSell` — the
    * month-turn cursor (same idea as loan payments), so auto-sells fire once
    * per crossed month and survive time-compression / skip-month. */

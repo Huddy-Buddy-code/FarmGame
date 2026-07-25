@@ -17,7 +17,7 @@ import type { EquipmentKind } from "./tasks";
 import { recordCash } from "./ledger";
 import type { SimTime } from "./clock";
 import { START_MONTH, MONTHS_PER_YEAR, minutesPerMonth } from "./calendar";
-import { grainInstantPrice, baleInstantPrice, SELLABLE_GRAINS } from "./market";
+import { grainInstantPrice, baleInstantPrice, SELLABLE_GRAINS, ALL_MARKET_PRODUCTS, effectiveSellPlan } from "./market";
 import type { MarketProduct } from "./market";
 import { baleTonsOf } from "./farming";
 
@@ -185,7 +185,12 @@ export function tickAutoSell(save: SaveState, now: SimTime): void {
   for (let mAbs = save.sellLastMonthAbs + 1; mAbs <= curAbs; mAbs++) {
     const cal = (START_MONTH + mAbs) % MONTHS_PER_YEAR;
     const monthNow = mAbs * minutesPerMonth(); // a sim-time in that month → correct price
-    for (const [product, sched] of Object.entries(save.sellSchedule)) {
+    // Iterate every PRODUCT, not just the ones with a schedule row — a product
+    // with no row of its own follows the farm-wide default, which is the whole
+    // point of the master toggle (2026-07-24). Both sell paths below are no-ops
+    // on zero stock, so covering products the farm doesn't hold costs nothing.
+    for (const product of ALL_MARKET_PRODUCTS) {
+      const sched = effectiveSellPlan(save, product);
       if (!sched.auto || sched.month !== cal) continue;
       // Prefer a real HAUL to a Sell Point: it fetches the full seasonal price
       // (2026-07-23). Falls back to the instant, discounted sale only when a

@@ -37,6 +37,29 @@ export const SELLABLE_BALES: BaleProduct[] = [
   "strawSquare", "haySquare", "alfalfaHaySquare",
 ];
 
+/** Every product the market deals in — what the farm-wide auto-sell covers. */
+export const ALL_MARKET_PRODUCTS: MarketProduct[] = [...SELLABLE_GRAINS, ...SELLABLE_BALES];
+
+/**
+ * When, and whether, `product` auto-sells.
+ *
+ * A product with its own row in `sellSchedule` uses it — that's the per-product
+ * override. Everything else follows the farm-wide `sellAll` default, which is
+ * what lets the master toggle cover crops that aren't in store yet (maintainer
+ * request, 2026-07-24: "this includes current, and any future adds").
+ *
+ * Shared by `tickAutoSell` and the Inventory tab on purpose: a switch that
+ * showed one thing and sold another would be worse than no switch.
+ */
+export function effectiveSellPlan(
+  save: { sellSchedule?: Record<string, { month: number; auto: boolean }>; sellAll?: { month: number; auto: boolean } },
+  product: MarketProduct,
+): { month: number; auto: boolean; fromAll: boolean } {
+  const own = save.sellSchedule?.[product];
+  if (own) return { ...own, fromAll: false };
+  return { month: save.sellAll?.month ?? peakSaleMonth(), auto: !!save.sellAll?.auto, fromAll: true };
+}
+
 /** The single peak-price month (0-11) — December, shared by every product. */
 export function peakSaleMonth(): number {
   return gameConfig.market.peakMonth;

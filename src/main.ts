@@ -42,7 +42,7 @@ import {
 import type { PersistedGame } from "./state/persistence";
 import { sellBales, netWorth, baleInventory, sellAllOfProduct, tickAutoSell } from "./sim/economy";
 import {
-  grainUnitPrice, baleUnitPrice, seasonalBonus, monthOf, peakSaleMonth,
+  grainUnitPrice, baleUnitPrice, seasonalBonus, monthOf, peakSaleMonth, effectiveSellPlan,
   SELLABLE_GRAINS, SELLABLE_BALES,
 } from "./sim/market";
 import type { MarketProduct } from "./sim/market";
@@ -1667,6 +1667,47 @@ function buildMarketSection(rows: HTMLElement): void {
      <div class="mkt-note">Every product sells best in <b>December</b>: +25% Dec · +15% Nov &amp; Jan · +10% Oct &amp; Feb · base otherwise.</div>`,
   );
 
+  // Farm-wide auto-sell (maintainer request, 2026-07-24). Sits above the
+  // product rows because it's the DEFAULT they inherit — including crops not in
+  // store yet, which is the reason it exists at all: the rows below only show
+  // what the farm currently holds, so a per-product switch can't reach a crop
+  // that hasn't been grown.
+  const allPlan = save.sellAll ?? { month: peakSaleMonth(), auto: false };
+  const allRow = document.createElement("div");
+  allRow.className = "inv-row mkt-row mkt-all";
+  allRow.innerHTML = `
+    <span class="icon">🔁</span>
+    <span class="info">
+      <div class="name">Auto-sell everything</div>
+      <div class="qty">Every crop and bale, including ones you haven't grown yet</div>
+    </span>`;
+
+  const allSelect = document.createElement("select");
+  allSelect.className = "mkt-month";
+  allSelect.title = "The month everything sells in, unless a product below is set on its own";
+  allSelect.innerHTML = SCHEDULE_MONTH_ORDER.map((m) => `<option value="${m}">${MONTH_SHORT[m]}</option>`).join("");
+  allSelect.value = String(allPlan.month);
+  allSelect.addEventListener("change", () => {
+    save.sellAll = { month: Number(allSelect.value), auto: allPlan.auto };
+    refreshInventory(true);
+  });
+  allRow.appendChild(allSelect);
+
+  const allToggle = document.createElement("label");
+  allToggle.className = "switch";
+  allToggle.title = "Auto-sell every product when its month arrives. A product set individually below keeps its own setting.";
+  const allCb = document.createElement("input");
+  allCb.type = "checkbox";
+  allCb.checked = allPlan.auto;
+  allCb.addEventListener("change", () => {
+    save.sellAll = { month: allPlan.month, auto: allCb.checked };
+    refreshInventory(true);
+  });
+  allToggle.appendChild(allCb);
+  allToggle.insertAdjacentHTML("beforeend", `<span class="slider"></span>`);
+  allRow.appendChild(allToggle);
+  rows.appendChild(allRow);
+
   const fieldBales = new Map(baleInventory(save, now).map((s) => [s.product, s.bales]));
   const claimed = new Set(save.buildings.filter((b) => b.kind === "silo").map((b) => b.assignedCrop).filter(Boolean));
 
@@ -1722,7 +1763,10 @@ function buildMarketSection(rows: HTMLElement): void {
   }
 
   for (const prod of products) {
-    const sched = save.sellSchedule?.[prod.id];
+    // The EFFECTIVE plan — its own row if it has one, else the farm-wide
+    // default. Showing the raw per-product entry here would leave a switch
+    // reading "off" while the master quietly sold the crop.
+    const sched = effectiveSellPlan(save, prod.id);
     const row = document.createElement("div");
     row.className = "inv-row mkt-row";
     row.innerHTML = `
@@ -1789,27 +1833,26 @@ function buildMarketSection(rows: HTMLElement): void {
       const bonus = seasonalBonus(prod.id, m);
       return `<option value="${m}">${MONTH_SHORT[m]}${bonus > 0 ? ` +${Math.round(bonus * 100)}%` : ""}</option>`;
     }).join("");
-    select.value = String(sched?.month ?? peakSaleMonth());
+    select.value = String(sched.month);
     select.addEventListener("change", () => {
+      // Touching a product's own control makes it an override from here on.
       const s = (save.sellSchedule ??= {});
-      const cur = s[prod.id] ?? { month: peakSaleMonth(), auto: false };
-      cur.month = Number(select.value);
-      s[prod.id] = cur;
+      s[prod.id] = { month: Number(select.value), auto: sched.auto };
       refreshInventory(true);
     });
     row.appendChild(select);
 
     const toggle = document.createElement("label");
     toggle.className = "switch";
-    toggle.title = "Auto-sell all of this product when the chosen month arrives";
+    toggle.title = sched.fromAll
+      ? "Following \"Auto-sell everything\" above — change this to give this product its own setting"
+      : "Auto-sell all of this product when the chosen month arrives";
     const cb = document.createElement("input");
     cb.type = "checkbox";
-    cb.checked = !!sched?.auto;
+    cb.checked = sched.auto;
     cb.addEventListener("change", () => {
       const s = (save.sellSchedule ??= {});
-      const cur = s[prod.id] ?? { month: peakSaleMonth(), auto: false };
-      cur.auto = cb.checked;
-      s[prod.id] = cur;
+      s[prod.id] = { month: sched.month, auto: cb.checked };
       refreshInventory(true);
     });
     toggle.appendChild(cb);

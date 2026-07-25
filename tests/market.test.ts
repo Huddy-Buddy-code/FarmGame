@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import {
   peakSaleMonth, seasonalMultiplier, seasonalBonus, grainUnitPrice, baleUnitPrice,
   SELLABLE_GRAINS, SELLABLE_BALES, grainInstantPrice,
+  ALL_MARKET_PRODUCTS, effectiveSellPlan,
 } from "../src/sim/market";
 import { tickAutoSell } from "../src/sim/economy";
 import { ensureAgents, buyImplement } from "../src/sim/tasks";
@@ -72,6 +73,69 @@ describe("sellable product lists", () => {
 // The first Dec (month 11) since epoch is absolute-month 9 ((START_MONTH 2 + 9)
 // % 12 = 11). So arming the cursor at abs 8 (the preceding Nov) and ticking to
 // abs 9 crosses exactly that Dec — the +25% peak.
+describe("farm-wide auto-sell (the master toggle)", () => {
+  // Maintainer request, 2026-07-24: "give me a toggle to auto sell all crops.
+  // This includes current, and any future adds." Stored as a DEFAULT rather
+  // than stamped across every product, so a crop the player has never grown
+  // still inherits it the first time it lands in store — which is the half
+  // that a bulk "turn them all on" button could never do.
+
+  it("covers a product that has no schedule row of its own", () => {
+    const save = newGame();
+    save.sellAll = { month: 11, auto: true };
+    expect(effectiveSellPlan(save, "corn")).toEqual({ month: 11, auto: true, fromAll: true });
+    // ...and every other product too, including bales.
+    for (const p of ALL_MARKET_PRODUCTS) expect(effectiveSellPlan(save, p).auto, p).toBe(true);
+  });
+
+  it("a product's own row overrides it", () => {
+    const save = newGame();
+    save.sellAll = { month: 11, auto: true };
+    save.sellSchedule = { corn: { month: 5, auto: false } };
+    expect(effectiveSellPlan(save, "corn")).toEqual({ month: 5, auto: false, fromAll: false });
+    expect(effectiveSellPlan(save, "soybeans").auto).toBe(true); // untouched, still follows
+  });
+
+  it("off by default — a fresh farm sells nothing automatically", () => {
+    const save = newGame();
+    for (const p of ALL_MARKET_PRODUCTS) expect(effectiveSellPlan(save, p).auto, p).toBe(false);
+  });
+
+  it("actually sells a crop that was never configured individually", () => {
+    // The end-to-end version: no sellSchedule at all, master on, and the crop
+    // goes when its month turns.
+    const save = newGame();
+    save.grain.soybeans = 40;
+    save.sellAll = { month: 11, auto: true };
+    save.sellLastMonthAbs = 8;
+    const before = save.money;
+    tickAutoSell(save, 9 * minutesPerMonth()); // cross into Dec
+    expect(save.grain.soybeans).toBe(0);
+    expect(save.money - before).toBe(Math.round(40 * grainInstantPrice("soybeans")));
+  });
+
+  it("respects a per-product OFF while the master is on", () => {
+    const save = newGame();
+    save.grain.corn = 40;
+    save.grain.soybeans = 40;
+    save.sellAll = { month: 11, auto: true };
+    save.sellSchedule = { corn: { month: 11, auto: false } };
+    save.sellLastMonthAbs = 8;
+    tickAutoSell(save, 9 * minutesPerMonth());
+    expect(save.grain.corn).toBe(40); // held back by its own setting
+    expect(save.grain.soybeans).toBe(0); // followed the master
+  });
+
+  it("sells on the MASTER's month, not the peak, when one is chosen", () => {
+    const save = newGame();
+    save.grain.corn = 40;
+    save.sellAll = { month: 0, auto: true }; // January
+    save.sellLastMonthAbs = 9; // Dec
+    tickAutoSell(save, 10 * minutesPerMonth()); // cross into Jan
+    expect(save.grain.corn).toBe(0);
+  });
+});
+
 describe("tickAutoSell", () => {
   it("falls back to an instant sale when no Sell Point exists to haul to", () => {
     const save = newGame();

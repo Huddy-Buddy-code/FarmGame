@@ -553,6 +553,13 @@
          auto-sell month picker + switch. ---------- */
       .mkt-note { font-size: 11.5px; color: #8a7658; margin: 4px 2px 8px; }
       .mkt-row { margin: 5px 0; padding: 6px 10px; }
+      /* The farm-wide auto-sell row — set apart from the product rows beneath
+         it, because it's their DEFAULT rather than another product. */
+      .mkt-all {
+        background: var(--cream-2); border: 1.5px dashed var(--wood);
+        border-radius: 10px; margin-bottom: 8px;
+      }
+      .mkt-all .name { font-weight: 700; }
       .mkt-row.empty { opacity: 0.55; }
       .mkt-row .icon { font-size: 20px; width: 24px; text-align: center; }
       .mkt-sellbtn { flex-shrink: 0; white-space: nowrap; }
