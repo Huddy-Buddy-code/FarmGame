@@ -3,7 +3,7 @@ import { newGame } from "../src/state/saveState";
 import { gameConfig } from "../src/config/gameConfig";
 import {
   buyBuildingAt, sellBuilding, buildingPrice, buildingDisplayName, siloCapacityOf,
-  siloCapacityTons, siloCapacityForCrop,
+  siloCapacityBushels, siloCapacityForCrop, siloCapacityTonsOf,
   assignSiloCrop, baleCapacity, barnSlotTotal, nearestFarmYard, nearestOfKind,
 } from "../src/sim/buildings";
 
@@ -49,13 +49,13 @@ describe("buildings (maintainer request, 2026-07-12): placeable storage + rally 
     expect(() => sellBuilding(save, "bld-999")).toThrow(/not found/);
   });
 
-  it("siloCapacityTons sums capacity across every owned silo, 0 with none", () => {
+  it("siloCapacityBushels sums capacity across every owned silo, 0 with none", () => {
     const save = newGame();
-    expect(siloCapacityTons(save)).toBe(0);
+    expect(siloCapacityBushels(save)).toBe(0);
     buyBuildingAt(save, "silo", [0, 0]);
-    expect(siloCapacityTons(save)).toBe(gameConfig.buildings.silo.small.capacityTons);
+    expect(siloCapacityBushels(save)).toBe(gameConfig.buildings.silo.small.capacityBushels);
     buyBuildingAt(save, "silo", [1, 1]);
-    expect(siloCapacityTons(save)).toBe(gameConfig.buildings.silo.small.capacityTons * 2);
+    expect(siloCapacityBushels(save)).toBe(gameConfig.buildings.silo.small.capacityBushels * 2);
   });
 
   it("baleCapacity sums Bale Barns and Bale Areas together", () => {
@@ -105,7 +105,7 @@ describe("silo crop assignment (maintainer request, 2026-07-12)", () => {
     const save = newGame();
     const silo = buyBuildingAt(save, "silo", [0, 0]);
     assignSiloCrop(save, silo.id, "corn");
-    expect(siloCapacityForCrop(save, "corn")).toBe(gameConfig.buildings.silo.small.capacityTons);
+    expect(siloCapacityForCrop(save, "corn")).toBeCloseTo(siloCapacityTonsOf("small", "corn"), 6);
     expect(siloCapacityForCrop(save, "soybeans")).toBe(0);
   });
 
@@ -115,7 +115,7 @@ describe("silo crop assignment (maintainer request, 2026-07-12)", () => {
     const b = buyBuildingAt(save, "silo", [1, 1]);
     assignSiloCrop(save, a.id, "corn");
     assignSiloCrop(save, b.id, "corn");
-    expect(siloCapacityForCrop(save, "corn")).toBe(gameConfig.buildings.silo.small.capacityTons * 2);
+    expect(siloCapacityForCrop(save, "corn")).toBeCloseTo(siloCapacityTonsOf("small", "corn") * 2, 6);
   });
 
   it("re-assigning moves a silo's capacity from the old crop to the new one", () => {
@@ -124,7 +124,7 @@ describe("silo crop assignment (maintainer request, 2026-07-12)", () => {
     assignSiloCrop(save, silo.id, "corn");
     assignSiloCrop(save, silo.id, "soybeans");
     expect(siloCapacityForCrop(save, "corn")).toBe(0);
-    expect(siloCapacityForCrop(save, "soybeans")).toBe(gameConfig.buildings.silo.small.capacityTons);
+    expect(siloCapacityForCrop(save, "soybeans")).toBeCloseTo(siloCapacityTonsOf("small", "soybeans"), 6);
   });
 
   it("clearing an assignment (undefined) drops the silo's capacity from that crop", () => {
@@ -149,9 +149,10 @@ describe("silo crop assignment (maintainer request, 2026-07-12)", () => {
 
 describe("silo sizes: Small/Medium/Large (maintainer request, 2026-07-12)", () => {
   it("each size has its own price and capacity, larger tiers hold more", () => {
-    expect(siloCapacityOf("small")).toBe(200);
-    expect(siloCapacityOf("medium")).toBe(500);
-    expect(siloCapacityOf("large")).toBe(1000);
+    // Bushels since 2026-07-24 — round real-world farm-bin sizes.
+    expect(siloCapacityOf("small")).toBe(10_000);
+    expect(siloCapacityOf("medium")).toBe(25_000);
+    expect(siloCapacityOf("large")).toBe(50_000);
     expect(buildingPrice("silo", "medium")).toBeGreaterThan(buildingPrice("silo", "small"));
     expect(buildingPrice("silo", "large")).toBeGreaterThan(buildingPrice("silo", "medium"));
   });
@@ -177,7 +178,9 @@ describe("silo sizes: Small/Medium/Large (maintainer request, 2026-07-12)", () =
     const large = buyBuildingAt(save, "silo", [1, 1], "large");
     assignSiloCrop(save, small.id, "corn");
     assignSiloCrop(save, large.id, "corn");
-    expect(siloCapacityForCrop(save, "corn")).toBe(siloCapacityOf("small") + siloCapacityOf("large"));
+    // siloCapacityForCrop is TONS OF THAT CROP; siloCapacityOf is bushels.
+    expect(siloCapacityForCrop(save, "corn"))
+      .toBeCloseTo(siloCapacityTonsOf("small", "corn") + siloCapacityTonsOf("large", "corn"), 6);
   });
 
   it("selling a sized silo refunds that size's price, not the default", () => {

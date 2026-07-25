@@ -29,7 +29,7 @@ import { drawFieldTexture } from "./field/fieldRender";
 import { updateBuildingMarkers, BUILDING_ICON } from "./field/buildingRender";
 import {
   buyBuildingAt, sellBuilding, buildingPrice, buildingDisplayName, initBuildingIdCounters,
-  BUILDING_NAME, siloCapacityForCrop, siloCapacityOf, assignSiloCrop,
+  BUILDING_NAME, siloCapacityForCrop, siloCapacityOf, siloCapacityTonsOf, assignSiloCrop,
   barnSlotTotal, nearestFarmYard,
   baleStorageCapacityOf, storedBalesTotal, assignBaleStorageProduct,
 } from "./sim/buildings";
@@ -1905,8 +1905,11 @@ function refreshInventory(force = false) {
     rows.insertAdjacentHTML("beforeend", `<div class="silo-bar-empty">No silos built yet — buy one from the Structures tab.</div>`);
   }
   for (const silo of silos) {
-    const capacity = siloCapacityOf(silo.size ?? "small");
+    const bushels = siloCapacityOf(silo.size ?? "small");
     const crop = silo.assignedCrop;
+    // A bin is a fixed VOLUME (2026-07-24), so what it holds in TONS depends on
+    // the crop assigned to it — far less of oats than of corn.
+    const capacity = crop ? siloCapacityTonsOf(silo.size ?? "small", crop) : 0;
     const cropCapacityTotal = crop ? siloCapacityForCrop(save, crop) : 0;
     // This silo's proportional share of the crop's pooled tons.
     const tons = crop && cropCapacityTotal > 0 ? (save.grain[crop] * capacity) / cropCapacityTotal : 0;
@@ -1926,13 +1929,13 @@ function refreshInventory(force = false) {
           <span class="icon">${BUILDING_ICON.silo}</span>
           <span class="sc-title">
             <span class="sc-name">${name} · ${SIZE_LABEL[silo.size ?? "small"]}</span>
-            <span class="sc-sub">${capacity.toLocaleString()} t capacity</span>
+            <span class="sc-sub">${bushels.toLocaleString()} bu${crop ? ` · ${capacity.toFixed(0)} t of ${escapeHtml(gameConfig.crops[crop].name.toLowerCase())}` : ""}</span>
           </span>
         </span>
         <span class="sc-headright"></span>
       </div>
       <div class="sc-bar"><div class="sc-fill ${level}" style="width:${pct.toFixed(1)}%"></div>
-        <span class="sc-bar-label">${crop ? `${tons.toFixed(1)} / ${capacity.toLocaleString()} t · ${pct.toFixed(0)}%` : "Pick a crop to start filling it"}</span>
+        <span class="sc-bar-label">${crop ? `${tons.toFixed(1)} / ${capacity.toFixed(0)} t · ${pct.toFixed(0)}%` : "Pick a crop to start filling it"}</span>
       </div>`;
 
     const select = document.createElement("select");
@@ -2614,8 +2617,8 @@ function structureSpecText(b: Building): string {
     case "silo": {
       const cap = siloCapacityOf(b.size ?? "small");
       return b.assignedCrop
-        ? `${cap.toLocaleString()} t capacity · assigned to ${gameConfig.crops[b.assignedCrop].name}`
-        : `${cap.toLocaleString()} t capacity · unassigned`;
+        ? `${cap.toLocaleString()} bu · ${siloCapacityTonsOf(b.size ?? "small", b.assignedCrop).toFixed(0)} t of ${gameConfig.crops[b.assignedCrop].name}`
+        : `${cap.toLocaleString()} bu capacity · unassigned`;
     }
     case "baleBarn":
       return `${storedBalesTotal(b)} / ${baleStorageCapacityOf("baleBarn").toLocaleString()} bales · indoor`;
@@ -2928,7 +2931,7 @@ function buildStructuresShop(): void {
     toast(`🏗️ Click the map to place your ${buildingDisplayName(kind, size)}`);
   };
   shopLine(shop, "Silo", `<span class="shop-emoji">${BUILDING_ICON.silo}</span>`, Object.fromEntries(SIZES.map((s) => [s, {
-    spec: `${siloCapacityOf(s).toLocaleString()} t grain`,
+    spec: `${siloCapacityOf(s).toLocaleString()} bu (~${siloCapacityTonsOf(s, "corn").toFixed(0)} t corn)`,
     price: buildingPrice("silo", s),
     onBuy: placeBuilding("silo", s),
   }])));
@@ -3600,9 +3603,10 @@ function buildingCapacityText(building: Building): string {
   switch (building.kind) {
     case "silo": {
       const per = siloCapacityOf(building.size ?? "small").toLocaleString();
-      if (!building.assignedCrop) return `Holds ${per} t once assigned a crop below.`;
+      if (!building.assignedCrop) return `Holds ${per} bu once assigned a crop below.`;
       const cfg = gameConfig.crops[building.assignedCrop];
-      return `Holds ${per} t of ${cfg.name.toLowerCase()} · farm total ${siloCapacityForCrop(save, building.assignedCrop).toLocaleString()} t`;
+      const perTons = siloCapacityTonsOf(building.size ?? "small", building.assignedCrop).toFixed(0);
+      return `Holds ${per} bu = ${perTons} t of ${cfg.name.toLowerCase()} · farm total ${siloCapacityForCrop(save, building.assignedCrop).toFixed(0)} t`;
     }
     case "baleBarn":
       return `Bale storage: ${storedBalesTotal(building)} / ${baleStorageCapacityOf("baleBarn").toLocaleString()} bales`;

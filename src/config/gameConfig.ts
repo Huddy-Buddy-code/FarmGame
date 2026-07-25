@@ -50,6 +50,23 @@ export const SIZE_RANK: Record<EquipmentSize, number> = { small: 0, medium: 1, l
 /** Feet → meters (implement widths are specified in real feet). */
 export const FEET_TO_METERS = 0.3048;
 
+/**
+ * Tons in one bushel of `crop` — its test weight over 2000 lb.
+ *
+ * Storage is VOLUME throughout (2026-07-24): combine tanks, grain carts and
+ * silos are all sized in bushels, so this is what turns a capacity into the
+ * tonnage it holds OF A PARTICULAR CROP. Falls back to corn for a crop that
+ * declares no test weight (the perennials, whose yield is bales).
+ *
+ * Lives here rather than in a sim module because `sim/buildings.ts` and
+ * `sim/tasks.ts` both need it and tasks already imports buildings — putting it
+ * in either would make a cycle. It's a pure config lookup, so the config is
+ * where it belongs anyway.
+ */
+export function tonsPerBushel(crop: CropId): number {
+  return (gameConfig.crops[crop].bushelWeightLbs ?? gameConfig.crops.corn.bushelWeightLbs ?? 56) / 2000;
+}
+
 export interface CropConfig {
   name: string;
   /** HUD icon — cozy UI shorthand. */
@@ -485,7 +502,12 @@ export interface GameConfig {
   buildings: {
     /** Grain storage, tons — sized like equipment (Small/Medium/Large), each
      * tier cheaper per ton than the last (bulk-build economy). */
-    silo: Record<EquipmentSize, { price: number; capacityTons: number }>;
+    /** Grain storage. Capacity is BUSHELS (2026-07-24), like the combine tank
+     * and the grain cart — a bin is a fixed VOLUME, so it holds fewer TONS of a
+     * light crop than a dense one. It was capped in tons until then, which had
+     * it backwards: the same silo silently held 75% more oats by volume than
+     * corn. Sizes are round real-world farm-bin numbers. */
+    silo: Record<EquipmentSize, { price: number; capacityBushels: number }>;
     /** Indoor bale storage — pricier, presumably weatherproof (flavor; no
      * mechanical difference yet). */
     baleBarn: { price: number; capacityBales: number };
@@ -845,9 +867,9 @@ export const gameConfig: GameConfig = {
   },
   buildings: {
     silo: {
-      small: { price: 90_000, capacityTons: 200 },
-      medium: { price: 200_000, capacityTons: 500 },
-      large: { price: 350_000, capacityTons: 1000 },
+      small: { price: 90_000, capacityBushels: 10_000 },
+      medium: { price: 200_000, capacityBushels: 25_000 },
+      large: { price: 350_000, capacityBushels: 50_000 },
     },
     baleBarn: { price: 70_000, capacityBales: 300 },
     // Outdoor bale storage — cheaper than the Barn, and now CAPPED like it

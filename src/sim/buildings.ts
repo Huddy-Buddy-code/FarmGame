@@ -11,7 +11,7 @@
  * is one fixed size.
  */
 
-import { gameConfig } from "../config/gameConfig";
+import { gameConfig, tonsPerBushel } from "../config/gameConfig";
 import type { CropId, EquipmentSize, BaleProduct } from "../config/gameConfig";
 import type { BuildingKind, Building, SaveState } from "../state/saveState";
 import type { Meters } from "../geo/coords";
@@ -55,9 +55,17 @@ export function buildingPrice(kind: BuildingKind, size?: EquipmentSize): number 
   return gameConfig.buildings[kind].price;
 }
 
-/** Grain capacity of a single silo at `size`, tons. */
+/** Grain capacity of a single silo at `size`, BUSHELS — the real, crop-agnostic
+ * figure (2026-07-24). A bin is a fixed volume. */
 export function siloCapacityOf(size: EquipmentSize): number {
-  return gameConfig.buildings.silo[size].capacityTons;
+  return gameConfig.buildings.silo[size].capacityBushels;
+}
+
+/** That capacity in TONS of `crop`. `save.grain` is pooled in tons, so every
+ * "is there room" check converts through here — and a bin therefore holds far
+ * fewer tons of oats (32 lb/bu) than of corn (56), which is the whole point. */
+export function siloCapacityTonsOf(size: EquipmentSize, crop: CropId): number {
+  return siloCapacityOf(size) * tonsPerBushel(crop);
 }
 
 /** Buy a building and drop it at `pos`. `size` only applies to (and is
@@ -86,20 +94,21 @@ export function sellBuilding(save: SaveState, buildingId: string): { building: B
   return { building, refund };
 }
 
-/** Total grain storage across every owned Silo, tons, regardless of crop
+/** Total grain storage across every owned Silo, BUSHELS, regardless of crop
  * assignment — the farm's total silo footprint. */
-export function siloCapacityTons(save: SaveState): number {
+export function siloCapacityBushels(save: SaveState): number {
   return save.buildings
     .filter((b) => b.kind === "silo")
     .reduce((sum, b) => sum + siloCapacityOf(b.size ?? "small"), 0);
 }
 
-/** Grain storage assigned to `crop`, tons — only silos dedicated to that crop
- * count. A silo holds no capacity for anything until it's assigned. */
+/** Grain storage assigned to `crop`, TONS OF THAT CROP — only silos dedicated
+ * to it count, and each one's bushels convert at the crop's test weight. A silo
+ * holds no capacity for anything until it's assigned. */
 export function siloCapacityForCrop(save: SaveState, crop: CropId): number {
   return save.buildings
     .filter((b) => b.kind === "silo" && b.assignedCrop === crop)
-    .reduce((sum, b) => sum + siloCapacityOf(b.size ?? "small"), 0);
+    .reduce((sum, b) => sum + siloCapacityTonsOf(b.size ?? "small", crop), 0);
 }
 
 /** Assign (or clear, with `undefined`) which crop a Silo is dedicated to.

@@ -20,7 +20,10 @@
  * map, no DOM, so it's unit-testable like farming.ts.
  */
 
-import { gameConfig, SIZE_RANK, FEET_TO_METERS } from "../config/gameConfig";
+import { gameConfig, SIZE_RANK, FEET_TO_METERS, tonsPerBushel } from "../config/gameConfig";
+// Re-exported: it lives in the config (a pure lookup) so `sim/buildings.ts` can
+// use it without importing this module, which would be a cycle.
+export { tonsPerBushel };
 import type { CropId, EquipmentSize, BaleProduct } from "../config/gameConfig";
 import type { SimTime } from "./clock";
 import type { SaveState, Field, FieldStatus, FarmTask, Agent, Implement, TaskType, FieldPlan, CompletedTask } from "../state/saveState";
@@ -198,18 +201,6 @@ export function agentPrice(kind: EquipmentKind, size: EquipmentSize): number {
 /** Cutting width (meters) of the Self-Propelled Windrower. */
 export function windrowerWidthM(): number {
   return gameConfig.equipment.windrower.widthFt * FEET_TO_METERS;
-}
-
-/**
- * Tons in one bushel of `crop` — the crop's test weight over 2000 lb.
- *
- * On-board storage is VOLUME (maintainer decision, 2026-07-24), so this is what
- * turns a machine's bushel capacity into the tonnage it can actually hold of a
- * particular crop. Falls back to corn's weight for a crop that declares none
- * (the perennials, whose yield is bales and never rides in a hopper).
- */
-export function tonsPerBushel(crop: CropId): number {
-  return (gameConfig.crops[crop].bushelWeightLbs ?? gameConfig.crops.corn.bushelWeightLbs ?? 56) / 2000;
 }
 
 /** Grain hopper VOLUME of a combine at `size`, bushels. */

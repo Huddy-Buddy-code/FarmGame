@@ -24,7 +24,7 @@ import {
   tonsPerBushel, harvesterCapacityTons, harvesterCapacityBushels,
   grainTrailerCapacityTons, grainTrailerCapacityBushels,
 } from "../src/sim/tasks";
-import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
+import { buyBuildingAt, assignSiloCrop, siloCapacityOf, siloCapacityTonsOf, siloCapacityForCrop } from "../src/sim/buildings";
 import { minutesPerMonth } from "../src/sim/calendar";
 import { gameConfig } from "../src/config/gameConfig";
 import type { CropId, EquipmentSize } from "../src/config/gameConfig";
@@ -96,6 +96,46 @@ describe("capacity is volume, converted per crop", () => {
     expect(harvesterCapacityBushels("medium")).toBeLessThan(harvesterCapacityBushels("large"));
     expect(grainTrailerCapacityBushels("small")).toBeLessThan(grainTrailerCapacityBushels("medium"));
     expect(grainTrailerCapacityBushels("medium")).toBeLessThan(grainTrailerCapacityBushels("large"));
+  });
+});
+
+describe("silos are volume too", () => {
+  // 2026-07-24: silos were the last thing capped in TONS, which ran backwards —
+  // a bin is a fixed volume, so a ton-cap made the same silo hold 75% MORE
+  // oats by volume than corn. Sizes are round real-world farm bins now.
+  it("comes in 10k / 25k / 50k bushels", () => {
+    expect(siloCapacityOf("small")).toBe(10_000);
+    expect(siloCapacityOf("medium")).toBe(25_000);
+    expect(siloCapacityOf("large")).toBe(50_000);
+  });
+
+  it("holds FEWER tons of a light crop than a dense one", () => {
+    const corn = siloCapacityTonsOf("medium", "corn");
+    const oats = siloCapacityTonsOf("medium", "oats");
+    const sunflowers = siloCapacityTonsOf("medium", "sunflowers");
+    const soybeans = siloCapacityTonsOf("medium", "soybeans");
+    expect(oats).toBeLessThan(corn);
+    expect(sunflowers).toBeLessThan(oats);
+    expect(soybeans).toBeGreaterThan(corn);
+    // Oats are 32 lb/bu against corn's 56 — the tonnage ratio must follow.
+    expect(oats / corn).toBeCloseTo(32 / 56, 6);
+  });
+
+  it("the farm-wide per-crop total converts at that crop's weight", () => {
+    const save = newGame();
+    save.money = 10_000_000;
+    const a = buyBuildingAt(save, "silo", [0, 0], "medium");
+    const b = buyBuildingAt(save, "silo", [10, 10], "large");
+    assignSiloCrop(save, a.id, "oats");
+    assignSiloCrop(save, b.id, "oats");
+    expect(siloCapacityForCrop(save, "oats"))
+      .toBeCloseTo(siloCapacityTonsOf("medium", "oats") + siloCapacityTonsOf("large", "oats"), 6);
+    // The same bins assigned to corn would hold considerably more weight.
+    assignSiloCrop(save, a.id, "corn");
+    assignSiloCrop(save, b.id, "corn");
+    expect(siloCapacityForCrop(save, "corn")).toBeGreaterThan(
+      siloCapacityTonsOf("medium", "oats") + siloCapacityTonsOf("large", "oats"),
+    );
   });
 });
 

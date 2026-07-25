@@ -9,7 +9,7 @@ import {
 } from "../src/sim/tasks";
 import { tickFarming } from "../src/sim/farming";
 import { sellGrain } from "../src/sim/economy";
-import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
+import { buyBuildingAt, assignSiloCrop, siloCapacityTonsOf } from "../src/sim/buildings";
 import { gameConfig } from "../src/config/gameConfig";
 import { minutesPerMonth } from "../src/sim/calendar";
 
@@ -380,9 +380,12 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
 
   it("a full-capacity silo → the trailer waits at it until sellGrain frees room", () => {
     const save = gameWithAgents();
-    const silo = buyBuildingAt(save, "silo", [-50, -50], "small"); // 200t cap
+    const silo = buyBuildingAt(save, "silo", [-50, -50], "small");
     assignSiloCrop(save, silo.id, "corn");
-    save.grain.corn = 200; // already at capacity
+    // Silos cap in BUSHELS since 2026-07-24, so the tonnage that fills one
+    // depends on the crop — derive it rather than hardcoding the old 200 t.
+    const siloTons = siloCapacityTonsOf("small", "corn");
+    save.grain.corn = siloTons; // already at capacity
     buyImplement(save, "grainTrailer", "medium");
     // Just under one hopper load, so the field finishes fully cut with nothing
     // left to trigger a SECOND trip once this one completes (keeps the "trip
@@ -395,9 +398,9 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     runUntil(save, APRIL_1, () => (combineOf(save).grainOnboard ?? 0) >= siloTestTons - 1e-6, 20_000);
     const now = runUntil(save, APRIL_1, () => !!unloadTaskFor(save, combineOf(save).id)?.waitingForSilo, 5000);
     expect(unloadTaskFor(save, combineOf(save).id)?.waitingForSilo).toBe(true);
-    expect(save.grain.corn).toBe(200); // untouched while waiting
+    expect(save.grain.corn).toBe(siloTons); // untouched while waiting
 
-    sellGrain(save, "corn", 200, 4 * minutesPerMonth()); // free up room
+    sellGrain(save, "corn", siloTons, 4 * minutesPerMonth()); // free up room
     runUntil(save, now, () => save.grain.corn > 0, 5000);
     expect(save.grain.corn).toBeGreaterThan(0);
     expect(unloadTaskFor(save, combineOf(save).id)).toBeUndefined(); // trip completed
@@ -442,9 +445,10 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
 
   it("a full silo + a Sell Point → the cart diverts and sells its load instead of stalling (2026-07-20)", () => {
     const save = gameWithAgents();
-    const silo = buyBuildingAt(save, "silo", [-50, -50], "small"); // 200t cap
+    const silo = buyBuildingAt(save, "silo", [-50, -50], "small");
     assignSiloCrop(save, silo.id, "corn");
-    save.grain.corn = 199; // 1t of room — fills mid-dump, forcing the divert
+    // 1 t of room — the silo fills mid-dump, forcing the divert.
+    save.grain.corn = siloCapacityTonsOf("small", "corn") - 1;
     buyBuildingAt(save, "sellPoint", [-60, -60]);
     buyImplement(save, "grainTrailer", "medium");
     const field = readyField(8, 6); // 48t — one hopper load
@@ -455,7 +459,7 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     // The cart delivers what fits (fills the silo to 200), then diverts the rest
     // to the Sell Point and completes — never gets stuck waitingForSilo.
     runUntil(save, APRIL_1, () => !save.tasks.some((t) => t.type === "unloadHarvester") && field.status === "harvested", 300_000, 5);
-    expect(save.grain.corn).toBe(200); // silo topped off
+    expect(save.grain.corn).toBe(siloCapacityTonsOf("small", "corn")); // silo topped off
     expect(save.money).toBeGreaterThan(startMoney); // the rest was sold for cash
     const sale = save.completedTasks?.find((t) => t.type === "sellGrain");
     expect(sale?.crop).toBe("corn");
