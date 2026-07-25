@@ -111,7 +111,7 @@ function freeWindrower(save: SaveState): Agent | undefined {
  * fertilizes), a Grain Trailer (hauls a full combine to a silo) — same widths/
  * requirements, a tractor hitches one at a time. */
 export type ImplementKind =
-  | "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer"
+  | "plow" | "planter" | "sprayer" | "rake" | "bailer" | "squareBaler" | "grainTrailer"
   | "mower" | "mulcher" | "haySpikes" | "baleTrailer"
   // Combine headers (2026-07-24). Unlike every other implement these hitch to a
   // HARVESTER, not a tractor, and which one a job needs depends on the CROP —
@@ -136,10 +136,34 @@ export function harvestHeaderKind(crop: CropId): ImplementKind {
 
 const EQUIPMENT_NAME: Record<EquipmentKind, string> = { tractor: "Tractor", harvester: "Combine", windrower: "Windrower" };
 const IMPLEMENT_NAME: Record<ImplementKind, string> = {
-  plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake", bailer: "Baler",
+  plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake", bailer: "Round Baler",
   grainTrailer: "Grain Trailer", mower: "Mower", mulcher: "Mulcher", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
-  cornHeader: "Corn Header", grainHeader: "Grain Header",
+  cornHeader: "Corn Header", grainHeader: "Grain Header", squareBaler: "Square Baler",
 };
+
+/** Both baler kinds. Shape is the KIND now (2026-07-24), not a size tier —
+ * which is what lets a Round and a Square baler both be Medium. A bale task
+ * takes either, so every "does this rig have a baler" question goes through
+ * here rather than naming one. */
+const BALER_KINDS = ["bailer", "squareBaler"] as const;
+
+/** The baler hitched to `agentId`, of either shape. */
+function attachedBaler(save: SaveState, agentId: string): Implement | undefined {
+  return save.implements.find((i) => i.attachedTo === agentId && (i.kind === "bailer" || i.kind === "squareBaler"));
+}
+
+/** Which baler this rig would bale with: the one already hitched, else the best
+ * one free in the yard. Undefined if it can't get hold of either.
+ *
+ * Bale is crop-independent but EQUIPMENT-dependent, so like a sell run's
+ * trailer it has no fixed `TASK_IMPLEMENT` entry — the answer depends on what
+ * the farm owns. */
+function balerKindFor(save: SaveState, agent: Agent): ImplementKind | undefined {
+  const held = attachedBaler(save, agent.id);
+  if (held) return held.kind;
+  for (const kind of BALER_KINDS) if (availableImplementFor(save, agent, kind)) return kind;
+  return undefined;
+}
 const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
 
 /** Ledger item label for each field-expense task type (hover breakdown in the
@@ -155,7 +179,10 @@ const FIELD_EXPENSE_ITEM: Partial<Record<TaskType, string>> = {
  * Queue panel's per-task implement icon (main.ts). */
 export const TASK_IMPLEMENT: Partial<Record<TaskType, ImplementKind>> = {
   plow: "plow", plant: "planter", mow: "mower", mulch: "mulcher", weed: "sprayer", fertilize: "sprayer",
-  rake: "rake", bale: "bailer", unloadHarvester: "grainTrailer", haulBales: "haySpikes",
+  rake: "rake", unloadHarvester: "grainTrailer", haulBales: "haySpikes",
+  // `bale` deliberately has NO fixed entry (2026-07-24): either baler kind can
+  // do it, so it's resolved per rig by `balerKindFor` — same treatment as a
+  // sell run's product-dependent trailer.
   // `sell` deliberately has NO fixed entry: which trailer it needs depends
   // on the product (grain vs bales), so it is resolved per task by
   // `sellTrailerKind` instead of read from this table.
@@ -242,6 +269,7 @@ const IMPLEMENT_CONFIG: Record<ImplementKind, Record<EquipmentSize, { price: num
   sprayer: gameConfig.equipment.sprayer,
   rake: gameConfig.equipment.rake,
   bailer: gameConfig.equipment.bailer,
+  squareBaler: gameConfig.equipment.squareBaler,
   grainTrailer: gameConfig.equipment.grainTrailer,
   mower: gameConfig.equipment.mower,
   mulcher: gameConfig.equipment.mulcher,
@@ -328,6 +356,17 @@ export function ensureAgents(save: SaveState, home: Meters): void {
   // rotation isn't a decision, it's a papercut. The choice still bites later:
   // a Large combine wants a Large header to use its width, and a sold header
   // has to be replaced.
+  // Balers: shape used to be the SIZE TIER (Large == square, 2026-07-24 morning)
+  // and is now the implement KIND. Convert in place so a save made in between
+  // keeps the machine it paid for — a Large baler WAS a square baler.
+  for (const impl of save.implements) {
+    if (impl.kind === "bailer" && impl.size === "large") {
+      impl.kind = "squareBaler";
+      impl.size = "medium";
+    } else if (impl.kind === "bailer" && impl.size === "small") {
+      impl.size = "medium"; // the Small tier is gone; it was never more than a cheaper Medium
+    }
+  }
   if (!save.headersGranted) {
     for (const kind of ["cornHeader", "grainHeader"] as const) {
       if (!save.implements.some((i) => i.kind === kind)) {
@@ -618,7 +657,7 @@ export function isFieldHarvesting(save: SaveState, fieldId: string): boolean {
  * is only *required* before re-plowing when the player can actually do it; a
  * farm with no baler just plows the residue under (so auto-manage never traps). */
 export function forageEquipped(save: SaveState): boolean {
-  const baler = save.implements.some((i) => i.kind === "bailer");
+  const baler = save.implements.some((i) => i.kind === "bailer" || i.kind === "squareBaler");
   return baler && save.implements.some((i) => i.kind === "rake");
 }
 
@@ -636,7 +675,7 @@ export function needsRakeBeforeBaling(field: Field): boolean {
  * field's residue is straw. Used so a straw-only farm isn't told it can't bale
  * for want of a rake it will never use. */
 export function baleEquippedFor(save: SaveState, field: Field): boolean {
-  if (!save.implements.some((i) => i.kind === "bailer")) return false;
+  if (!save.implements.some((i) => i.kind === "bailer" || i.kind === "squareBaler")) return false;
   return !needsRakeBeforeBaling(field) || save.implements.some((i) => i.kind === "rake");
 }
 
@@ -875,13 +914,18 @@ export function estimateTaskHours(save: SaveState, task: FarmTask): number {
   // cuts at its OWN width. Without this the estimate fell through to a Mower
   // the farm might not even own, at a nominal "medium" 25 ft (2026-07-24).
   const windrowerTakesIt = task.type === "mow" && save.agents.some((a) => a.kind === "windrower");
-  const widthFt = task.type === "harvest"
-    ? gameConfig.equipment.harvester[nominalHarvesterSize].widthFt
-    : windrowerTakesIt
-      ? gameConfig.equipment.windrower.widthFt
-      : (save.implements.find((i) => i.kind === kind)?.size
-          ? IMPLEMENT_CONFIG[kind!][save.implements.find((i) => i.kind === kind)!.size].widthFt
-          : IMPLEMENT_CONFIG[kind!].medium.widthFt);
+  // A baler has no width of its own (2026-07-24) — it clears the windrow, whose
+  // width the field records. It also has no TASK_IMPLEMENT entry now, so this
+  // has to be handled before the table lookup below rather than falling into it.
+  const widthFt = task.type === "bale"
+    ? (field.windrowWidthM ?? IMPLEMENT_CONFIG.rake.medium.widthFt * FEET_TO_METERS) / FEET_TO_METERS
+    : task.type === "harvest"
+      ? gameConfig.equipment.harvester[nominalHarvesterSize].widthFt
+      : windrowerTakesIt
+        ? gameConfig.equipment.windrower.widthFt
+        : (save.implements.find((i) => i.kind === kind)?.size
+            ? IMPLEMENT_CONFIG[kind!][save.implements.find((i) => i.kind === kind)!.size].widthFt
+            : IMPLEMENT_CONFIG[kind!].medium.widthFt);
   const widthM = widthFt * FEET_TO_METERS;
   const rateAcresPerHr = (speedMPerHr * widthM) / ACRE_M2;
   return rateAcresPerHr > 0 ? remainingAcres / rateAcresPerHr : 0;
@@ -1025,6 +1069,17 @@ function taskSwathMeters(save: SaveState, task: FarmTask, agent: Agent): number 
   }
   // A windrower's cut is its own width — it carries no implement to read one from.
   if (agent.kind === "windrower") return windrowerWidthM();
+  // A BALER has no working width of its own (maintainer note, 2026-07-24): it
+  // swallows a windrow, so the ground it clears per pass is whatever laid that
+  // windrow down — the rake, or the combine header on straw (which skips the
+  // rake). The field carries the answer; see `Field.windrowWidthM`.
+  if (task.type === "bale") {
+    const field = save.fields.find((f) => f.id === task.fieldId);
+    if (field?.windrowWidthM) return field.windrowWidthM;
+    // Nothing recorded (a legacy save, or a field hand-set up in a test) —
+    // fall back to a nominal rake so the pass still has a sane width.
+    return IMPLEMENT_CONFIG.rake.medium.widthFt * FEET_TO_METERS;
+  }
   const kind = TASK_IMPLEMENT[task.type]!;
   const impl = attachedImplement(save, agent.id, kind);
   return impl ? implementWidthM(impl) : IMPLEMENT_CONFIG[kind].medium.widthFt * FEET_TO_METERS;
@@ -1955,6 +2010,8 @@ function tickAgent(
           // A sell run's trailer depends on WHAT it's hauling, so it isn't in
           // TASK_IMPLEMENT — check the product's kind directly instead.
           (t.type !== "sell" || tractorCanUse(save, agent, sellTrailerKind(t.sellProduct!))) &&
+          // Either baler kind will do — see `balerKindFor`.
+          (t.type !== "bale" || !!balerKindFor(save, agent)) &&
           // A combine needs the RIGHT header for what's standing in the field
           // (2026-07-24) — corn head for corn, grain head for everything else.
           // Crop-dependent like a sell run's trailer, so it isn't in
@@ -2004,6 +2061,7 @@ function tickAgent(
       const needKind =
         next.type === "sell" ? sellTrailerKind(next.sellProduct!)
         : next.type === "harvest" ? headerKindForTask(save, next)
+        : next.type === "bale" ? balerKindFor(save, agent)
         : needsImplementFor(agent, next.type);
       if (needKind && !attachedImplement(save, agent.id, needKind)) {
         const impl = availableImplementFor(save, agent, needKind);
@@ -2018,13 +2076,20 @@ function tickAgent(
       agent.state = "traveling";
       // Picking up a rake windrows the field — this unlocks the baler right away
       // (it may start before the rake finishes), and survives the rake finishing.
+      // It also SETS the windrow width: a rake sweeps its own width into a
+      // single row, so that's what the baler will be clearing per pass. This
+      // runs after the harvest's own write (below), which is the right order —
+      // on a raked crop the rake has the final say.
       if (next.type === "rake") {
         const f = save.fields.find((ff) => ff.id === next.fieldId);
-        if (f) f.windrowed = true;
+        if (f) {
+          f.windrowed = true;
+          f.windrowWidthM = taskSwathMeters(save, next, agent);
+        }
       }
       // Starting a bale job: empty the baler's hopper for a fresh run.
       if (next.type === "bale") {
-        const b = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
+        const b = attachedBaler(save, agent.id);
         if (b) b.cargoTons = 0;
       }
       // Starting a Haul Bales job: pull in an idle tractor+Bale-Trailer as the
@@ -2746,10 +2811,10 @@ function tickAgent(
     if (task.type === "bale") {
       const path = getActivePath(save, task, field, agent);
       const speed = (taskFieldSpeedKmh("bale") * 1000) / 60; // meters per sim-minute
-      const baler = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
-      // The Large baler is a large SQUARE baler (2026-07-24) — its bales are a
-      // different product: heavier, fewer per acre, worth more each.
-      const square = !!baler && !!gameConfig.equipment.bailer[baler.size].makesSquareBales;
+      const baler = attachedBaler(save, agent.id);
+      // Shape follows the baler KIND (2026-07-24) — square bales are heavier,
+      // fewer per acre and worth more each.
+      const square = baler?.kind === "squareBaler";
       const baleTons = baleTonsOf(baleProductForField(field, square));
       // Even-divide the field's forage into whole bales so the count stays
       // round(acres × balesPerAcre × productivity) — float-robust, and
@@ -2953,6 +3018,12 @@ function tickAgent(
 
     if (dist >= path.total - 1e-6) {
       task.doneAcres = task.totalAcres;
+      // Whatever just CUT this field decides how wide the material lying on it
+      // is (2026-07-24) — that's the baler's working width later, since a baler
+      // has none of its own. On a crop that gets raked this is overwritten when
+      // the rake starts; on straw, which skips the rake, the combine header's
+      // width is the final answer.
+      if (task.type === "harvest" || task.type === "mow") field.windrowWidthM = path.swath;
       // Capture the tons harvested AND the crop BEFORE completeTask
       // (applyHarvestDone clears both field.trueYieldTonsPerAcre and
       // field.crop once the crop comes off).
@@ -3310,9 +3381,14 @@ export function blockedWork(save: SaveState): BlockedWork[] {
   );
   for (const task of save.tasks) {
     if (task.status !== "queued") continue;
-    // Harvest's implement is crop-dependent (which header), so it isn't in the
-    // table — resolve it per task instead.
-    const kind = task.type === "harvest" ? headerKindForTask(save, task) : TASK_IMPLEMENT[task.type];
+    // Harvest's implement is crop-dependent (which header) and bale's is
+    // equipment-dependent (either baler kind), so neither is in the table —
+    // resolve them per task instead.
+    const kind = task.type === "harvest"
+      ? headerKindForTask(save, task)
+      : task.type === "bale"
+        ? (BALER_KINDS.find((k) => save.implements.some((i) => i.kind === k)) ?? "bailer")
+        : TASK_IMPLEMENT[task.type];
     const needed = TASK_AGENT_KIND[task.type];
     // `agentCanDoTask`, not a bare kind comparison: a cut counts as covered by
     // a windrower as well as by a tractor (2026-07-24).

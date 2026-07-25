@@ -324,6 +324,8 @@ export const IMPLEMENT_ICON_SVG: Record<string, (size?: number) => string> = {
   sprayer: sprayerIconSvg,
   rake: rakeIconSvg,
   bailer: balerIconSvg,
+  // No square-baler art yet — it borrows the round baler's glyph.
+  squareBaler: balerIconSvg,
   grainTrailer: grainTrailerIconSvg,
   mower: mowerIconSvg,
   mulcher: mulcherIconSvg,

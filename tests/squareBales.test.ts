@@ -2,12 +2,12 @@
  * Square bales (maintainer decision, 2026-07-24): "The baler, but storage
  * counts them the same."
  *
- * Expressed as a SIZE TIER rather than a separate implement kind — the Large
- * baler IS the large square baler, which is both what the maintainer wrote
- * ("Large Square Baler - Large") and true to the machines: nobody makes a small
- * square baler at this scale. That choice is worth its own test, because the
- * alternative (a `squareBaler` implement kind) would have rippled through the
- * pickup gate, auto-hitch, blocked-work and preferred-rig logic for no gain.
+ * Shape is the implement KIND. It was briefly a size tier (the Large baler WAS
+ * the square baler) — that fell over later the same day when the baler lost its
+ * working width: a baler clears whatever the windrow is wide, so the size tiers
+ * had nothing left to express, and the maintainer asked for "just a Medium
+ * Round Baler and Medium Square Baler". Both being Medium is only expressible
+ * with shape as the kind.
  *
  * A square bale is its round twin at 1.5x the weight: fewer per acre, more per
  * bale, plus ~10% per ton because squares stack tight. Storage counts a bale as
@@ -39,16 +39,20 @@ const ROUND_TO_SQUARE: Array<[BaleProduct, BaleProduct]> = [
   ["straw", "strawSquare"],
 ];
 
-describe("the Large baler is the square baler", () => {
-  it("only the Large tier makes square bales", () => {
-    expect(gameConfig.equipment.bailer.small.makesSquareBales).toBeFalsy();
-    expect(gameConfig.equipment.bailer.medium.makesSquareBales).toBeFalsy();
-    expect(gameConfig.equipment.bailer.large.makesSquareBales).toBe(true);
+describe("shape is the baler KIND, not a size tier", () => {
+  // Shape WAS the Large size tier when square bales landed earlier the same
+  // day. Once the baler lost its working width (it clears the windrow, whatever
+  // laid it) the size tiers had nothing left to express, and the maintainer
+  // asked for "just a Medium Round Baler and Medium Square Baler" — which only
+  // works if shape is the kind.
+  it("neither baler carries a working width of its own", () => {
+    expect(gameConfig.equipment.bailer.medium.widthFt).toBe(0);
+    expect(gameConfig.equipment.squareBaler.medium.widthFt).toBe(0);
   });
 
-  it("balers are three real sizes, widening as they go", () => {
-    expect(gameConfig.equipment.bailer.small.widthFt).toBeLessThan(gameConfig.equipment.bailer.medium.widthFt);
-    expect(gameConfig.equipment.bailer.medium.widthFt).toBeLessThan(gameConfig.equipment.bailer.large.widthFt);
+  it("the square baler costs more than the round one", () => {
+    expect(gameConfig.equipment.squareBaler.medium.price)
+      .toBeGreaterThan(gameConfig.equipment.bailer.medium.price);
   });
 });
 
@@ -98,12 +102,12 @@ describe("which product a field ends up with", () => {
 });
 
 describe("baling a field for real", () => {
-  function baleWith(size: "medium" | "large"): { save: SaveState; field: Field } {
+  function baleWith(kind: "bailer" | "squareBaler"): { save: SaveState; field: Field } {
     const save = newGame();
     save.money = 20_000_000;
     buyBuildingAt(save, "baleArea", [-400, -400]);
     buyAgent(save, "tractor", "large", [0, 0]);
-    buyImplement(save, "bailer", size);
+    buyImplement(save, kind, "medium");
     const field: Field = {
       id: "field-1", parcelId: "p", boundary, status: "harvested",
       lastCrop: "wheat", forageReady: true, windrowed: true,
@@ -120,22 +124,22 @@ describe("baling a field for real", () => {
     return { save, field };
   }
 
-  it("a Medium baler leaves round straw", () => {
-    const { field } = baleWith("medium");
+  it("a round baler leaves round straw", () => {
+    const { field } = baleWith("bailer");
     expect(field.baleProduct).toBe("straw");
   });
 
-  it("a Large baler leaves SQUARE straw, and fewer of them", () => {
-    const round = baleWith("medium");
-    const square = baleWith("large");
+  it("a square baler leaves SQUARE straw, and fewer of them", () => {
+    const round = baleWith("bailer");
+    const square = baleWith("squareBaler");
     expect(square.field.baleProduct).toBe("strawSquare");
     expect(square.field.baleLocations?.length ?? 0).toBeGreaterThan(0);
     expect(square.field.baleLocations!.length).toBeLessThan(round.field.baleLocations!.length);
   });
 
   it("...carrying about the same tonnage off the field either way", () => {
-    const round = baleWith("medium");
-    const square = baleWith("large");
+    const round = baleWith("bailer");
+    const square = baleWith("squareBaler");
     const tons = (f: Field) => (f.baleLocations?.length ?? 0) * baleTonsOf(f.baleProduct!);
     // Same grass grew; only the packaging changed. Loose tolerance: bale counts
     // are whole numbers and the last partial bale is discarded.

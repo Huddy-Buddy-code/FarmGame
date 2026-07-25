@@ -135,6 +135,21 @@ export interface Field {
   /** Set true the moment a rake starts working this field — unlocks the baler
    * (which may start before the rake finishes). Cleared once baled/plowed. */
   windrowed?: boolean;
+  /**
+   * How wide a swath the material lying on this field represents, in meters
+   * (2026-07-24) — the BALER's effective working width.
+   *
+   * A baler has no width of its own: it swallows a windrow, so how much ground
+   * it clears per pass is set by whatever laid that windrow down. A rake
+   * gathers its own width into one row, so a raked field takes the RAKE's
+   * width. Straw skips the rake entirely (the combine drops it in a windrow as
+   * it cuts), so a straw field takes the COMBINE HEADER's width.
+   *
+   * Written by whichever task last laid material out — harvest, mow, then rake
+   * if there is one — which gets the ordering right for free: harvest sets it,
+   * and a rake (when the crop needs one) overwrites it afterwards.
+   */
+  windrowWidthM?: number;
   /** Weed pressure (visual + weeding-task target): set once per crop when the
    * weeding window opens on a standing crop that hasn't been sprayed; the
    * weeding task's sweep clears it strip-by-strip. */
@@ -273,7 +288,7 @@ export interface Agent {
 export interface Implement {
   id: string;
   kind:
-    | "plow" | "planter" | "sprayer" | "rake" | "bailer" | "grainTrailer"
+    | "plow" | "planter" | "sprayer" | "rake" | "bailer" | "squareBaler" | "grainTrailer"
     | "mower" | "mulcher" | "haySpikes" | "baleTrailer"
     | "cornHeader" | "grainHeader";
   size: EquipmentSize;

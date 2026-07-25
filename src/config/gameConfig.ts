@@ -218,15 +218,24 @@ export interface GameConfig {
     /** Rake implement (windrows harvested forage into rows): price + width in
      * feet. Same hitch rule as the plow. Sold in one size (25 ft). */
     rake: Record<EquipmentSize, { price: number; widthFt: number }>;
-    /** Baler implement (collects windrowed forage into bales): price + width in
-     * feet. Same hitch rule; runs after (or alongside) the rake.
+    /**
+     * ROUND baler (`bailer` keeps its long-standing internal spelling). Picks up
+     * a windrow and rolls it; runs after (or alongside) the rake.
      *
-     * Three sizes as of 2026-07-24, and the size is what decides BALE SHAPE:
-     * Small and Medium are round balers, and the Large is a large SQUARE baler
-     * (`makesSquareBales`). That's the maintainer's "the baler you hitch decides
-     * shape", expressed as a tier rather than a separate implement kind — a
-     * small square baler isn't a machine that exists on this scale of farm. */
-    bailer: Record<EquipmentSize, { price: number; widthFt: number; makesSquareBales?: boolean }>;
+     * `widthFt` is 0 and unused (maintainer note, 2026-07-24: "the baler itself
+     * does not have a working width"). A baler swallows a windrow, so the ground
+     * it clears per pass is set by whatever LAID that windrow — the rake, or the
+     * combine header on straw, which skips the rake. See `Field.windrowWidthM`.
+     *
+     * With width gone, the size tiers had nothing left to express, so there is
+     * one of each baler at Medium. Shape is now the implement KIND rather than a
+     * size tier, which is what lets both be Medium.
+     */
+    bailer: Record<EquipmentSize, { price: number; widthFt: number }>;
+    /** SQUARE baler (2026-07-24). Same windrow-driven width as the round one;
+     * its bales are the heavier, denser, better-stacking square products (see
+     * `baleProducts`). Pricier for it. */
+    squareBaler: Record<EquipmentSize, { price: number; widthFt: number }>;
     /** Mower implement (2026-07-13): CUTS a perennial forage field (grass/
      * alfalfa) — the "harvest" for those crops, in place of the combine. Leaves
      * cut material to rake + bale. Three real sizes as of 2026-07-24
@@ -700,12 +709,18 @@ export const gameConfig: GameConfig = {
       medium: { price: 55_000, widthFt: 30 },
       large: { price: 90_000, widthFt: 50 },
     },
+    // Balers: one of each shape, both Medium, both zero-width (the windrow sets
+    // the width). The three size slots exist only because IMPLEMENT_CONFIG is a
+    // Record over EquipmentSize; only Medium is ever sold or built.
     bailer: {
-      small: { price: 90_000, widthFt: 15 },
-      medium: { price: 130_000, widthFt: 25 },
-      // The Large Square Baler: pricier and wider, and its bales are worth more
-      // per ton — the payoff for a machine only a large tractor can pull.
-      large: { price: 260_000, widthFt: 30, makesSquareBales: true },
+      small: { price: 130_000, widthFt: 0 },
+      medium: { price: 130_000, widthFt: 0 },
+      large: { price: 130_000, widthFt: 0 },
+    },
+    squareBaler: {
+      small: { price: 260_000, widthFt: 0 },
+      medium: { price: 260_000, widthFt: 0 },
+      large: { price: 260_000, widthFt: 0 },
     },
     // Mower — three real sizes, all sold (maintainer spec, 2026-07-24).
     mower: {

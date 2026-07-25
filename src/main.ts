@@ -93,7 +93,7 @@ import {
 } from "./sim/schedule";
 import type { ScheduleTaskType } from "./sim/schedule";
 import type { FarmTask, Agent, Implement, FieldStatus, TaskType, CompletedTask, FieldPlan } from "./state/saveState";
-import { gameConfig } from "./config/gameConfig";
+import { gameConfig, FEET_TO_METERS } from "./config/gameConfig";
 import type { CropId, EquipmentSize, BaleProduct } from "./config/gameConfig";
 
 // Which county to play. Later this comes from a save / county picker.
@@ -957,6 +957,7 @@ const IMPLEMENT_GROUP: Record<ImplementKind, ImplementGroup> = {
   mower: "Hay & Silage Tools",
   rake: "Hay & Silage Tools",
   bailer: "Hay & Silage Tools",
+  squareBaler: "Hay & Silage Tools",
   haySpikes: "Hay & Silage Tools",
   grainTrailer: "Trailers",
   baleTrailer: "Trailers",
@@ -964,7 +965,7 @@ const IMPLEMENT_GROUP: Record<ImplementKind, ImplementGroup> = {
 
 const IMPLEMENT_KIND_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake",
-  bailer: "Baler", grainTrailer: "Grain Trailer", mower: "Mower",
+  bailer: "Round Baler", squareBaler: "Square Baler", grainTrailer: "Grain Trailer", mower: "Mower",
   mulcher: "Mulcher", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
   cornHeader: "Corn Header", grainHeader: "Grain Header",
 };
@@ -1062,18 +1063,25 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
       primary: `${onboard} / ${capB} bale${capB === 1 ? "" : "s"}`,
     };
   } else if (task.type === "bale") {
-    const impl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
-    const size = impl?.size ?? "medium";
-    iconSvg = implementIconHtml("bailer", size, IMPLEMENT_QUEUE_ICON_PX);
-    info = implementInfoLines("bailer", size);
-    // The baler's real hopper (like the combine): tons gathered toward the next
-    // bale, resetting to 0 each time one ejects. Total = one bale's worth.
-    // One bale's worth — product-dependent since square bales arrived.
+    const impl = save.implements.find(
+      (i) => i.attachedTo === agent.id && (i.kind === "bailer" || i.kind === "squareBaler"),
+    );
+    if (!impl) return "";
+    iconSvg = implementIconHtml(impl.kind, impl.size, IMPLEMENT_QUEUE_ICON_PX);
+    // A baler has no width of its own (2026-07-24) — it clears whatever the
+    // windrow is wide, so that's what's worth showing here.
     const field = save.fields.find((f) => f.id === task.fieldId);
-    const balerImpl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
-    const square = !!balerImpl && !!gameConfig.equipment.bailer[balerImpl.size].makesSquareBales;
+    const swathFt = field?.windrowWidthM ? field.windrowWidthM / FEET_TO_METERS : undefined;
+    info = {
+      name: `${IMPLEMENT_KIND_NAME[impl.kind]} - ${SIZE_LABEL[impl.size]}`,
+      detail: swathFt ? `${swathFt.toFixed(0)} ft windrow` : "picks up the windrow",
+    };
+    // The baler's real hopper (like the combine): tons gathered toward the next
+    // bale, resetting to 0 each time one ejects. Total = one bale's worth,
+    // which is product-dependent since square bales arrived.
+    const square = impl.kind === "squareBaler";
     const baleTons = field ? baleTonsOf(baleProductForField(field, square)) : gameConfig.forage.baleTons;
-    const cargo = impl?.cargoTons ?? 0;
+    const cargo = impl.cargoTons ?? 0;
     fill = {
       pct: baleTons > 0 ? Math.min(100, (cargo / baleTons) * 100) : 0,
       primary: `${cargo.toFixed(2)} / ${baleTons} t`,
@@ -2796,12 +2804,22 @@ function buildEquipShop(): void {
   line("Rake", rakeIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${gameConfig.equipment.rake[s].widthFt} ft · windrows forage`, price: implementPrice("rake", s), onBuy: buyImpl("rake", s),
   }])));
-  // Baler: the SIZE decides bale shape — Small/Medium are round balers, the
-  // Large is a large square baler whose bales are heavier and worth more per ton.
-  line("Baler", implementIconHtml("bailer", "medium", 26), Object.fromEntries(SIZES.map((s) => [s, {
-    spec: `${gameConfig.equipment.bailer[s].widthFt} ft pickup · ${gameConfig.equipment.bailer[s].makesSquareBales ? "square bales" : "round bales"}`,
-    price: implementPrice("bailer", s), onBuy: buyImpl("bailer", s),
-  }])));
+  // Balers: one of each SHAPE, both Medium (2026-07-24). Neither has a working
+  // width — a baler clears whatever the windrow is wide, set by the rake (or by
+  // the combine header on straw, which skips the rake) — so there was nothing
+  // left for size tiers to express.
+  line("Round Baler", implementIconHtml("bailer", "medium", 26), {
+    medium: {
+      spec: "round bales · picks up the windrow",
+      price: implementPrice("bailer", "medium"), onBuy: buyImpl("bailer", "medium"),
+    },
+  });
+  line("Square Baler", implementIconHtml("squareBaler", "medium", 26), {
+    medium: {
+      spec: "square bales · heavier, worth more per ton",
+      price: implementPrice("squareBaler", "medium"), onBuy: buyImpl("squareBaler", "medium"),
+    },
+  });
   // Hay Spikes: in-field bale collector — Small (1 bale) & Medium (2).
   line("Hay Spikes", haySpikesIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
     spec: `${haySpikesCapacityBales(s)} bale${haySpikesCapacityBales(s) === 1 ? "" : "s"} · collects`, price: implementPrice("haySpikes", s), onBuy: buyImpl("haySpikes", s),
