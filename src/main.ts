@@ -1916,13 +1916,20 @@ function refreshInventory(force = false) {
 
     const card = document.createElement("div");
     card.className = "store-card";
+    // The crop dropdown rides TOP-CENTRE of the head row (maintainer request,
+    // 2026-07-24) rather than on its own full-width line below, which is what
+    // shortens the card. The name line drops the crop with it — the dropdown
+    // is now what says which crop this is, so repeating it was just height.
     card.innerHTML = `
       <div class="sc-head">
-        <span class="icon">${BUILDING_ICON.silo}</span>
-        <span class="sc-title">
-          <span class="sc-name">${name} · ${SIZE_LABEL[silo.size ?? "small"]}</span>
-          <span class="sc-sub">${crop ? `${gameConfig.crops[crop].emoji} ${escapeHtml(gameConfig.crops[crop].name)}` : "Not assigned"} · ${capacity.toLocaleString()} t capacity</span>
+        <span class="sc-headleft">
+          <span class="icon">${BUILDING_ICON.silo}</span>
+          <span class="sc-title">
+            <span class="sc-name">${name} · ${SIZE_LABEL[silo.size ?? "small"]}</span>
+            <span class="sc-sub">${capacity.toLocaleString()} t capacity</span>
+          </span>
         </span>
+        <span class="sc-headright"></span>
       </div>
       <div class="sc-bar"><div class="sc-fill ${level}" style="width:${pct.toFixed(1)}%"></div>
         <span class="sc-bar-label">${crop ? `${tons.toFixed(1)} / ${capacity.toLocaleString()} t · ${pct.toFixed(0)}%` : "Pick a crop to start filling it"}</span>
@@ -1941,7 +1948,7 @@ function refreshInventory(force = false) {
       assignSiloCrop(save, silo.id, (select.value || undefined) as CropId | undefined);
       refreshInventory(true);
     });
-    card.appendChild(select);
+    card.querySelector(".sc-head")!.insertBefore(select, card.querySelector(".sc-headright"));
 
     const actions = document.createElement("div");
     actions.className = "sc-actions";
@@ -1985,11 +1992,14 @@ function refreshInventory(force = false) {
       card.className = "store-card";
       card.innerHTML = `
         <div class="sc-head">
-          <span class="icon">${BUILDING_ICON[b.kind]}</span>
-          <span class="sc-title">
-            <span class="sc-name">${name}</span>
-            <span class="sc-sub">${cap.toLocaleString()} bale capacity</span>
+          <span class="sc-headleft">
+            <span class="icon">${BUILDING_ICON[b.kind]}</span>
+            <span class="sc-title">
+              <span class="sc-name">${name}</span>
+              <span class="sc-sub">${cap.toLocaleString()} bale capacity</span>
+            </span>
           </span>
+          <span class="sc-headright"></span>
         </div>
         <div class="sc-bar"><div class="sc-fill ${level}" style="width:${pct.toFixed(1)}%"></div>
           <span class="sc-bar-label">${stored.toLocaleString()} / ${cap.toLocaleString()} bales · ${pct.toFixed(0)}%</span>
@@ -2011,7 +2021,7 @@ function refreshInventory(force = false) {
         assignBaleStorageProduct(save, b.id, (select.value || undefined) as BaleProduct | undefined);
         refreshInventory(true);
       });
-      card.appendChild(select);
+      card.querySelector(".sc-head")!.insertBefore(select, card.querySelector(".sc-headright"));
 
       const actions = document.createElement("div");
       actions.className = "sc-actions";

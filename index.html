@@ -607,13 +607,22 @@
          object — name, assignment, fill bar and (for bales) what's actually in
          there — replacing the old row-plus-separate-bar pair. --------------- */
       .store-card {
-        position: relative; display: flex; flex-direction: column; gap: 5px;
+        position: relative; display: flex; flex-direction: column; gap: 4px;
         background: var(--cream-2); border: 1.5px solid var(--wood);
-        border-radius: 10px; padding: 8px 10px; margin: 5px 0; cursor: pointer;
+        border-radius: 10px; padding: 6px 10px; margin: 5px 0; cursor: pointer;
         transition: border-color 0.15s, box-shadow 0.15s;
       }
       .store-card.selected { border-color: var(--green-dark); box-shadow: 0 0 0 2px rgba(93, 138, 58, 0.28); }
-      .store-card .sc-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+      /* Three columns so the crop dropdown is genuinely centred in the CARD,
+         not just in the space left over (maintainer request, 2026-07-24). The
+         right column is an empty spacer the same width as the hover actions, so
+         a wide dropdown can never slide under them. */
+      .store-card .sc-head {
+        display: grid; grid-template-columns: 1fr auto 1fr;
+        align-items: center; gap: 8px; min-width: 0;
+      }
+      .store-card .sc-headleft { display: flex; align-items: center; gap: 8px; min-width: 0; }
+      .store-card .sc-headright { min-width: 62px; }
       .store-card .sc-head .icon { font-size: 22px; line-height: 1; flex: 0 0 auto; }
       .store-card .sc-title { display: flex; flex-direction: column; min-width: 0; }
       .store-card .sc-name {
@@ -664,7 +673,11 @@
       }
       .store-card:hover .sc-actions, .store-card.selected .sc-actions { visibility: visible; opacity: 1; }
       .store-card .sc-actions button { padding: 2px 6px; font-size: 13px; }
-      .store-card .inv-crop-select { width: 100%; font-size: 11px; padding: 2px 4px; }
+      /* In the head row now, not on its own line under the card. */
+      .store-card .sc-head .inv-crop-select {
+        justify-self: center; width: auto; max-width: 100%;
+        font-size: 11px; padding: 3px 5px;
+      }
 
       /* ---------- Finance tab (loans) ---------- */
       #financetab h2 { margin: 0 0 2px; font-size: 18px; }
