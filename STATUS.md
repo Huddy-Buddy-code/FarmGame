@@ -1714,6 +1714,68 @@ batch.
 **Save-compat:** existing saves are granted both combine headers on load, or
 their combine would be unable to cut anything.
 
+## Latest changes (2026-07-24, follow-up pass: art, sim rework, balance — 16 commits)
+
+Maintainer-driven iteration on top of the three batches above.
+
+### Art
+- Sprites in: `Tractor_Medium_HaySpike[Bale].png`, `Windrower_sideleft.png`.
+  All three arrived as `<name>.png.png`; the parser strips ONE `.png`, so the
+  hay-spike pair was registering as the plain `tractor|medium` sprite and
+  replacing the normal Medium tractor art. Windrower padded 1536x1024 ->
+  square (machineImgTag forces square). Original in `_drafts/`.
+- **The windrower sprite still wants a regenerate**: 3/4 perspective + a baked
+  drop shadow, where every other sprite is a flat side profile. It rotates with
+  heading, so the perspective disagrees with the map as it turns.
+- `_drafts/` UNTRACKED + gitignored — ~19 MB swept in by a `git add -A src`
+  earlier the same day. Blobs remain in history 7a5dd03..a4316d7.
+
+### Sim
+- **Grain carts** (`sim/tasks.ts`): ONE cart works a combine at a time (the
+  most-loaded; others stage at the gate), and unloading is ON THE GO — called at
+  `callCartAtFraction` 0.85, transfers at `unloadTonsPerMinute` while the
+  combine keeps cutting. Carts also now wait for a FULL load before running to
+  the silo (`cartSiloRunFraction` removed).
+- **Baler width comes from the FIELD**, not the machine: new
+  `Field.windrowWidthM`, written by harvest/mow and overwritten by the rake. So
+  a raked crop bales at the rake's width, straw at the combine header's. Both
+  balers are `widthFt: 0`.
+- **Bale shape is the implement KIND** now (`bailer` round / `squareBaler`),
+  not a size tier — forced by both balers being Medium once width left. `bale`
+  has no `TASK_IMPLEMENT` entry; `balerKindFor()` resolves it per rig.
+  Save migration: Large `bailer` -> `squareBaler`, Small -> Medium.
+- **Windrower**: drives home + counts against barn slots (`parksInBarn`, which
+  three sites had spelled as "tractor or harvester"); no phantom Mower in the
+  Work Queue; queued-cut ETA uses ITS width.
+- **Silos cap in BUSHELS** (10k/25k/50k) like everything else — a ton-cap made
+  a bin hold 75% more oats by volume than corn. `tonsPerBushel` moved to the
+  config (buildings.ts needs it; tasks.ts already imports buildings).
+
+### Balance
+- `harvestSpeedKmh`/`plowSpeedKmh` = 7 (was a shared 12, ~2x a real combine).
+  Measured on 40 ac: 2 carts 103 -> 162 min, but combine idle 5% -> 0%. The
+  speed cut partly UNDOES the bushel hauling bottleneck — these two push
+  against each other.
+- **Silo COSTS reviewed, deliberately unchanged**: $9.00/$8.00/$7.00 per bushel
+  against a real ~$3.50/$3.00/$2.70, so ~2.6x. Everything else in the game
+  (land, tractors, combines, headers, carts) sits inside its real range, so
+  silos are the sole outlier — kept expensive as a balance lever, not an
+  oversight.
+
+### UI (none of it visually verified)
+- Field Schedule: a crop dropdown PER ROW, icon-only crop buttons (46x40),
+  labels "Current"/"Next"/"Then" left-aligned, per-row remove.
+- Work Queue: fill bar owns its row (the bushel totals had starved it to a
+  stub and its label wrapped + clipped); label 9.5px, nowrap. Headers hidden
+  from map icons (combine art already includes one).
+- Inventory: farm-wide **auto-sell toggle** (`save.sellAll`) that products
+  inherit — a default, not a bulk action, so crops never grown pick it up.
+  Storage cards: crop dropdown top-centre in a 3-col grid.
+- Square bales draw as a RECTANGLE everywhere (`baleIconFor`); the map-marker
+  cache gained the product in its key, or a re-baled field kept its old shape.
+
+**587/587 passing, typecheck + build clean.**
+
 ## Known gaps / unverified
 
 - **Field panel Schedule calendar drag-and-drop is logic-tested only** — no
