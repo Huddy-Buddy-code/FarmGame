@@ -439,11 +439,16 @@ function repaintGrowthStages(now: number, alreadyPainted: { id: string }[]) {
 // game's own cozy palette, not a real manufacturer's colors/logo.
 const AGENT_EMOJI: Record<string, string> = { tractor: "🚜", harvester: "🌾", windrower: "🌿" };
 
-/** "Minor" implements (maintainer request, 2026-07-21): small enough
- * (hay spikes bolt straight to the loader, no separate silhouette worth
- * drawing) that they skip the map marker's implement badge entirely —
- * the tractor's dot stays its normal single-icon size, as if bare. */
-const MINOR_IMPLEMENT_KINDS = new Set<string>(["haySpikes"]);
+/** Implements that get NO badge beside their machine on the map — the machine's
+ * own icon is the whole picture.
+ *
+ * Hay spikes (2026-07-21) bolt straight to the loader: no separate silhouette
+ * worth drawing, and the Small/Medium tractors have composite art showing them
+ * anyway. The two combine HEADERS joined them 2026-07-24 (maintainer request:
+ * "hide the corn header and grain header from the field icons") — every combine
+ * sprite is already drawn WITH a header on the front, so badging one alongside
+ * would draw the same part twice. */
+const MINOR_IMPLEMENT_KINDS = new Set<string>(["haySpikes", "cornHeader", "grainHeader"]);
 
 // Realistic side-profile machinery SVGs live in ui/icons.ts (maintainer
 // request, 2026-07-12) — one shared set for map dots, panels, and the shop.
@@ -994,7 +999,12 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
 
   let iconSvg: string;
   let info: { name: string; detail: string };
-  let fill: { pct: number; current: string; total: string } | null = null;
+  // `primary` rides ON the bar (with the %), `secondary` goes on its own line
+  // beneath it. Splitting them was forced by the bushel change (2026-07-24):
+  // the total used to be "50 t" and now reads "250 bu / 7.0 t", and as a
+  // non-shrinking flex item beside the bar it starved the bar down to a stub
+  // (maintainer report + screenshot).
+  let fill: { pct: number; primary: string; secondary?: string } | null = null;
 
   if (task.type === "harvest") {
     const size = agent.size ?? "medium";
@@ -1016,8 +1026,10 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     const onboard = agent.grainOnboard ?? 0;
     fill = {
       pct: capT > 0 ? Math.min(100, (onboard / capT) * 100) : 0,
-      current: `${(onboard / tonsPerBushel(crop)).toFixed(0)} bu · ${onboard.toFixed(1)} t`,
-      total: `${capBu.toLocaleString()} bu · ${capT.toFixed(1)} t`,
+      // Volume on the bar — that's what the tank physically holds — with the
+      // saleable tonnage underneath.
+      primary: `${(onboard / tonsPerBushel(crop)).toFixed(0)} / ${capBu.toLocaleString()} bu`,
+      secondary: `${onboard.toFixed(1)} / ${capT.toFixed(1)} t ${gameConfig.crops[crop].name.toLowerCase()}`,
     };
   } else if (task.type === "unloadHarvester") {
     const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "grainTrailer");
@@ -1030,8 +1042,8 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     const cargo = trailer.cargoTons ?? 0;
     fill = {
       pct: capT > 0 ? Math.min(100, (cargo / capT) * 100) : 0,
-      current: `${(cargo / tonsPerBushel(haulCrop)).toFixed(0)} bu · ${cargo.toFixed(1)} t`,
-      total: `${capBu.toLocaleString()} bu · ${capT.toFixed(1)} t`,
+      primary: `${(cargo / tonsPerBushel(haulCrop)).toFixed(0)} / ${capBu.toLocaleString()} bu`,
+      secondary: `${cargo.toFixed(1)} / ${capT.toFixed(1)} t ${gameConfig.crops[haulCrop].name.toLowerCase()}`,
     };
   } else if (task.type === "haulBales") {
     const spikes = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "haySpikes");
@@ -1044,8 +1056,7 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     const onboard = spikes.cargoBales ?? 0;
     fill = {
       pct: capB > 0 ? Math.min(100, (onboard / capB) * 100) : 0,
-      current: `${onboard} bale${onboard === 1 ? "" : "s"}`,
-      total: `${capB}`,
+      primary: `${onboard} / ${capB} bale${capB === 1 ? "" : "s"}`,
     };
   } else if (task.type === "bale") {
     const impl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "bailer");
@@ -1062,8 +1073,8 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     const cargo = impl?.cargoTons ?? 0;
     fill = {
       pct: baleTons > 0 ? Math.min(100, (cargo / baleTons) * 100) : 0,
-      current: `${cargo.toFixed(2)} t`,
-      total: `${baleTons} t`,
+      primary: `${cargo.toFixed(2)} / ${baleTons} t`,
+      secondary: "toward the next bale",
     };
   } else {
     const kind = TASK_IMPLEMENT[task.type];
@@ -1085,15 +1096,22 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
 
 /** Wrap one implement into a Work-Queue sub-row (icon + name/detail + optional
  * fill bar). Shared by the collector row and the Bale Trailer row. */
-function implRow(iconSvg: string, info: { name: string; detail: string }, fill: { pct: number; current: string; total: string } | null): string {
+function implRow(
+  iconSvg: string,
+  info: { name: string; detail: string },
+  fill: { pct: number; primary: string; secondary?: string } | null,
+): string {
+  // The bar takes the WHOLE row (2026-07-24). It used to share the row with a
+  // non-shrinking total off to the right, which was fine at "50 t" and hopeless
+  // once capacities read "250 bu / 7.0 t" — the bar collapsed to a stub and its
+  // own centred label overflowed it.
   const fillHtml = fill
     ? `<div class="impl-fillrow">
         <span class="impl-fill">
           <span class="impl-fill-bar" style="width:${fill.pct.toFixed(0)}%"></span>
-          <span class="impl-fill-label">${fill.current} · ${fill.pct.toFixed(0)}%</span>
+          <span class="impl-fill-label">${fill.primary} · ${fill.pct.toFixed(0)}%</span>
         </span>
-        <span class="impl-total">${fill.total}</span>
-      </div>`
+      </div>${fill.secondary ? `<div class="impl-fillsub">${fill.secondary}</div>` : ""}`
     : "";
   return `<div class="qr-impl">
       <span class="impl-icon">${iconSvg}</span>
@@ -1126,8 +1144,7 @@ function implRowForBaleTrailer(task: FarmTask): string {
   const info = { name: `${base.name} · ${tAgent.name}`, detail: phase ? `${base.detail} · ${phase}` : base.detail };
   const fill = {
     pct: cap > 0 ? Math.min(100, (onboard / cap) * 100) : 0,
-    current: `${onboard} bale${onboard === 1 ? "" : "s"}`,
-    total: `${cap}`,
+    primary: `${onboard} / ${cap} bales`,
   };
   const iconSvg = machineIconHtml(tAgent.kind, tAgent.size, IMPLEMENT_QUEUE_ICON_PX) + trailerIconHtml(trailer, IMPLEMENT_QUEUE_ICON_PX);
   return implRow(iconSvg, info, fill);

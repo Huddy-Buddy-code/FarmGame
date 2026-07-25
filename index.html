@@ -1055,10 +1055,17 @@
       .qr-impl .impl-body { flex: 1; min-width: 0; }
       .qr-impl .impl-name { font-size: 12px; font-weight: 700; color: var(--ink); line-height: 1.2; }
       .qr-impl .impl-detail { font-size: 11.5px; color: #8a7658; line-height: 1.2; }
-      .impl-fillrow { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+      /* The bar owns the full row width (2026-07-24) — see implRow. */
+      .impl-fillrow { display: flex; align-items: center; margin-top: 3px; }
       .impl-fill {
-        position: relative; flex: 1; height: 16px; border-radius: 999px; overflow: hidden;
+        position: relative; flex: 1 1 auto; min-width: 0; height: 18px;
+        border-radius: 999px; overflow: hidden;
         background: var(--cream); border: 1.5px solid var(--wood);
+      }
+      /* Second unit (tonnage under a bushel bar, etc.) on its own line. */
+      .impl-fillsub {
+        font-size: 11px; color: #8a7658; line-height: 1.25; margin-top: 2px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       }
       .impl-fill-bar {
         display: block; height: 100%; width: 0%; background: var(--gold);
@@ -1069,7 +1076,8 @@
         font-size: 11px; font-weight: 700; color: var(--wood-dark);
         text-shadow: 0 1px 0 rgba(255,255,255,0.55);
       }
-      .impl-total { flex-shrink: 0; font-size: 11px; font-weight: 700; color: #8a7658; }
+      /* REMOVED 2026-07-24: `.impl-total`. The total moved onto the bar itself
+         ("157 / 250 bu") and the second unit to `.impl-fillsub` beneath. */
 
       /* Agent dots on the map (brief §9 "GPS dots", emoji edition). Root is a
          plain positioning box ONLY — MapLibre writes `transform` on it to place
