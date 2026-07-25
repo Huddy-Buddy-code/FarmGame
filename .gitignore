@@ -8,3 +8,9 @@ dist
 # again, these shadow the .ts sources in Vite's resolution order.
 src/**/*.js
 vite.config.js
+
+# Scratch/AI-generation art that isn't wired into the game. Only correctly-named
+# sprites at the top of src/assets/Equipment/ are real assets (see
+# src/ui/machineImages.ts). These drafts were swept in by a `git add -A src` on
+# 2026-07-24 and untracked again the same day — ~19 MB of images nothing loads.
+src/assets/Equipment/_drafts/
