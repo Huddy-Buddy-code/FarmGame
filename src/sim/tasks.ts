@@ -1968,6 +1968,22 @@ function assignGrainCart(save: SaveState, task: FarmTask, events: TaskEvent[]): 
  * queued field work"). Only reserves as many tractors as there are uncrewed
  * harvests, so surplus tractors still get field work done. */
 function shouldReserveForHarvest(save: SaveState, tractor: Agent): boolean {
+  // TRACTORS ONLY (maintainer report, 2026-07-25: "game stuck, waiting on a
+  // harvester for a queued task. The harvester is Idle"). The pickup loop runs
+  // this over EVERY idle agent, so without this guard a COMBINE could reserve
+  // ITSELF as a grain cart for the very harvest it was meant to be driving —
+  // and then never drive it. Every condition below was satisfiable by one:
+  // `canPull` only compares size classes so a loose trailer looks usable, a
+  // fleet with a combine obviously has one, the queued harvest counts ITSELF as
+  // uncrewed, and a farm with no spare tractor has zero free carts. One combine
+  // + one unhitched Grain Trailer + no idle tractor was a permanent deadlock —
+  // and an invisible one, since every ownership and size check genuinely passed
+  // so the ⚠️ blocked-work panel had nothing to report. Reachable by a windrower
+  // too (sized "large", so a Medium trailer looked crewable).
+  //
+  // Only tractors ever run `unloadHarvester` (TASK_AGENT_KIND), so nothing else
+  // has any business standing down for one.
+  if (tractor.kind !== "tractor") return false;
   if (!tractorCanUse(save, tractor, "grainTrailer")) return false;
   // No combine in the fleet → nothing will ever crew; never strand the tractor.
   if (!save.agents.some((a) => a.kind === "harvester")) return false;

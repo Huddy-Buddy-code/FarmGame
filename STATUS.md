@@ -1989,6 +1989,44 @@ Deferred with the maintainer's list still open: reveal-pipeline upload
 throttling via `setAnimating` (medium, touches reveal lifecycle), sim tick at
 render rate, size-tiered overlay resolution for big fields.
 
+## 2026-07-25 — BUGFIX: combine reserved itself as its own grain cart
+
+Maintainer report: "game stuck, waiting on a harvester for a queued task. The
+harvester is Idle. I have the correct headers and the field is ready."
+
+Real deadlock, reproduced in a test before any fix. `shouldReserveForHarvest`
+holds an idle cart-capable TRACTOR back from field work so it stays free to crew
+a combine's unload (2026-07-20). Its doc says "tractor", its parameter is named
+`tractor` — but the pickup loop runs it over EVERY idle agent, and every
+condition in it was satisfiable by a combine:
+
+- "can use a grain trailer" — `canPull` only compares size classes;
+- "a combine exists in the fleet" — trivially true;
+- "an uncrewed harvest exists" — the queued harvest counts ITSELF;
+- "not enough free carts" — a farm with no spare tractor has zero.
+
+So the combine stood down to be a grain cart for the very harvest it was meant
+to be driving. One combine + one unhitched Grain Trailer + no idle tractor =
+permanent stall, and the ⚠️ blocked-work panel stayed silent because every
+ownership and size check genuinely passed. Reachable by a windrower too
+(sized "large", so a loose Medium trailer looked crewable) — a queued harvest
+elsewhere would stall a cut.
+
+- Fix: one-line kind guard at the top of `shouldReserveForHarvest`. Only
+  tractors ever run `unloadHarvester` (TASK_AGENT_KIND), so nothing else has any
+  business standing down for one.
+- `tests/harvestDeadlock.test.ts` (4) — the reported shape, the windrower
+  variant, the no-trailer control, and one asserting `blockedWork` reports
+  NOTHING (guarding the diagnosis: this is why it read as a hang). Verified by
+  reverting the guard — 2 fail.
+- The tractor's stand-down behaviour is unchanged and already covered by
+  harvestUnload.test.ts:471, which samples a whole run rather than one instant;
+  a duplicate I wrote here was brittle and got dropped.
+- **Existing saves need no repair** — the check is evaluated live each tick, so
+  loading a stuck save on this build unsticks it.
+
+**630/630 passing, typecheck + build clean.**
+
 ## Known gaps / unverified
 
 - **Field panel Schedule calendar drag-and-drop is logic-tested only** — no
