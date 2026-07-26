@@ -23,6 +23,15 @@ that.
   relevant section, not the whole file, once you know what you're looking for.
 - Update `STATUS.md` at the end of a session (brief §13) — keep it terse,
   changed-files-and-why, not a narrative.
+- **Never edit source files with PowerShell** (`Set-Content`, `Out-File`,
+  `>`/`>>`). Windows PowerShell 5.1 writes a BOM and re-encodes the file's
+  existing UTF-8 bytes as ANSI, so every `—`, `§`, `→` and `⚠️` in the comments
+  turns into mojibake. It happened to `src/sim/tasks.ts` on 2026-07-25 while
+  toggling one line for a revert-check: 16 real lines, 602 changed, and it
+  compiled and passed all 630 tests because only comments were hit. Use the
+  Edit/Write tools, which encode correctly.
+  - Corollary: **check `git diff --stat` before committing.** A line count far
+    larger than the change is the tell; `git checkout -- <file>` and redo it.
 
 ## Machine sprites (2026-07-25)
 
