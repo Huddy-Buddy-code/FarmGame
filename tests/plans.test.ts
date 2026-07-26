@@ -292,7 +292,11 @@ describe("auto-manage runs the field's rotation plan", () => {
     const DEC_1 = 9 * minutesPerMonth();
     // Run through the whole of December without ever satisfying `done` — the
     // override should keep it un-plowed despite Dec being a legal plow month.
-    const afterDec = runUntil(save, DEC_1, () => false, minutesPerMonth() - 1);
+    // The cap stops a full STEP short of Jan 1 on purpose: `runUntil` advances
+    // BEFORE it re-checks, so a cap of minutesPerMonth() - 1 still lands one
+    // tick exactly ON the 1st of the next month — which is the chosen month,
+    // and the assertion below would be testing January, not December.
+    const afterDec = runUntil(save, DEC_1, () => false, minutesPerMonth() - 240);
     expect(field.status).toBe("stubble");
     // Continue into January — the chosen month — and it fires.
     runUntil(save, afterDec, () => field.status === "tilled");
@@ -309,7 +313,12 @@ describe("auto-manage runs the field's rotation plan", () => {
     };
     save.fields.push(field);
 
-    const afterApril = runUntil(save, APRIL_1, () => false, minutesPerMonth() - 1);
+    // Stops a full STEP short of May 1 — see the plow-override test above for
+    // why. This one had the bug for real: the stray May tick DID enqueue and
+    // finish the plant, and the test only passed because a 10 ft planter
+    // couldn't cover 100 acres inside one 240-minute tick. Widening the planter
+    // to a realistic 30 ft (2026-07-25) made it fit, and the latent bug bit.
+    const afterApril = runUntil(save, APRIL_1, () => false, minutesPerMonth() - 240);
     expect(field.crop).toBeUndefined(); // not planted in April despite being legal
     runUntil(save, afterApril, () => field.crop === "corn");
     expect(field.crop).toBe("corn"); // fires once May arrives

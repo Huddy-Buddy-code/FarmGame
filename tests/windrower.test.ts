@@ -59,9 +59,47 @@ describe("a windrower mows without a tractor or a mower", () => {
     expect(save.implements).toHaveLength(0); // it needed nothing hitched
   });
 
-  it("cuts at its own 40 ft width", () => {
-    expect(gameConfig.equipment.windrower.widthFt).toBe(40);
-    expect(windrowerWidthM()).toBeCloseTo(40 * FEET_TO_METERS, 6);
+  it("cuts at its own 25 ft width", () => {
+    // Narrowed from 40 ft in the 2026-07-25 realism pass — a real SP hay
+    // windrower runs a 16–18 ft rotary disc header, so 40 was fantasy. 25 ft
+    // plus its own faster speed is the compromise that keeps the machine worth
+    // buying; see `work.windrowerSpeedKmh`.
+    expect(gameConfig.equipment.windrower.widthFt).toBe(25);
+    expect(windrowerWidthM()).toBeCloseTo(25 * FEET_TO_METERS, 6);
+  });
+
+  it("cuts at its OWN speed, not a tractor's — same width, fewer hours", () => {
+    // The behavioural half of the 2026-07-25 change. Width alone no longer
+    // separates it from a Medium mower (both 25 ft), so if the machine's speed
+    // didn't reach the sim these two would finish in a dead heat.
+    function minutesToCut(build: (s: SaveState) => void): number {
+      const save = newGame();
+      save.money = 10_000_000;
+      build(save);
+      const field = hayField();
+      save.fields.push(field);
+      enqueueTask(save, field, "mow", MAY_1);
+      let now = MAY_1;
+      while (field.status !== "harvested" && now - MAY_1 < 200_000) {
+        now += 1;
+        tickFarming(save, now);
+        tickTasks(save, now, 1, () => 0.5);
+      }
+      expect(field.status).toBe("harvested");
+      return now - MAY_1;
+    }
+
+    const windrowerMins = minutesToCut((s) => buyAgent(s, "windrower", "large", [0, 0]));
+    const mowerMins = minutesToCut((s) => {
+      buyAgent(s, "tractor", "medium", [0, 0]);
+      buyImplement(s, "mower", "medium");
+    });
+    expect(gameConfig.equipment.windrower.widthFt).toBe(gameConfig.equipment.mower.medium.widthFt);
+    expect(windrowerMins).toBeLessThan(mowerMins);
+    // Both cut the same ground at the same width, so the time ratio is the
+    // speed ratio (travel to and from the yard is identical and small).
+    const speedRatio = gameConfig.work.windrowerSpeedKmh / gameConfig.work.fieldSpeedKmh;
+    expect(mowerMins / windrowerMins).toBeGreaterThan(1 + (speedRatio - 1) * 0.5);
   });
 
   it("is priced as one size — `size` doesn't change what it costs", () => {
@@ -210,10 +248,12 @@ describe("it carries no implement — it IS the mower", () => {
     expect(save.implements.some((i) => i.attachedTo === w.id)).toBe(false);
   });
 
-  it("a queued cut is estimated at the WINDROWER's 40 ft, not a mower's width", () => {
+  it("a queued cut is estimated at the WINDROWER's own width AND speed", () => {
     // estimateTaskHours looked up an owned Mower and, finding none, fell back
     // to a nominal "medium" 25 ft — so the Work Queue quoted a job length for
-    // an implement the farm doesn't own (2026-07-24).
+    // an implement the farm doesn't own (2026-07-24). The SPEED had to follow
+    // it 2026-07-25: once the widths matched, quoting the windrower at a
+    // tractor's speed would have over-stated every cut by a third.
     const save = newGame();
     save.money = 10_000_000;
     buyAgent(save, "windrower", "large", [0, 0]);
@@ -222,15 +262,15 @@ describe("it carries no implement — it IS the mower", () => {
     const task = enqueueTask(save, field, "mow", MAY_1);
 
     const hours = estimateTaskHours(save, task);
-    // Same acreage at 40 ft vs the mower fallback's 25 ft: the windrower's
-    // estimate has to be the shorter one, in the right proportion.
-    const mowerFallbackFt = gameConfig.equipment.mower.medium.widthFt;
-    const windrowerFt = gameConfig.equipment.windrower.widthFt;
+    const mowerHours = estimateWithMowerOnly(save, field);
     expect(hours).toBeGreaterThan(0);
-    expect(windrowerFt).toBeGreaterThan(mowerFallbackFt); // guards the premise
-    // hours scale inversely with width
-    const impliedFt = mowerFallbackFt * (estimateWithMowerOnly(save, field) / hours);
-    expect(impliedFt).toBeCloseTo(windrowerFt, 0);
+    expect(hours).toBeLessThan(mowerHours); // guards the premise: it IS quicker
+    // A queued estimate is acres ÷ (speed × width), so the ratio between the
+    // two quotes is exactly the ratio of those products.
+    const expected =
+      (gameConfig.work.windrowerSpeedKmh * gameConfig.equipment.windrower.widthFt) /
+      (gameConfig.work.fieldSpeedKmh * gameConfig.equipment.mower.medium.widthFt);
+    expect(mowerHours / hours).toBeCloseTo(expected, 6);
   });
 
   /** The same estimate on a farm with a Mower and no windrower, for comparison. */
@@ -246,15 +286,24 @@ describe("it carries no implement — it IS the mower", () => {
 });
 
 describe("mower sizes", () => {
-  it("comes in 15 / 25 / 50 ft", () => {
+  it("comes in 15 / 25 / 32 ft", () => {
+    // Large was 50 ft until 2026-07-25; the widest real triple mower-conditioner
+    // is ~32 ft, and at 50 it cut 45 ac/h against a real machine's 31.
     expect(gameConfig.equipment.mower.small.widthFt).toBe(15);
     expect(gameConfig.equipment.mower.medium.widthFt).toBe(25);
-    expect(gameConfig.equipment.mower.large.widthFt).toBe(50);
+    expect(gameConfig.equipment.mower.large.widthFt).toBe(32);
   });
 
-  it("the 50 ft Large mower still cuts narrower than nothing at all is wide", () => {
-    // Sanity on the trade: the windrower is 40 ft, so a Large mower is actually
-    // WIDER — you buy the windrower to free a tractor, not for raw width.
+  it("a Large mower is WIDER than the windrower — you buy the machine for its time, not its width", () => {
     expect(gameConfig.equipment.mower.large.widthFt).toBeGreaterThan(gameConfig.equipment.windrower.widthFt);
+  });
+
+  it("...but the windrower still out-cuts it once its own speed is counted", () => {
+    // The trade only holds up if the specialist actually keeps pace with the
+    // best tractor rig. 25 ft × 16 km/h beats 32 ft × 12 km/h, narrowly.
+    const windrowerRate = gameConfig.equipment.windrower.widthFt * gameConfig.work.windrowerSpeedKmh;
+    const largeMowerRate = gameConfig.equipment.mower.large.widthFt * gameConfig.work.fieldSpeedKmh;
+    expect(windrowerRate).toBeGreaterThan(largeMowerRate);
+    expect(windrowerRate / largeMowerRate).toBeLessThan(1.1); // near enough a dead heat
   });
 });

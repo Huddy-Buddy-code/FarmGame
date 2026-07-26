@@ -16,44 +16,51 @@ beforeAll(() => setProjection(15, "N"));
 setDaysPerMonth(30);
 
 // Month indices: Jan=0 … Dec=11.
+// 2026-07-25 realism pass: the peak moved from December to JULY and the premium
+// from +25% to +12%. Cash grain bottoms at harvest and peaks the following early
+// summer as old-crop supply tightens — a December peak topped out six weeks
+// after the combines stopped, rewarding the one thing no grain farmer does. The
+// point of the change is that autumn grain must now be STORED over the winter
+// to catch the peak, which is what gives a silo a reason to exist.
 describe("peakSaleMonth — a single fixed peak for every product", () => {
-  it("is December", () => {
-    expect(peakSaleMonth()).toBe(11);
+  it("is July", () => {
+    expect(peakSaleMonth()).toBe(6);
   });
 });
 
-describe("seasonalMultiplier — one December-peaked curve, same for all products", () => {
-  it("peaks +25% in December, tapering ±2 months to base", () => {
-    expect(seasonalMultiplier("corn", 11)).toBeCloseTo(1.25, 6); // Dec, the peak
-    expect(seasonalMultiplier("corn", 10)).toBeCloseTo(1.15, 6); // Nov (−1)
-    expect(seasonalMultiplier("corn", 0)).toBeCloseTo(1.15, 6); // Jan (+1)
-    expect(seasonalMultiplier("corn", 9)).toBeCloseTo(1.1, 6); // Oct (−2)
-    expect(seasonalMultiplier("corn", 1)).toBeCloseTo(1.1, 6); // Feb (+2)
-    // Everything three or more months from Dec is base.
-    for (const m of [2, 3, 4, 5, 6, 7, 8]) expect(seasonalMultiplier("corn", m)).toBe(1);
+describe("seasonalMultiplier — one July-peaked curve, same for all products", () => {
+  it("peaks +12% in July, tapering ±2 months to base", () => {
+    expect(seasonalMultiplier("corn", 6)).toBeCloseTo(1.12, 6); // Jul, the peak
+    expect(seasonalMultiplier("corn", 5)).toBeCloseTo(1.08, 6); // Jun (−1)
+    expect(seasonalMultiplier("corn", 7)).toBeCloseTo(1.08, 6); // Aug (+1)
+    expect(seasonalMultiplier("corn", 4)).toBeCloseTo(1.04, 6); // May (−2)
+    expect(seasonalMultiplier("corn", 8)).toBeCloseTo(1.04, 6); // Sep (+2)
+    // Everything three or more months from Jul is base — which is the whole
+    // autumn harvest run, Oct through Dec.
+    for (const m of [9, 10, 11, 0, 1, 2, 3]) expect(seasonalMultiplier("corn", m)).toBe(1);
   });
   it("is identical across products — soybeans & bales share corn's curve", () => {
-    for (const m of [9, 10, 11, 0, 1, 6]) {
+    for (const m of [4, 5, 6, 7, 8, 11]) {
       expect(seasonalMultiplier("soybeans", m)).toBe(seasonalMultiplier("corn", m));
       expect(seasonalMultiplier("hay", m)).toBe(seasonalMultiplier("corn", m));
     }
   });
   it("seasonalBonus is the fraction above base", () => {
-    expect(seasonalBonus("corn", 11)).toBeCloseTo(0.25, 6);
-    expect(seasonalBonus("corn", 6)).toBe(0); // Jul = base
+    expect(seasonalBonus("corn", 6)).toBeCloseTo(0.12, 6);
+    expect(seasonalBonus("corn", 11)).toBe(0); // Dec = base now
   });
 });
 
 describe("unit prices apply the multiplier to the base config price", () => {
   it("grain: base × multiplier", () => {
     const base = gameConfig.crops.corn.sellPricePerTon;
-    expect(grainUnitPrice("corn", 6)).toBe(base); // Jul base
-    expect(grainUnitPrice("corn", 11)).toBeCloseTo(base * 1.25, 6); // Dec peak
+    expect(grainUnitPrice("corn", 11)).toBe(base); // Dec base
+    expect(grainUnitPrice("corn", 6)).toBeCloseTo(base * 1.12, 6); // Jul peak
   });
   it("bale: base × multiplier", () => {
     const base = gameConfig.baleProducts.hay.pricePerBale;
-    expect(baleUnitPrice("hay", 6)).toBe(base);
-    expect(baleUnitPrice("hay", 11)).toBeCloseTo(base * 1.25, 6);
+    expect(baleUnitPrice("hay", 11)).toBe(base);
+    expect(baleUnitPrice("hay", 6)).toBeCloseTo(base * 1.12, 6);
   });
 });
 

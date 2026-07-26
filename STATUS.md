@@ -1776,6 +1776,219 @@ Maintainer-driven iteration on top of the three batches above.
 
 **587/587 passing, typecheck + build clean.**
 
+## 2026-07-25 — realism audit + tuning pass
+
+Audited equipment, structures, crops and yield modifiers against real machinery
+specs, USDA/extension yields and prices, and custom-rate sheets. Maintainer
+picked items 1–16, 18–20, 22–30 off the resulting list.
+
+- `src/config/gameConfig.ts` — the bulk of it.
+  - **Tillage/planting widths were the biggest gap**: plow 5/10/20 → 15/30/50 ft,
+    planter 5/10/20 → 15/30/40 ft (and $40/80/150k → $60/150/250k, since a real
+    16-row planter is $250k+). The farm used to TILL AT HALF THE SPEED IT
+    HARVESTED (10.5 vs 21 ac/h); now plow 26.4, plant 36.2, harvest 21.1 — the
+    real ordering. Spring is ~3x faster; watch for knock-on pacing.
+  - Balers repriced to real money: round $130k → $70k, square $260k → $180k.
+    Hay spikes $8k/$16k → $3k/$6k.
+  - Mower Large 50 → 32 ft (widest real triple mower-conditioner), $130k → $120k.
+    Sprayer Large 120 → 90 ft (120 ft is a self-propelled machine).
+  - **Windrower 40 → 25 ft, $320k → $270k, plus its own `work.windrowerSpeedKmh`
+    16** — a real SP hay windrower is 16–18 ft, but a strictly-narrower machine
+    had nothing left to sell. 30.1 ac/h vs a Large mower's 28.9: a dead heat, so
+    it's a question about tractor time, not throughput.
+  - **Crop yields re-derived to US averages and re-priced** to hold the ladder's
+    shape: wheat 2.9→2.4 t/ac @ $245, rye 2.4→1.8 @ $265, oats 2.3→1.7 @ $240,
+    barley 2.5→2.0 @ $250, canola 1.5→1.2 @ $530, sunflowers 1.2→1.0 @ $520.
+    Corn and soy untouched (already real). Order is nearly identical to before —
+    but the spread compressed: corn now leads ~1.7x rather than ~1.2x.
+  - **Bale weights**: round 1.0 → 0.75 t, square 1.5 → 0.9 t, `balesPerAcre`
+    raised to hold tonnage (straw's fell 1.8 → 1.35 t/ac, itself a correction).
+  - **Forage repriced to true market**: hay $65 → $131/t, alfalfa $130 → $200/t,
+    straw $35 → $60/t. Grass went from a trap crop ($98/ac/yr) to $382.
+    ⚠️ **Alfalfa is now the top earner in the game at $773/ac/yr vs corn's $445.**
+    That is its real gross; the sim just models none of hay's downside (rain-ruined
+    cuttings, storage loss, thin market). If it plays as dominant the fix is
+    forage RISK, not a lower price — maintainer declined item 17 for now.
+  - Market peak **December → July**, premium **+25% → +12%** (real Oct→Jun carry
+    is 8–15%). Autumn grain must now be STORED over winter to catch the peak,
+    which is what finally gives a silo a reason to exist.
+  - Costs: harvest $30 → $40/ac, mulch $8 → $13, baling $10 → $14.
+    `mulchBonusPct` 7% → 3% (baled 3% → 1%) — real residue response is ~0–3%.
+- `src/sim/tasks.ts` — two behavioural changes, not just numbers:
+  - `taskFieldSpeedKmh` takes an optional agent; the windrower is the one speed
+    keyed to the MACHINE rather than the task. `estimateTaskHours` restructured
+    so a queued cut quotes the windrower's speed as well as its width.
+  - New `grainDumpMinutes(tons)` — the cart→silo leg is RATE-based
+    (`hauling.dumpTonsPerMinute` 20) instead of a flat 10 sim-seconds regardless
+    of load. `unloadTonsPerMinute` 14 → 9 (combine-limited, ~320 bu/min).
+- `src/sim/market.ts` — doc comments only (December → July, +25% → +12%).
+- Tests: market/windrower/mulch/sellTask/squareBales updated for the new numbers;
+  new coverage for windrower speed (estimate + runtime) and the dump rate
+  (unit + wiring). Each new test verified by reverting its fix and watching it fail.
+- **`tests/plans.test.ts` had a latent bug the planter width exposed**: "run
+  through April" used `cap = minutesPerMonth() - 1`, but `runUntil` advances
+  before re-checking, so the final tick landed exactly ON May 1 — a legal plant
+  month. It only passed because a 10 ft planter couldn't cover 100 acres inside
+  one 240-min tick; a 30 ft one can. Fixed the loop (stop a full step short), not
+  the assertion. Same latent bug fixed in the sibling plow-override test.
+
+**594/594 passing, typecheck + build clean. No UI changes in this pass.**
+
+### Follow-up: bale rot + alfalfa nerf (same day)
+
+Maintainer picked the cheap pair over the drying-clock/leaf-shatter design.
+
+- **Alfalfa −15% yield**, on `balesPerAcre` only (2.13 → 1.81 round, 1.78 → 1.51
+  square). Its PRICE stays at the true-market $200/t — the cut stands in for the
+  rain-ruined cuttings and leaf shatter the sim doesn't model. 4.07 t/ac/yr over
+  three cuttings, still inside the real 4–6 range.
+- **Bale rot** (`sim/buildings.ts: tickBaleSpoilage`, called from `tickWorld`).
+  `spoilPctPerMonth` per storage kind: Area 2.5%/mo, Barn 0.5%/mo — real
+  six-month dry-matter loss is 5–20% outdoors, 2–5% covered. **This is the first
+  mechanical difference the Barn has ever had**; before it, the $70k Barn and the
+  $25k Area were identical.
+  - Loss is a % of a pile of WHOLE objects, so the sub-bale remainder accrues in
+    `Building.spoilAccrued` and a bale comes off when it crosses 1. Keeps
+    `storedBales` integral (bales get hauled, sold and drawn).
+  - Decay is EXPONENTIAL, `n*(1-rate)^months`. A flat rate compounds when the sim
+    ticks finely and doesn't when it ticks coarsely — six months would have cost
+    differently depending on frame rate, and a reload's catch-up jump would have
+    been cheaper than playing it through. **Caught by the granularity test, which
+    failed against the first (flat) implementation.**
+- Rot is surfaced everywhere bale storage appears — silent losses read as a bug.
+  `spoilLabel` is the badge ("−2.5%/mo rot"); `spoilBlurb` is a derived sentence
+  giving the six-month figure and the other kind's, on the Inventory storage
+  card (`.sc-note`) and as the shop card's hover title. Both computed from
+  config so the copy can't drift. Fixed THREE stale strings that still called
+  the Area "unlimited" — wrong since it was capped 2026-07-24 — including the
+  shop card, which was the last place still saying it.
+- Alfalfa now nets **$514/ac/yr** stored outdoors 6 months, **$604** in a barn,
+  against corn's $445 (was $773). Still the premium crop, now a demanding one.
+
+**609/609 passing, typecheck + build clean.**
+
+### Follow-up: Work Queue — bale relay cards match every other job
+
+Both halves of a bale relay now use the standard active-card layout (machine
+sprite · name · machine · status · progress bar · implement row).
+
+- **Haul Bales card** gained the 96px machine sprite (the collector, in its
+  hay-spike livery via `agentMachineIconHtml`) and a full-width progress bar.
+  Its implement row dropped the paired tractor icon — the header sprite says
+  which machine it is now.
+- **New `FarmTask.haulTotalBales`** gives that bar a denominator, which a haul
+  never had (it isn't acres-based). A **high-water mark**, maintained in the
+  haulBales tick: baling and hauling deliberately overlap, so fresh bales land
+  in a field the relay is already clearing and a total taken at task creation
+  would send the bar past 100%. Counts what the rigs carry, so it can't dip as
+  they load. Persists free (tasks are saved wholesale).
+- **Bale Trailer got its own card** (`buildBaleTrailerRow`), replacing the
+  sub-row it used to occupy inside the Haul Bales card. Maintainer screenshot
+  showed why: the sub-row had to name the implement AND its tractor to say which
+  machine it was, which wrapped to four lines in that narrow column and clipped
+  the fill label to "/ 20 bales · 0".
+- Queue refresh key gained trailer cargo + `haulTotalBales`; without them the
+  new bars only repainted when a phase changed.
+- **`haulProgress` / `haulProgressText`** are shared by both cards, so the two
+  halves of one relay can't show different progress for the same job. The
+  trailer card first shipped with its top bar duplicating its own load — two
+  identical bars on one card — which is what the helper prevents. Top bar is
+  the JOB (bales cleared off the field); the trailer's load keeps its own bar
+  on the implement row, where it belongs.
+- Tests: 4 new in `baleHaul.test.ts` for the high-water mark (initial pickup,
+  monotonic + never below what's in the field, and the baling-overlap case).
+
+**612/612 passing, typecheck + build clean.**
+
+### Follow-up: combine sprite follows its header
+
+- `machineImages.ts` gained `CornHeader` / `GrainHeader` variant tokens beside
+  the hay-spike ones, and exported `MachineVariant` so the union lives with the
+  tokens. `agentMachineIconHtml` picks a combine's sprite from the header
+  actually hitched; the Work Queue card and Equipment tab card were switched
+  onto that helper too (only map markers had composite art before).
+- New art: `Combine_Large_GrainHeader.png` (art-source 1024, shipped 256).
+  Corn falls out free — the existing `Combine_Large_sideleft.png` IS the
+  corn-head render, so it's the fallback. Medium/Small keep their corn sprites
+  under a grain header until art exists; the lookup returns undefined and the
+  caller drops back, silently and by design.
+- **Two art-pipeline bugs found and fixed:**
+  - `Combine_Large_sideleft.png` was still **1024x1024 / 1.7 MB** in
+    `src/assets/Equipment/` — 24x every other sprite, and the one thing
+    CLAUDE.md explicitly forbids. Resized to 256 (79 KB); original was already
+    safe in `art-source/`.
+  - The new file arrived as `Combine_Large_GrainHeader.png.png`. The **doubled
+    extension** is not cosmetic: the loader strips one `.png`, the third token
+    parses as `grainheader.png`, that isn't a known variant, so the entry falls
+    through to the SIZE branch and overwrites the plain `harvester|large`
+    sprite. Nothing throws — the wrong combine just appears everywhere. Same
+    bug hit the Medium tractor on 2026-07-24.
+- New `tests/machineImages.test.ts` (14) guards the discovery layer, since a
+  filename typo is a silent art bug rather than a build error: variants must
+  resolve AND must not collide with size sprites, sizes must be distinct files,
+  missing variants must return undefined, and no discovered URL may carry a
+  doubled extension. **Verified by recreating the `.png.png` name — 2 tests fail
+  against it.**
+
+**626/626 passing, typecheck + build clean. dist 3.64 MB.**
+
+### Follow-up: a windrower's Work Queue card drops its implement row
+
+`implementRowHtml` returns "" for a windrower agent. It's self-propelled — it IS
+the mower — so the row had nothing to describe: it repeated the machine's own
+name under a second, smaller copy of the sprite already at the top of the card.
+That slot has been wrong twice in the other direction (a phantom "Mower - Medium"
+before 2026-07-24, then the machine's own name), so the honest answer is nothing.
+Side effect: "25 ft Working Width" is no longer on the card — it lives on the
+Equipment tab and the shop line only.
+
+**626/626 passing, typecheck + build clean.**
+
+### Follow-up: map markers went stale on a header swap
+
+Maintainer report: the Work Queue drew the right combine, the MAP drew a grain
+header on a corn job. Not an art bug — a cache bug. `updateAgentMarkers` only
+rewrites a marker's `innerHTML` when its dataset key changes, and that key
+spelled out the sprite's inputs by hand: kind, size, hay-spikes state. Header art
+landed without being added, so swapping a grain platform for a corn head changed
+nothing in the key and the marker kept the old sprite indefinitely. The Work
+Queue looked right only because it re-renders on task progress anyway.
+
+- New `agentSpriteKey(agent)` sits beside `agentMachineIconHtml` and covers every
+  input it reads; the marker uses it instead of an inline string, so the key
+  can't fall behind the lookup again.
+- The Work Queue's own key had the same gap (both header kinds carry no cargo,
+  so nothing else in it moves on a swap) — now includes the sprite key. The
+  Equipment tab was already safe: its key tracks `attachedTo`.
+
+**626/626 passing, typecheck + build clean.**
+
+## 2026-07-25 — performance pass (deep dive → top-3 fixes)
+
+Audited the frame loop, sim tick, overlay/reveal pipeline, UI refresh layer and
+built payload. Sim math was already fine (binary-searched paths, cached routes);
+the costs were assets, GL surface churn, and one unkeyed UI rebuild.
+
+- `src/assets/Equipment/` + `art-source/Equipment/` (new) — **sprites were 84%
+  of the payload**: 16 AI PNGs at 1024×1024 (~1.5 MB each, drawn at 60–78 px).
+  Originals moved to `art-source/Equipment/` (outside the Vite glob, kept for
+  future art work); shipped sprites are 256×256 resizes (~65 KB each).
+  **dist: 31 MB → 5.3 MB.** New art drops still go in `src/assets/Equipment/`
+  but should be exported/resized to 256×256 first.
+- `src/field/fields.ts` — `renderField` no longer destroys + recreates the
+  MapLibre surface (source + layer + multi-MB canvas) on every repaint; it
+  reuses the existing surface (clear + repaint) when bounds are unchanged.
+  Repaints fire every growth-stage bucket × every field, so this was constant
+  churn. Rebuild still happens when the boundary changes.
+- `src/main.ts` — `refreshFieldsTab` was the one live-refreshed panel with no
+  change-key: rebuilt its whole DOM 2×/s while open (also killed hover/clicks
+  mid-flight). Now keyed like the other tabs (sort state + year + per-row
+  rendered values); tab-open and sort clicks force past the key.
+
+Deferred with the maintainer's list still open: reveal-pipeline upload
+throttling via `setAnimating` (medium, touches reveal lifecycle), sim tick at
+render rate, size-tiered overlay resolution for big fields.
+
 ## Known gaps / unverified
 
 - **Field panel Schedule calendar drag-and-drop is logic-tested only** — no

@@ -45,16 +45,19 @@ describe("canMulch — annual residue that isn't baled or already mulched", () =
   });
 });
 
-describe("mulch yield bonus (+7%, additive) via productivityMultiplier", () => {
-  it("adds a flat 0.07 when residue was mulched", () => {
+// Cut to +3% (baled: +1%) in the 2026-07-25 realism pass — measured yield
+// response to residue incorporation is near-zero to +3%, and often negative in
+// cold soils. At +7% mulching was a no-brainer rather than a marginal call.
+describe("mulch yield bonus (additive) via productivityMultiplier", () => {
+  it("adds a flat mulchBonusPct when residue was mulched", () => {
     expect(productivityMultiplier({ ...harvestedAnnual({ crop: "corn", lastCrop: undefined }) }, 0)).toBe(1);
     expect(productivityMultiplier({ ...harvestedAnnual({ crop: "corn", lastCrop: undefined, residueMulched: true }) }, 0))
-      .toBeCloseTo(1.07, 6);
+      .toBeCloseTo(1 + gameConfig.mulchBonusPct, 6);
   });
   it("stacks additively with the crop-rotation bonus", () => {
-    // soybeans after corn = +10% rotation, plus +7% mulch = 1.17.
+    // soybeans after corn = +10% rotation, plus the mulch bonus on top.
     const f: Field = { id: "f", parcelId: "p", boundary, status: "growing", crop: "soybeans", lastCrop: "corn", residueMulched: true };
-    expect(productivityMultiplier(f, 0)).toBeCloseTo(1.17, 6);
+    expect(productivityMultiplier(f, 0)).toBeCloseTo(1 + gameConfig.rotationBonusPct + gameConfig.mulchBonusPct, 6);
   });
   it("is consumed by the next harvest (applyHarvestDone clears it)", () => {
     const f: Field = { id: "f", parcelId: "p", boundary, status: "ready", crop: "corn", residueMulched: true };
@@ -81,7 +84,7 @@ describe("legalMonthsFor mulch — from the harvest month onward", () => {
 
 describe("mulch task cost", () => {
   it("charges mulchCostPerAcre × acres", () => {
-    expect(taskCost(harvestedAnnual(), "mulch")).toBe(800); // 100 acres × $8
+    expect(taskCost(harvestedAnnual(), "mulch")).toBe(1300); // 100 acres × $13
   });
 });
 

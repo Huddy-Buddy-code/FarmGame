@@ -8,7 +8,7 @@ import {
 } from "../src/sim/tasks";
 import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
 import { sellGrain, sellStoredBalesFrom, sellAllOfProduct } from "../src/sim/economy";
-import { grainUnitPrice, grainInstantPrice, baleInstantPrice, baleUnitPrice, monthOf } from "../src/sim/market";
+import { grainUnitPrice, grainInstantPrice, baleInstantPrice, baleUnitPrice, monthOf, peakSaleMonth } from "../src/sim/market";
 import { minutesPerMonth } from "../src/sim/calendar";
 import { gameConfig } from "../src/config/gameConfig";
 
@@ -41,20 +41,23 @@ describe("instant vs delivered pricing", () => {
   it("selling from the panel forgoes the seasonal premium AND pays a pickup fee", () => {
     const base = gameConfig.crops.corn.sellPricePerTon;
     expect(grainInstantPrice("corn")).toBeCloseTo(base * (1 - gameConfig.market.instantSellPenaltyPct), 6);
-    // Even in December, the instant price is unmoved — no seasonal premium.
-    expect(grainInstantPrice("corn")).toBeLessThan(grainUnitPrice("corn", 11));
+    // Even at the peak, the instant price is unmoved — no seasonal premium.
+    expect(grainInstantPrice("corn")).toBeLessThan(grainUnitPrice("corn", peakSaleMonth()));
   });
 
-  it("hauling to market is worth meaningfully more at the December peak", () => {
-    const hauled = grainUnitPrice("corn", 11);
+  it("hauling to market is worth meaningfully more at the peak", () => {
+    // The gap narrowed in the 2026-07-25 realism pass: the seasonal premium
+    // went from +25% to a realistic +12%, so hauling is worth ~24% over
+    // clicking sell rather than ~39%. Still the reason the Sell task exists.
+    const hauled = grainUnitPrice("corn", peakSaleMonth());
     const instant = grainInstantPrice("corn");
-    expect(hauled / instant).toBeGreaterThan(1.3); // ~1.39 at +25% vs −10%
+    expect(hauled / instant).toBeGreaterThan(1.2); // ~1.24 at +12% vs −10%
   });
 
   it("applies to bales the same way", () => {
     const base = gameConfig.baleProducts.hay.pricePerBale;
     expect(baleInstantPrice("hay")).toBeCloseTo(base * 0.9, 6);
-    expect(baleInstantPrice("hay")).toBeLessThan(baleUnitPrice("hay", 11));
+    expect(baleInstantPrice("hay")).toBeLessThan(baleUnitPrice("hay", peakSaleMonth()));
   });
 });
 

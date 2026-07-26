@@ -122,7 +122,18 @@ export function removeFieldRender(map: MlMap, overlay: OverlayEngine, field: Fie
 export function renderField(map: MlMap, overlay: OverlayEngine, field: Field, now: SimTime): void {
   // Pad the surface a touch so the outline stroke isn't clipped at the edge.
   const bounds = padBounds(boundsOf(field.boundary), 4);
-  const surface = overlay.createSurface(field.id, bounds);
+  // Reuse the existing surface on a plain repaint (growth stage, status flip):
+  // recreating it tears down and re-adds the MapLibre source + layer and
+  // reallocates a multi-megabyte canvas every time. Only rebuild when the
+  // covered ground actually changed (new field / redrawn boundary).
+  const existing = overlay.get(field.id);
+  const surface =
+    existing && existing.bounds.every((v, i) => v === bounds[i])
+      ? existing
+      : overlay.createSurface(field.id, bounds);
+  if (surface === existing) {
+    surface.ctx.clearRect(0, 0, surface.canvas.width, surface.canvas.height);
+  }
   const paint = {
     status: field.status,
     crop: field.crop,

@@ -9,7 +9,8 @@
  * Round Baler and Medium Square Baler". Both being Medium is only expressible
  * with shape as the kind.
  *
- * A square bale is its round twin at 1.5x the weight: fewer per acre, more per
+ * A square bale is its round twin at 1.2x the weight (0.9 t vs 0.75 t after the
+ * 2026-07-25 bale-weight pass; it was 1.5x when rounds were a full ton): fewer per acre, more per
  * bale, plus ~10% per ton because squares stack tight. Storage counts a bale as
  * a bale either way, per the maintainer's call.
  */

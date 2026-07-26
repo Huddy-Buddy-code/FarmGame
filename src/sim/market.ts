@@ -4,10 +4,12 @@
  * a single fixed peak month shared by every product (was per-product, keyed to
  * each product's last harvest).
  *
- * The curve tops out at `gameConfig.market.peakMonth` (December) and tapers to
- * base moving away from it in either direction, shaped by
- * `gameConfig.market.seasonalBonusByDistance`: +25% at the peak, +15% one month
- * out, +10% two months out, +0% (base) beyond. Base is the floor — no discounts.
+ * The curve tops out at `gameConfig.market.peakMonth` (July, as of the
+ * 2026-07-25 realism pass — cash grain bottoms at harvest and peaks the
+ * following early summer) and tapers to base moving away from it in either
+ * direction, shaped by `gameConfig.market.seasonalBonusByDistance`: +12% at the
+ * peak, +8% one month out, +4% two months out, +0% (base) beyond. Base is the
+ * floor — no discounts.
  *
  * (Per-field revenue is NOT traced through sales anymore — the Field Finances
  * tab books production value at harvest/bale time instead; see
@@ -66,7 +68,7 @@ export function effectiveSellPlan(
   return { month: save.sellAll?.month ?? peakSaleMonth(), auto: false, fromAll: true };
 }
 
-/** The single peak-price month (0-11) — December, shared by every product. */
+/** The single peak-price month (0-11) — July, shared by every product. */
 export function peakSaleMonth(): number {
   return gameConfig.market.peakMonth;
 }
@@ -84,7 +86,7 @@ export function seasonalMultiplier(_product: MarketProduct, month: number): numb
   return 1 + (gameConfig.market.seasonalBonusByDistance[monthsFromPeak(month)] ?? 0);
 }
 
-/** Seasonal bonus as a fraction (0, 0.1, 0.15, 0.25) for `product` in `month` —
+/** Seasonal bonus as a fraction (0, 0.04, 0.08, 0.12) for `product` in `month` —
  * for the "+N%" badges in the Inventory tab. */
 export function seasonalBonus(product: MarketProduct, month: number): number {
   return seasonalMultiplier(product, month) - 1;
@@ -108,8 +110,8 @@ export function baleUnitPrice(product: BaleProduct, month: number): number {
  * Inventory panel, where a buyer collects. That forgoes the seasonal premium
  * entirely AND takes `market.instantSellPenaltyPct` off the base for pickup, so
  * it is always the worst price available. The gap between the two IS the Sell
- * task's reason to exist: at December's peak, hauling is worth ~39% more than
- * clicking sell.
+ * task's reason to exist: at July's peak, hauling is worth ~24% more than
+ * clicking sell (it was ~39% under the old, larger December premium).
  */
 export function instantPriceFactor(): number {
   return 1 - gameConfig.market.instantSellPenaltyPct;

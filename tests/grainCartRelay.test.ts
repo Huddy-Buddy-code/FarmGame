@@ -19,7 +19,10 @@ import type { Meters } from "../src/geo/coords";
 import { newGame } from "../src/state/saveState";
 import type { Field, FarmTask, SaveState } from "../src/state/saveState";
 import { tickFarming } from "../src/sim/farming";
-import { buyAgent, buyImplement, enqueueTask, tickTasks, harvesterCapacityTons } from "../src/sim/tasks";
+import {
+  buyAgent, buyImplement, enqueueTask, tickTasks, harvesterCapacityTons,
+  grainDumpMinutes, grainTrailerCapacityTons,
+} from "../src/sim/tasks";
 import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
 import { minutesPerMonth } from "../src/sim/calendar";
 import { gameConfig } from "../src/config/gameConfig";
@@ -60,6 +63,49 @@ function harvestFarm(carts: number, acres = 30): { save: SaveState; field: Field
 
 const unloads = (save: SaveState) => save.tasks.filter((t) => t.type === "unloadHarvester");
 const atCombine = (t: FarmTask) => t.unloadPhase === "toHarvester" || t.unloadPhase === "onloading";
+
+/**
+ * Emptying at the silo is RATE-based (2026-07-25 realism pass), not a flat
+ * `hauling.dumpMinutes`.
+ *
+ * It used to take ~10 sim-seconds to empty a cart however much was aboard — so
+ * a 1500 bu load unhooked as fast as an almost-empty one. That handed the
+ * hauling loop a free pass at precisely the end that's meant to be the
+ * bottleneck of harvest season.
+ */
+describe("the silo leg costs time in proportion to the load", () => {
+  it("scales with tonnage, and keeps a hook-up floor", () => {
+    const rate = gameConfig.hauling.dumpTonsPerMinute;
+    expect(grainDumpMinutes(40)).toBeCloseTo(40 / rate, 9);
+    expect(grainDumpMinutes(80)).toBeCloseTo(2 * grainDumpMinutes(40), 9);
+    // A near-empty cart still pauses to hook up rather than teleporting through.
+    expect(grainDumpMinutes(0)).toBe(gameConfig.hauling.dumpMinutes);
+    expect(grainDumpMinutes(0.001)).toBe(gameConfig.hauling.dumpMinutes);
+  });
+
+  it("a full Medium cart takes over a sim-minute, not ten seconds", () => {
+    const tons = grainTrailerCapacityTons("medium", "corn");
+    expect(grainDumpMinutes(tons)).toBeGreaterThan(1);
+    expect(grainDumpMinutes(tons)).toBeGreaterThan(gameConfig.hauling.dumpMinutes * 5);
+  });
+
+  it("the rate actually reaches the sim — dumps span multiple 1-minute ticks", () => {
+    // The wiring half. Under the old flat 0.17 a dump always began AND ended
+    // inside one tick, so an outside observer ticking at 1 minute never caught
+    // a cart mid-dump. Now it does.
+    const { save, field } = harvestFarm(1, 30);
+    let ticksSeenDumping = 0;
+    let now = APRIL_1;
+    while (field.status !== "harvested" && now - APRIL_1 < 600_000) {
+      now += 1;
+      tickFarming(save, now);
+      tickTasks(save, now, 1, () => 0.5);
+      if (unloads(save).some((t) => t.unloadPhase === "dumping")) ticksSeenDumping++;
+    }
+    expect(field.status).toBe("harvested");
+    expect(ticksSeenDumping).toBeGreaterThan(0);
+  });
+});
 
 describe("one cart on the combine at a time", () => {
   it("never sends two carts to the combine at once", () => {

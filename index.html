@@ -668,6 +668,12 @@
         background: var(--cream); border: 1.5px solid var(--wood);
       }
       .store-card .sc-chip svg { display: block; }
+      /* Bale-rot explainer (2026-07-25). Quieter than the contents chips — it's
+         reference text you read once, not a number you scan. Wraps freely. */
+      .store-card .sc-note {
+        font-size: 10.5px; line-height: 1.35; color: #8a7658;
+        border-top: 1px dashed var(--wood); padding-top: 5px; margin-top: 1px;
+      }
       /* Inline bale icon in the field panel's readout — baseline-align it with
          the text it sits in rather than letting it push the line height. */
       .fp-bales { display: flex; align-items: center; gap: 5px; }

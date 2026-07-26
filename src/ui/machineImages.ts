@@ -23,8 +23,15 @@
  * Composite variant (2026-07-21, Small Tractor + Hay Spikes): `<Kind>_<Size>_
  * <Variant>.png` — a THIRD token for machines drawn together with a "minor"
  * mounted implement (see `MINOR_IMPLEMENT_KINDS` in main.ts — one that
- * doesn't get its own trailing badge). Recognized variants: `HaySpike` (empty
- * loader) and `HaySpikeBale` (carrying a bale). See `machineVariantImageUrl`.
+ * doesn't get its own trailing badge). Recognized variants:
+ *   `HaySpike`     tractor with an empty bale loader
+ *   `HaySpikeBale` …carrying a bale
+ *   `CornHeader`   combine wearing a corn head (row units)
+ *   `GrainHeader`  combine wearing a grain platform / draper
+ * See `machineVariantImageUrl`. A combine's header is the most visible thing
+ * about it and the game already forces you to own the right one per crop
+ * (2026-07-24), so the sprite follows what's actually hitched (2026-07-25).
+ * Missing variant art just falls back to the plain `<Kind>_<Size>_sideleft`.
  *
  * Every image MUST have a TRANSPARENT background — it's composited as a free
  * sprite over the satellite map, exactly like the SVGs. A baked-in backdrop
@@ -55,7 +62,9 @@ const KIND_ALIAS: Record<string, string> = {
 };
 
 const FILL_LEVELS = ["0", "25", "50", "100"] as const;
-const VARIANT_TOKENS = ["hayspike", "hayspikebale"] as const;
+const VARIANT_TOKENS = ["hayspike", "hayspikebale", "cornheader", "grainheader"] as const;
+/** The variant names `machineVariantImageUrl` accepts, straight off the tokens. */
+export type MachineVariant = (typeof VARIANT_TOKENS)[number];
 
 /** `${kind}|${size}` (or `${kind}|*` for a size-agnostic file) → asset URL. */
 const registry = new Map<string, string>();
@@ -130,7 +139,7 @@ export function trailerFillImageUrl(kind: string, fillPct: number): string | und
 export function machineVariantImageUrl(
   kind: string,
   size: string | null | undefined,
-  variant: "hayspike" | "hayspikebale",
+  variant: MachineVariant,
 ): string | undefined {
   if (!size) return undefined;
   return variantRegistry.get(`${kind.toLowerCase()}|${size.toLowerCase()}|${variant}`);

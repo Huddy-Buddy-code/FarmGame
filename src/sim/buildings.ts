@@ -16,6 +16,7 @@ import type { CropId, EquipmentSize, BaleProduct } from "../config/gameConfig";
 import type { BuildingKind, Building, SaveState } from "../state/saveState";
 import type { Meters } from "../geo/coords";
 import { recordCash } from "./ledger";
+import { minutesPerMonth } from "./calendar";
 
 const seq: Record<string, number> = {};
 const nextId = (prefix: string) => `${prefix}-${(seq[prefix] = (seq[prefix] ?? 0) + 1)}`;
@@ -191,6 +192,62 @@ export function haulBalesInto(building: Building, product: BaleProduct, n: numbe
   const s = (building.storedBales ??= {});
   s[product] = (s[product] ?? 0) + added;
   return added;
+}
+
+/** Fraction of a bale store's contents lost per month to rot (2026-07-25). */
+export function baleSpoilRateOf(kind: "baleBarn" | "baleArea"): number {
+  return gameConfig.buildings[kind].spoilPctPerMonth;
+}
+
+/**
+ * BALE ROT (maintainer request, 2026-07-25) — stored bales decay, outdoors far
+ * faster than under cover.
+ *
+ * This is what finally makes the Bale Barn a real choice: it and the Bale Area
+ * were mechanically identical, so the game charged $70k instead of $25k for
+ * nothing. It's also the honest half of alfalfa's rebalance — hay's real
+ * downside is that it doesn't keep, and hay is what gets stored as bales.
+ *
+ * Loss is a fraction of the pile per month, which almost never comes out as a
+ * whole bale, so the remainder accrues in `building.spoilAccrued` and a bale
+ * comes off each time it crosses 1. `storedBales` therefore stays integral —
+ * bales are physical objects that get hauled, sold and drawn.
+ *
+ * Takes elapsed minutes rather than `now` so it's stateless, and decays
+ * EXPONENTIALLY — `n * (1-rate)^months` — rather than taking a flat `rate` off
+ * the starting count. That's not pedantry: a flat rate compounds when the sim
+ * ticks finely and doesn't when it ticks coarsely, so the same six months would
+ * cost differently depending on frame rate, and a reload's single catch-up jump
+ * would be cheaper than having played it through. The exponential form gives
+ * the same answer however the span is chopped up.
+ */
+export function tickBaleSpoilage(save: SaveState, dtMinutes: number): void {
+  if (dtMinutes <= 0) return;
+  const months = dtMinutes / minutesPerMonth();
+  for (const b of save.buildings) {
+    if (!isBaleStorage(b.kind)) continue;
+    const rate = baleSpoilRateOf(b.kind as "baleBarn" | "baleArea");
+    if (rate <= 0 || !b.storedBales) continue;
+    for (const key of Object.keys(b.storedBales) as BaleProduct[]) {
+      const n = b.storedBales[key] ?? 0;
+      if (n <= 0) {
+        if (b.spoilAccrued) delete b.spoilAccrued[key];
+        continue;
+      }
+      const accrued = (b.spoilAccrued?.[key] ?? 0) + n * (1 - Math.pow(1 - rate, months));
+      const lost = Math.min(n, Math.floor(accrued));
+      const remainder = accrued - lost;
+      if (lost > 0) b.storedBales[key] = n - lost;
+      if ((b.storedBales[key] ?? 0) <= 0) {
+        // Pile gone — drop the leftover fraction rather than billing the next
+        // load that arrives for rot that happened to a different one.
+        delete b.storedBales[key];
+        if (b.spoilAccrued) delete b.spoilAccrued[key];
+      } else {
+        (b.spoilAccrued ??= {})[key] = remainder;
+      }
+    }
+  }
 }
 
 /** Assign (or clear, with `undefined`) which product a Bale Store is dedicated

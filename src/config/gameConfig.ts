@@ -221,6 +221,12 @@ export interface GameConfig {
     /** Plowing speed, km/h. Tillage is the slowest pass on the farm — it's
      * moving soil, not gathering a crop. */
     plowSpeedKmh: number;
+    /** Self-Propelled Windrower cutting speed, km/h (2026-07-25). Its own,
+     * because a purpose-built machine runs a hay header noticeably faster than a
+     * tractor does — that speed is half of what you're buying when the width
+     * dropped to a realistic 25 ft. Keyed to the MACHINE, not the task: a
+     * tractor with a mower on the same `mow` task still uses the default. */
+    windrowerSpeedKmh: number;
     /** Point-to-point travel speed between the yard and a field, km/h
      * (straight-line for now; real-road routing plugs in later, brief §9). */
     travelSpeedKmh: number;
@@ -271,8 +277,9 @@ export interface GameConfig {
     /** Mower implement (2026-07-13): CUTS a perennial forage field (grass/
      * alfalfa) — the "harvest" for those crops, in place of the combine. Leaves
      * cut material to rake + bale. Three real sizes as of 2026-07-24
-     * (15 / 25 / 50 ft); it used to be Small 10 / Medium 20 with Large a
-     * duplicate placeholder. */
+     * (15 / 25 / 32 ft); it used to be Small 10 / Medium 20 with Large a
+     * duplicate placeholder, then briefly a 50 ft Large that no manufacturer
+     * builds (corrected 2026-07-25). */
     mower: Record<EquipmentSize, { price: number; widthFt: number }>;
     /** Mulcher implement (2026-07-21): a flail/stalk shredder that chops annual
      * crop residue and works it back into the surface — an OPTIONAL post-harvest
@@ -283,8 +290,9 @@ export interface GameConfig {
      * not an implement — it drives itself, so it cuts a hay field with no
      * tractor tied up at all. That's the whole trade: it costs about as much as
      * a tractor plus a big mower, and in exchange your tractors stay free
-     * through hay season. One size only (40 ft), so unlike every other machine
-     * this isn't keyed by `EquipmentSize`. */
+     * through hay season. One size only (25 ft, and its own cutting speed —
+     * see `work.windrowerSpeedKmh`), so unlike every other machine this isn't
+     * keyed by `EquipmentSize`. */
     windrower: { price: number; widthFt: number };
     /** The combine is SIZED like a tractor (maintainer request, 2026-07-12):
      * each tier has its own hopper capacity — the combine fills as it cuts,
@@ -364,6 +372,14 @@ export interface GameConfig {
      * side-by-side for as long as it takes. (`loadMinutes` still times the bale
      * relay, which really is a stop-and-load.) */
     unloadTonsPerMinute: number;
+    /** How fast a full cart empties into a silo or Sell Point, tons per
+     * sim-minute (2026-07-25). The silo leg used to be a flat `dumpMinutes` —
+     * 10 seconds to empty a 1500 bu cart, which handed the hauling loop a free
+     * pass at exactly the end that's meant to be the harvest bottleneck. A cart
+     * auger really does run 600–1000 bu/min, faster than the combine-limited
+     * `unloadTonsPerMinute` above, so it gets its own rate. `dumpMinutes` still
+     * times the BALE relay, which really is a stop-and-drop. */
+    dumpTonsPerMinute: number;
     /** How close a cart has to be to the combine to count as "alongside" and
      * start moving grain, in meters. Not zero, because the target is moving:
      * the cart keeps station within this gap rather than chasing an exact
@@ -465,7 +481,7 @@ export interface GameConfig {
    * and September; come October it WITHERS and the crop is a total loss.
    *
    * This is the game's main time-pressure lever: it caps how far a harvest can
-   * be delayed toward the December price peak, and it's what makes combine
+   * be delayed toward the seasonal price peak, and it's what makes combine
    * capacity and crew size matter. Perennials are unaffected — a missed cutting
    * window is simply skipped and the stand regrows.
    */
@@ -508,12 +524,19 @@ export interface GameConfig {
      * it backwards: the same silo silently held 75% more oats by volume than
      * corn. Sizes are round real-world farm-bin numbers. */
     silo: Record<EquipmentSize, { price: number; capacityBushels: number }>;
-    /** Indoor bale storage — pricier, presumably weatherproof (flavor; no
-     * mechanical difference yet). */
-    baleBarn: { price: number; capacityBales: number };
-    /** Outdoor bale storage — cheaper per bale than the Barn, and capped too
-     * (2026-07-24; it was unlimited from 2026-07-17). */
-    baleArea: { price: number; capacityBales: number };
+    /**
+     * Indoor bale storage — weatherproof, and as of 2026-07-25 that finally
+     * MEANS something: `spoilPctPerMonth` is the fraction of the bales sitting
+     * here that are lost each month to rot and dry-matter breakdown. Until then
+     * the Barn and the Area were mechanically identical, so the game asked
+     * players to pay $70k instead of $25k for no difference whatsoever.
+     */
+    baleBarn: { price: number; capacityBales: number; spoilPctPerMonth: number };
+    /** Outdoor bale storage — cheaper per bale than the Barn, capped since
+     * 2026-07-24 (it was unlimited from 2026-07-17), and it ROTS: bales stacked
+     * on open ground wick moisture and weather from the top down. That loss is
+     * what you're buying your way out of with a Barn. */
+    baleArea: { price: number; capacityBales: number; spoilPctPerMonth: number };
     /** Parks tractors/harvesters. `slots` = max machines. */
     tractorBarn: { price: number; slots: number };
     /** Parks unattached implements. `slots` = max implements. */
@@ -564,30 +587,40 @@ export const gameConfig: GameConfig = {
       sellPricePerTon: 390,
       bushelWeightLbs: 60, // dense — a load goes further than corn
     },
-    // --- Six more annuals (maintainer request, 2026-07-22). Balance targets,
-    // per acre at base yield & base price (net of input+fert+plow+weed ≈ $35):
-    //   corn ~$485 (+stover), soy ~$270 — the yardsticks.
-    //   wheat ~$315 (+straw)  — the winter slot: field busy Sep→Jun, its own cycle.
-    //   oats ~$185 (+straw)   — cheapest inputs in the game; low ceiling.
-    //   barley ~$235 (+straw) — a step up from oats, still cheap.
-    //   canola ~$390          — near-corn profit without corn's fertilizer bill,
-    //                           but the widest uncertainty of the oilseeds.
-    //   sunflowers ~$295      — soy-tier, but ready Oct/Nov = right at the
-    //                           seasonal price ramp toward the Dec peak.
-    //   rye ~$255 (+straw)    — the OTHER cover crop: cheaper and hardier than
-    //                           wheat, and off the field a month earlier (May
-    //                           vs June), which is what buys room for a
-    //                           double crop behind it.
+    // --- Six more annuals (maintainer request, 2026-07-22).
+    //
+    // REALISM PASS 2026-07-25: yields for the small grains and oilseeds were
+    // running 20–45% over US averages while corn and soy sat spot-on, so each
+    // was cut to a real figure and RE-PRICED (at the upper end of its real
+    // market range) to hold the crop ladder's shape. Net per acre at base yield
+    // and base price, after input+fert+plow($20)+weed($15)+harvest($40):
+    //   corn ~$445 (unchanged — 200 bu/ac at $5.04/bu was already real)
+    //   canola ~$265      — 48 bu/ac @ $23.9/cwt
+    //   wheat ~$255 (+straw) — 80 bu/ac @ $7.35/bu; the winter slot, field busy Sep→Jun
+    //   soy ~$230 (unchanged — 53 bu/ac at $11.70/bu)
+    //   sunflowers ~$225  — 2000 lb/ac @ $26/cwt; ready Oct/Nov
+    //   rye ~$210 (+straw) — 64 bu/ac @ $7.42/bu; the OTHER cover crop, cheaper
+    //                        and hardier than wheat and off the field a month
+    //                        earlier (May vs June), which buys room for a
+    //                        double crop behind it.
+    //   barley ~$210 (+straw) — 83 bu/ac @ $6.00/bu (malting)
+    //   oats ~$175 (+straw)   — 106 bu/ac @ $3.84/bu; cheapest inputs, low ceiling
+    //
+    // The ORDER is nearly identical to the pre-pass ladder (soy and sunflowers
+    // swap, and they're $5 apart) — but the spread compressed hard: corn now
+    // leads the field by ~1.7x instead of ~1.2x. That IS what real Corn-Belt
+    // economics look like; the levers if it flattens crop choice too much are
+    // corn's price or its fertilizer bill.
     wheat: {
       name: "Winter Wheat",
       emoji: "🌾",
       inputCostPerAcre: 130, // cheap seed + a fall herbicide pass
       fertilizeCostPerAcre: 130, // spring N topdress + pass
-      baseYieldTonsPerAcre: 2.9, // ~95 bu/ac
+      baseYieldTonsPerAcre: 2.4, // ~80 bu/ac (was 2.9 = ~97, over a real belt average)
       yieldUncertainty: 0.25, // overwinters established — steadier than spring crops
       plantMonths: [8, 9], // Sep–Oct (fall seeding)
       growMonths: 9, // Sep 1 + 9 → ready the 1st of Jun (overwinters)
-      sellPricePerTon: 210,
+      sellPricePerTon: 245, // $7.35/bu
       bushelWeightLbs: 60,
       producesForage: true, // wheat straw → rake + bale before re-plowing
       baleProduct: "straw",
@@ -598,11 +631,11 @@ export const gameConfig: GameConfig = {
       emoji: "🥖",
       inputCostPerAcre: 100, // cheap, forgiving seed — the classic cover crop
       fertilizeCostPerAcre: 90, // modest spring topdress; rye scavenges well
-      baseYieldTonsPerAcre: 2.4, // a touch under wheat
+      baseYieldTonsPerAcre: 1.8, // ~64 bu/ac — solid hybrid rye (was 2.4 = 86, a record crop)
       yieldUncertainty: 0.22, // the hardiest overwinterer in the game
       plantMonths: [8, 9, 10], // Sep–Nov — a wider window than wheat's
       growMonths: 8, // Sep 1 + 8 -> ready the 1st of May, a month before wheat
-      sellPricePerTon: 175,
+      sellPricePerTon: 265, // $7.42/bu — rye is a thin, dear market, not a corn substitute
       bushelWeightLbs: 56,
       producesForage: true, // rye straw
       baleProduct: "straw",
@@ -613,12 +646,12 @@ export const gameConfig: GameConfig = {
       emoji: "🥣",
       inputCostPerAcre: 90, // cheapest seed going
       fertilizeCostPerAcre: 70, // light N — oats lodge if pushed hard
-      baseYieldTonsPerAcre: 2.3, // ~130 bu/ac (32 lb bushels)
+      baseYieldTonsPerAcre: 1.7, // ~106 bu/ac (32 lb bushels; was 2.3 = 144, well over average)
       yieldUncertainty: 0.3,
       plantMonths: [2, 3, 4], // Mar–May — a month wider than the other springs (2026-07-24)
       growMonths: 4, // ready the 1st of Jul/Aug/Sep
       harvestWindowMonths: 3, // dries down and stands; a month longer than the default
-      sellPricePerTon: 165,
+      sellPricePerTon: 240, // $3.84/bu — the old $165 was $2.64, below any real market
       bushelWeightLbs: 32, // lightest grain in the game — bulky per ton
       producesForage: true,
       baleProduct: "straw",
@@ -628,12 +661,12 @@ export const gameConfig: GameConfig = {
       emoji: "🍺",
       inputCostPerAcre: 110,
       fertilizeCostPerAcre: 105,
-      baseYieldTonsPerAcre: 2.5, // ~105 bu/ac
+      baseYieldTonsPerAcre: 2.0, // ~83 bu/ac (was 2.5 = 104, a top-end crop as the average)
       yieldUncertainty: 0.3,
       plantMonths: [2, 3, 4], // Mar–May (2026-07-24)
       growMonths: 4, // ready the 1st of Jul/Aug/Sep
       harvestWindowMonths: 3,
-      sellPricePerTon: 195,
+      sellPricePerTon: 250, // $6.00/bu — malting, not feed
       bushelWeightLbs: 48,
       producesForage: true,
       baleProduct: "straw",
@@ -641,25 +674,28 @@ export const gameConfig: GameConfig = {
     canola: {
       name: "Canola",
       emoji: "🌼",
-      inputCostPerAcre: 190, // hybrid seed is pricey
-      fertilizeCostPerAcre: 150, // heavy N + sulfur
-      baseYieldTonsPerAcre: 1.5, // ~55 bu/ac
+      inputCostPerAcre: 165, // hybrid seed is pricey (~$70/ac) + herbicide
+      fertilizeCostPerAcre: 130, // heavy N + sulfur
+      baseYieldTonsPerAcre: 1.2, // ~48 bu/ac (was 1.5 = 60, above real ND yields)
       yieldUncertainty: 0.35, // touchy at flowering — heat snaps hurt
       plantMonths: [3, 4], // Apr–May
       growMonths: 4, // ready the 1st of Aug/Sep
-      sellPricePerTon: 510,
+      sellPricePerTon: 530, // $23.9/cwt — top of the real range; canola simply
+      // nets less per acre than corn, and no realistic price closes that gap
       bushelWeightLbs: 50,
     },
     sunflowers: {
       name: "Sunflowers",
       emoji: "🌻",
-      inputCostPerAcre: 150,
-      fertilizeCostPerAcre: 95, // deep taproot scavenges leftover N
-      baseYieldTonsPerAcre: 1.2, // ~2100 lb/ac
+      inputCostPerAcre: 135,
+      fertilizeCostPerAcre: 85, // deep taproot scavenges leftover N
+      baseYieldTonsPerAcre: 1.0, // 2000 lb/ac (was 1.2 = 2400, a very good crop)
       yieldUncertainty: 0.35,
       plantMonths: [4, 5], // May–Jun
-      growMonths: 5, // ready the 1st of Oct/Nov — rides the ramp to the Dec peak
-      sellPricePerTon: 480,
+      growMonths: 5, // ready the 1st of Oct/Nov — straight into storage, since
+      // the seasonal peak moved to July (2026-07-25); it no longer sells off the
+      // combine into a rising market
+      sellPricePerTon: 520, // $26/cwt
       bushelWeightLbs: 28, // half of corn — twice the cart trips per ton
     },
     // Perennial forage crops (2026-07-13): planted once in spring, cut 3× a
@@ -706,10 +742,13 @@ export const gameConfig: GameConfig = {
   weedSeasonMonths: [2, 3, 4, 5, 6, 7], // Mar–Aug (spring + summer)
   weedCostPerAcre: 15,
   mowCostPerAcre: 12,
-  mulchCostPerAcre: 8,
-  harvestCostPerAcre: 30,
-  mulchBonusPct: 0.07,
-  mulchBonusBaledPct: 0.03,
+  mulchCostPerAcre: 13, // real stalk-chopping custom rate is $12–15/ac (was $8)
+  harvestCostPerAcre: 40, // real combine custom rate ~$40/ac (was $30)
+  // Cut to real 2026-07-25: measured yield response to residue incorporation is
+  // near-zero to +3%, and often NEGATIVE in cold soils. It was +7%/+3%, which
+  // made mulching a no-brainer rather than a marginal call.
+  mulchBonusPct: 0.03,
+  mulchBonusBaledPct: 0.01,
   work: {
     // Slower than road travel: a working pass is deliberate. Tuned so a medium
     // (10 ft) plow on a ~30-acre field takes a few sim-hours — in the ballpark
@@ -717,6 +756,7 @@ export const gameConfig: GameConfig = {
     fieldSpeedKmh: 12,
     harvestSpeedKmh: 7,
     plowSpeedKmh: 7,
+    windrowerSpeedKmh: 16,
     travelSpeedKmh: 22,
   },
   equipment: {
@@ -725,20 +765,30 @@ export const gameConfig: GameConfig = {
       medium: { price: 250_000 },
       large: { price: 400_000 },
     },
+    // Tillage and planting were the biggest realism gap in the file until
+    // 2026-07-25: at 5/10/20 ft a Large plow covered 10.5 ac/h against the Large
+    // combine's 21, so the farm TILLED HALF AS FAST AS IT HARVESTED — backwards.
+    // In reality tillage and planting outrun harvest 2–3x, which is exactly why
+    // they compress into a narrow spring window. Widths are real implements now
+    // (disk/field cultivator; 6/12/16-row planters on 30 in rows) and the
+    // planter got far dearer to match — a 16-row planter really is $250k+.
     plow: {
-      small: { price: 40_000, widthFt: 5 },
-      medium: { price: 80_000, widthFt: 10 },
-      large: { price: 150_000, widthFt: 20 },
+      small: { price: 35_000, widthFt: 15 },
+      medium: { price: 70_000, widthFt: 30 },
+      large: { price: 130_000, widthFt: 50 },
     },
     planter: {
-      small: { price: 40_000, widthFt: 5 },
-      medium: { price: 80_000, widthFt: 10 },
-      large: { price: 150_000, widthFt: 20 },
+      small: { price: 60_000, widthFt: 15 },
+      medium: { price: 150_000, widthFt: 30 },
+      large: { price: 250_000, widthFt: 40 },
     },
     sprayer: {
       small: { price: 50_000, widthFt: 30 },
       medium: { price: 100_000, widthFt: 60 },
-      large: { price: 200_000, widthFt: 120 },
+      // 90 ft, not 120 (2026-07-25): a 120 ft boom is a self-propelled machine
+      // at $450–600k, not a $200k tractor implement. 90 ft is the widest that's
+      // honestly trailed.
+      large: { price: 200_000, widthFt: 90 },
     },
     // Rake — three real sizes (maintainer spec, 2026-07-24). A wheel/rotary rake
     // is cheap per foot: it has no crop-processing guts, it just moves cut
@@ -751,21 +801,26 @@ export const gameConfig: GameConfig = {
     // Balers: one of each shape, both Medium, both zero-width (the windrow sets
     // the width). The three size slots exist only because IMPLEMENT_CONFIG is a
     // Record over EquipmentSize; only Medium is ever sold or built.
+    // Repriced to real new-machine money 2026-07-25 (was $130k / $260k, which
+    // put a round baler above a Large mower AND a Large rake combined —
+    // inverting the real order).
     bailer: {
-      small: { price: 130_000, widthFt: 0 },
-      medium: { price: 130_000, widthFt: 0 },
-      large: { price: 130_000, widthFt: 0 },
+      small: { price: 70_000, widthFt: 0 },
+      medium: { price: 70_000, widthFt: 0 },
+      large: { price: 70_000, widthFt: 0 },
     },
     squareBaler: {
-      small: { price: 260_000, widthFt: 0 },
-      medium: { price: 260_000, widthFt: 0 },
-      large: { price: 260_000, widthFt: 0 },
+      small: { price: 180_000, widthFt: 0 },
+      medium: { price: 180_000, widthFt: 0 },
+      large: { price: 180_000, widthFt: 0 },
     },
-    // Mower — three real sizes, all sold (maintainer spec, 2026-07-24).
+    // Mower — three real sizes, all sold (maintainer spec, 2026-07-24). Large
+    // was 50 ft until 2026-07-25; the widest real triple mower-conditioner is
+    // ~32 ft, and at 50 it was cutting 45 ac/h against a real 31.
     mower: {
       small: { price: 35_000, widthFt: 15 },
       medium: { price: 70_000, widthFt: 25 },
-      large: { price: 130_000, widthFt: 50 },
+      large: { price: 120_000, widthFt: 32 },
     },
     // Mulcher — three real sizes, all sold (maintainer pricing, 2026-07-21).
     mulcher: {
@@ -786,10 +841,15 @@ export const gameConfig: GameConfig = {
       medium: { price: 85_000, widthFt: 35 },
       large: { price: 130_000, widthFt: 45 },
     },
-    // Self-propelled windrower — one 40 ft machine. Priced against a Large
-    // mower ($130k) plus the Medium tractor ($250k) it frees up, less a bit:
-    // buying one should be tempting, not obvious.
-    windrower: { price: 320_000, widthFt: 40 },
+    // Self-propelled windrower — one 25 ft machine (maintainer call, 2026-07-25;
+    // was 40 ft at $320k). A real SP hay windrower runs a 16–18 ft rotary disc
+    // header, so 40 ft was pure fantasy — but a strictly-narrower machine would
+    // have nothing left to sell, since its whole pitch is freeing a tractor. 25
+    // ft plus its own `work.windrowerSpeedKmh` (16 vs the tractor's 12) is the
+    // compromise: 30.1 ac/h against a Large mower's 28.9 and a Medium's 22.6 —
+    // a dead heat with the best tractor rig, so buying one is a question about
+    // tractor time rather than raw throughput.
+    windrower: { price: 270_000, widthFt: 25 },
     // Hopper/cart sizes are BUSHELS as of 2026-07-24 — real American numbers,
     // and a deliberate rebalance the maintainer signed off on ("let it bite").
     // A Medium combine used to hold a flat 50 t; it now holds 350 bu, which is
@@ -811,10 +871,13 @@ export const gameConfig: GameConfig = {
     // Hay Spikes — cheap, low-capacity in-field bale collector. Small (1 bale)
     // is pullable by any tractor; Medium (2 bales) needs a medium+. The large
     // slot mirrors medium so the record type-checks; only Small/Medium are sold.
+    // Repriced 2026-07-25: a bale spear is a steel fork, not a machine. Real
+    // money is $500–2000 for a single and $5–10k for a 2-bale hydraulic
+    // handler; $8k/$16k had it costing more than a third of a Bale Trailer.
     haySpikes: {
-      small: { price: 8_000, widthFt: 0, capacityBales: 1 },
-      medium: { price: 16_000, widthFt: 0, capacityBales: 2 },
-      large: { price: 16_000, widthFt: 0, capacityBales: 2 },
+      small: { price: 3_000, widthFt: 0, capacityBales: 1 },
+      medium: { price: 6_000, widthFt: 0, capacityBales: 2 },
+      large: { price: 6_000, widthFt: 0, capacityBales: 2 },
     },
     // Bale Trailer — the bulk hauler. Small 10 / Medium 20 / Large 30 bales
     // (Large added 2026-07-24).
@@ -829,41 +892,69 @@ export const gameConfig: GameConfig = {
     dumpMinutes: 0.17,
     maxCrewSize: 3,
     callCartAtFraction: 0.85,
-    // ~1 sim-minute to empty a Large (500 bu ≈ 14 t corn) tank.
-    unloadTonsPerMinute: 14,
+    // Combine-limited: a real combine unloads 3.5–6 bu/sec, so ~320 bu/min of
+    // corn. Was 14 (≈500 bu/min), quicker than the machine doing the emptying.
+    unloadTonsPerMinute: 9,
+    // ~700 bu/min of corn — a real grain-cart auger. A 1500 bu cart takes ~2.1
+    // sim-minutes to empty, against the 10 seconds it used to take.
+    dumpTonsPerMinute: 20,
     alongsideMeters: 15,
   },
   forage: {
     rakeSpeedKmh: 13, // slightly faster than the baler
     baleSpeedKmh: 10, // slightly slower than the rake
     rakeCostPerAcre: 6,
-    baleCostPerAcre: 10,
-    balesPerAcre: 2.5,
-    baleTons: 1,
-    balePricePerBale: 45,
+    baleCostPerAcre: 14, // real round-baling custom rate $14–18/ac (was $10)
+    // 2026-07-25: a round bale is 0.75 t, not 1 t — a real 5x6 of dry hay runs
+    // 1200–1600 lb. Bales PER ACRE went up to match so the tonnage off an acre
+    // is unchanged (2.5 t/ac of corn stover here, as before).
+    balesPerAcre: 3.33,
+    baleTons: 0.75,
+    balePricePerBale: 38, // ~$50/t, unchanged in per-TON terms
     baleTieMinutes: 0.17, // ≈ 10 s at 1×
     baleFillVariance: 0.3, // each bale fills at 70–130% of a nominal bale
   },
   baleProducts: {
     // LEGACY (2026-07-23): corn no longer produces forage, so no new stover is
     // ever made. Kept so bales already in a save keep a name, price and tint.
-    cornStover: { name: "Corn Stover", pricePerBale: 45, balesPerAcre: 2.5, color: "hay", tonsPerBale: 1 },
-    // Grass hay: ~1.5 t/ac/cutting, round bale ≈ 1 t, ~$65/bale (2025 markets).
-    hay: { name: "Grass Hay", pricePerBale: 65, balesPerAcre: 1.5, color: "hay", tonsPerBale: 1 },
-    // Alfalfa hay: a bit denser + roughly 2× the value of grass (~$170 vs ~$110/t).
-    alfalfaHay: { name: "Alfalfa Hay", pricePerBale: 130, balesPerAcre: 1.6, color: "alfalfa", tonsPerBale: 1 },
-    // Small-grain straw (wheat/oats/barley, 2026-07-22) — bulkier and cheaper
-    // than feed hay; bedding, not fodder.
-    straw: { name: "Straw", pricePerBale: 35, balesPerAcre: 1.8, color: "hay", tonsPerBale: 1 },
+    // --- REALISM PASS 2026-07-25, two changes at once, so read these per TON.
+    //
+    // (a) BALE WEIGHT. A round bale is 0.75 t (real 5x6 dry hay = 1200–1600 lb,
+    //     not the 2000 lb it was) and a large square is 0.9 t (real 3x4x8 =
+    //     ~1800 lb, not 3000). `balesPerAcre` rose to keep the TONNAGE off an
+    //     acre where it was — except straw, whose 1.8 t/ac was itself over a
+    //     real 1.2–1.5 recoverable, and which now lands at 1.35 t/ac.
+    // (b) PRICE. Every forage product was underpriced 35–50% per ton, which made
+    //     grass a trap crop at ~$98/ac/yr against corn's $445. These are true
+    //     market rates (maintainer call): hay $130/t, alfalfa $200/t, straw $60/t.
+    //
+    // Alfalfa came out of (b) as the highest-margin crop in the game by a wide
+    // margin (~$773/ac/yr against corn's $445), because its real GROSS is that
+    // high and the sim modelled none of hay's real downside. Two of those are
+    // now priced in (maintainer decision, 2026-07-25):
+    //   - storage loss is real — see `buildings.baleArea.spoilPctPerMonth`;
+    //   - the rest is taken straight off alfalfa's yield, −15% on
+    //     `balesPerAcre` (2.13 → 1.81 round, 1.78 → 1.51 square), standing in
+    //     for the rain-ruined cuttings and leaf shatter the sim doesn't
+    //     simulate. Its PRICE stays at the true market $200/t, which is the
+    //     part that had to stay honest.
+    // 4.07 t/ac/yr over three cuttings is still inside the real 4–6 range.
+    cornStover: { name: "Corn Stover", pricePerBale: 38, balesPerAcre: 3.33, color: "hay", tonsPerBale: 0.75 },
+    // Grass hay: 1.5 t/ac/cutting at $130/t.
+    hay: { name: "Grass Hay", pricePerBale: 98, balesPerAcre: 2.0, color: "hay", tonsPerBale: 0.75 },
+    // Alfalfa hay: 1.36 t/ac/cutting at $200/t — roughly 1.5x grass, as in life.
+    alfalfaHay: { name: "Alfalfa Hay", pricePerBale: 150, balesPerAcre: 1.81, color: "alfalfa", tonsPerBale: 0.75 },
+    // Small-grain straw — bedding, not fodder: 1.35 t/ac at $60/t.
+    straw: { name: "Straw", pricePerBale: 45, balesPerAcre: 1.8, color: "hay", tonsPerBale: 0.75 },
     // Unraked cut forage (currently unreachable — baling always follows a rake).
-    forage: { name: "Forage", pricePerBale: 40, balesPerAcre: 1.5, color: "hay", tonsPerBale: 1 },
-    // --- SQUARE variants (2026-07-24). Each is its round twin at 1.5x the
-    // weight, so 1/1.5 the bales per acre, 1.5x the price per bale — plus ~10%
-    // per ton, because squares stack tight on a trailer and in a barn. The
-    // Large Square Baler is the only way to make them.
-    haySquare: { name: "Grass Hay (Square)", pricePerBale: 107, balesPerAcre: 1.0, color: "hay", tonsPerBale: 1.5, square: true },
-    alfalfaHaySquare: { name: "Alfalfa Hay (Square)", pricePerBale: 215, balesPerAcre: 1.07, color: "alfalfa", tonsPerBale: 1.5, square: true },
-    strawSquare: { name: "Straw (Square)", pricePerBale: 58, balesPerAcre: 1.2, color: "hay", tonsPerBale: 1.5, square: true },
+    forage: { name: "Forage", pricePerBale: 53, balesPerAcre: 2.0, color: "hay", tonsPerBale: 0.75 },
+    // --- SQUARE variants (2026-07-24). Each is its round twin at 1.2x the
+    // weight (0.9 t vs 0.75 t), so 1/1.2 the bales per acre — same tonnage off
+    // the same ground — and ~10% more per TON, because squares stack tight on a
+    // trailer and in a barn. The Square Baler is the only way to make them.
+    haySquare: { name: "Grass Hay (Square)", pricePerBale: 129, balesPerAcre: 1.67, color: "hay", tonsPerBale: 0.9, square: true },
+    alfalfaHaySquare: { name: "Alfalfa Hay (Square)", pricePerBale: 198, balesPerAcre: 1.51, color: "alfalfa", tonsPerBale: 0.9, square: true },
+    strawSquare: { name: "Straw (Square)", pricePerBale: 59, balesPerAcre: 1.5, color: "hay", tonsPerBale: 0.9, square: true },
   },
   buildings: {
     silo: {
@@ -876,12 +967,16 @@ export const gameConfig: GameConfig = {
       medium: { price: 75_000, capacityBushels: 25_000 },
       large: { price: 135_000, capacityBushels: 50_000 },
     },
-    baleBarn: { price: 70_000, capacityBales: 300 },
+    // Real stored-hay dry-matter loss over a ~6-month storage season is 2–5%
+    // under cover and 5–20% out in the weather. Expressed per month: 0.5% vs
+    // 2.5%, so a bale left outside all winter loses ~14% and the same bale in
+    // the Barn loses ~3%.
+    baleBarn: { price: 70_000, capacityBales: 300, spoilPctPerMonth: 0.005 },
     // Outdoor bale storage — cheaper than the Barn, and now CAPPED like it
     // (maintainer request, 2026-07-24, replacing the unlimited capacity it had
     // from 2026-07-17). A real number here is what makes the Sell Point
     // fallback reachable: a hauler with nowhere to put its load sells it.
-    baleArea: { price: 25_000, capacityBales: 1000 },
+    baleArea: { price: 25_000, capacityBales: 1000, spoilPctPerMonth: 0.025 },
     tractorBarn: { price: 60_000, slots: 3 },
     implementBarn: { price: 40_000, slots: 4 },
     farmYard: { price: 15_000 },
@@ -893,10 +988,20 @@ export const gameConfig: GameConfig = {
   yieldRangeNarrowing: 0.85,
   rotationBonusPct: 0.1,
   market: {
-    // Every product tops out in December, tapering to base ±2 months away:
-    // Dec +25%, Nov/Jan +15%, Oct/Feb +10%, everything else base.
-    peakMonth: 11, // December
-    seasonalBonusByDistance: { 0: 0.25, 1: 0.15, 2: 0.1 },
+    // Re-anchored to REAL grain seasonality 2026-07-25 (was December, +25%).
+    //
+    // Cash corn and beans bottom at harvest and peak the following early
+    // SUMMER, as old-crop supply tightens ahead of the new one — the December
+    // peak had the curve topping out six weeks after the combines stopped,
+    // which rewarded exactly the marketing nobody does. The premium is +12%
+    // too, not +25%: real Oct→Jun carry is 8–15%.
+    //
+    // The gameplay consequence is deliberate and good: autumn grain now has to
+    // be STORED across the winter to catch the peak, which is what makes a silo
+    // worth building instead of a formality. Hay peaks Feb–Mar in reality, but
+    // one shared curve is a standing design choice.
+    peakMonth: 6, // July
+    seasonalBonusByDistance: { 0: 0.12, 1: 0.08, 2: 0.04 },
     instantSellPenaltyPct: 0.1,
   },
   harvestWindowMonths: 2,

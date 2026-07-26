@@ -55,6 +55,78 @@ function runTasks(save: SaveState, from: number, done: () => boolean, cap = 400_
 const noHaulLeft = (save: SaveState, field: Field) => () =>
   (field.baleLocations?.length ?? 0) === 0 && !save.tasks.some((t) => t.type === "haulBales");
 
+/**
+ * `haulTotalBales` — the denominator behind the Work Queue's progress bar
+ * (2026-07-25), added so a haul card could be laid out like every other job.
+ *
+ * A haul isn't acres-based, so there was nothing to draw a bar from. It's a
+ * HIGH-WATER mark rather than a count taken when the job starts, because baling
+ * and hauling deliberately overlap: fresh bales land in a field the relay is
+ * already clearing, and a fixed total would have run the bar past 100%.
+ */
+describe("haul progress has a denominator", () => {
+  it("picks up the field's bale count once the job starts ticking", () => {
+    const save = gameForHaul();
+    buyImplement(save, "haySpikes", "medium");
+    buyBuildingAt(save, "baleArea", [-300, -300]);
+    const field = baledField(save, 8, "hay");
+    const task = queueHaulBales(save, field.id)!;
+
+    expect(task.haulTotalBales).toBeUndefined(); // nothing measured before the first tick
+    runTasks(save, APRIL_1, () => (task.haulTotalBales ?? 0) > 0, 5_000);
+    expect(task.haulTotalBales).toBe(8);
+  });
+
+  it("counts what the rigs are carrying, so it can't dip as they load up", () => {
+    const save = gameForHaul();
+    buyImplement(save, "haySpikes", "medium"); // 2 bales
+    buyBuildingAt(save, "baleArea", [-300, -300]);
+    const field = baledField(save, 8, "hay");
+    const task = queueHaulBales(save, field.id)!;
+
+    // Sample the whole run: the total must never fall, and must never be less
+    // than what's demonstrably still out there.
+    let peak = 0;
+    let now = APRIL_1;
+    while (!noHaulLeft(save, field)() && now - APRIL_1 < 400_000) {
+      now += 30;
+      tickTasks(save, now, 30, () => 0.5);
+      const total = task.haulTotalBales ?? 0;
+      expect(total).toBeGreaterThanOrEqual(peak); // monotonic
+      expect(total).toBeGreaterThanOrEqual(field.baleLocations?.length ?? 0);
+      peak = total;
+    }
+    expect(peak).toBe(8);
+  });
+
+  it("rises when baling drops MORE bales into a field already being cleared", () => {
+    // The overlap case the high-water mark exists for. A fixed total taken at
+    // task creation would leave the bar reading over 100% here.
+    const save = gameForHaul();
+    buyImplement(save, "haySpikes", "small"); // 1 bale a trip, so the run is long
+    buyBuildingAt(save, "baleArea", [-300, -300]);
+    // 30 bales, not a handful: a 4-bale field is cleared inside 90 sim-minutes
+    // and the task is gone before there's anything to add to.
+    const field = baledField(save, 30, "hay");
+    const task = queueHaulBales(save, field.id)!;
+
+    // Carry the clock forward between the two runs — restarting at APRIL_1
+    // would step sim time BACKWARDS on the second one.
+    const afterFirst = runTasks(save, APRIL_1, () => (task.haulTotalBales ?? 0) > 0, 5_000);
+    expect(task.haulTotalBales).toBe(30);
+    expect(save.tasks).toContain(task); // guards the premise: still running
+
+    // The baler catches up and drops twenty more into the same field.
+    const s = Math.sqrt(20 * 4046.8564224);
+    for (let i = 0; i < 20; i++) field.baleLocations!.push([s * 0.6, s * 0.2 + (i % 10) * s * 0.05]);
+
+    runTasks(save, afterFirst, () => (task.haulTotalBales ?? 0) > 30, 20_000);
+    expect(task.haulTotalBales).toBeGreaterThan(30);
+    // Cleared-so-far can never exceed the total — that's the bar's invariant.
+    expect(task.haulTotalBales!).toBeGreaterThanOrEqual(field.baleLocations?.length ?? 0);
+  });
+});
+
 describe("Bale hauling relay (maintainer request, 2026-07-17)", () => {
   it("direct haul: a lone Hay-Spikes tractor moves loose bales into storage, 1 load at a time", () => {
     const save = gameForHaul();

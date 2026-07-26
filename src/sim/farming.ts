@@ -300,7 +300,7 @@ export function growthProgress(field: Field, now: SimTime): number {
  *    (`field.lastCrop`, set at harvest — see applyHarvestDone). No bonus for
  *    replanting the same crop, and none on a field's first-ever crop (no prior
  *    crop to rotate away from).
- *  - A mulch pass on the previous cycle's residue adds a flat +7%
+ *  - A mulch pass on the previous cycle's residue adds a flat `mulchBonusPct`
  *    (`field.residueMulched`, set post-harvest by the mulch task, consumed by
  *    the next harvest). Annuals only.
  * Read at whatever moment output is produced: live for a display estimate

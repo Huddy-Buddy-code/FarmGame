@@ -198,6 +198,23 @@ export function agentPrice(kind: EquipmentKind, size: EquipmentSize): number {
   return kind === "harvester" ? gameConfig.equipment.harvester[size].price : gameConfig.equipment.tractor[size].price;
 }
 
+/**
+ * How long a grain cart holding `tons` takes to empty into a silo or Sell
+ * Point, in sim-minutes (2026-07-25).
+ *
+ * The silo leg used to be a flat `hauling.dumpMinutes` — ~10 seconds however
+ * much was aboard, so a 1500 bu cart emptied as fast as an almost-empty one.
+ * That was a free pass at precisely the end of the loop that's meant to be the
+ * harvest bottleneck. Rate-based now, at a cart auger's own (faster than the
+ * combine-limited `unloadTonsPerMinute`) rate.
+ *
+ * Keeps a floor of `dumpMinutes` so a near-empty cart still pauses to hook up
+ * rather than teleporting through the phase.
+ */
+export function grainDumpMinutes(tons: number): number {
+  return Math.max(gameConfig.hauling.dumpMinutes, Math.max(0, tons) / gameConfig.hauling.dumpTonsPerMinute);
+}
+
 /** Cutting width (meters) of the Self-Propelled Windrower. */
 export function windrowerWidthM(): number {
   return gameConfig.equipment.windrower.widthFt * FEET_TO_METERS;
@@ -887,14 +904,13 @@ export function estimateTaskHours(save: SaveState, task: FarmTask): number {
   const field = save.fields.find((f) => f.id === task.fieldId);
   if (!field) return 0;
   const remainingAcres = Math.max(0, task.totalAcres - task.doneAcres);
-  const speedMPerHr = taskFieldSpeedKmh(task.type) * 1000;
 
   if (task.status === "active" && task.agentId) {
     const agent = save.agents.find((a) => a.id === task.agentId);
     if (agent) {
       const path = getActivePath(save, task, field, agent);
       const remainingDist = path.total * (task.totalAcres > 0 ? remainingAcres / task.totalAcres : 0);
-      return remainingDist / speedMPerHr;
+      return remainingDist / (taskFieldSpeedKmh(task.type, agent) * 1000);
     }
   }
 
@@ -904,7 +920,11 @@ export function estimateTaskHours(save: SaveState, task: FarmTask): number {
   // it gets first refusal (see the pickup gate) and carries no implement, so it
   // cuts at its OWN width. Without this the estimate fell through to a Mower
   // the farm might not even own, at a nominal "medium" 25 ft (2026-07-24).
-  const windrowerTakesIt = task.type === "mow" && save.agents.some((a) => a.kind === "windrower");
+  // Its own SPEED rides along with it (2026-07-25) — quoting a windrower's
+  // width at a tractor's speed would over-state the job by a third.
+  const windrower = task.type === "mow" ? save.agents.find((a) => a.kind === "windrower") : undefined;
+  const windrowerTakesIt = windrower !== undefined;
+  const speedMPerHr = taskFieldSpeedKmh(task.type, windrower) * 1000;
   // A baler has no width of its own (2026-07-24) — it clears the windrow, whose
   // width the field records. It also has no TASK_IMPLEMENT entry now, so this
   // has to be handled before the table lookup below rather than falling into it.
@@ -1007,7 +1027,13 @@ function isStartable(task: FarmTask, field: Field): boolean {
 /** In-field working speed for a task, km/h — rake and baler run at their own
  * (config) speeds so the rake pulls ahead; everything else uses the shared
  * fieldwork speed. */
-function taskFieldSpeedKmh(type: TaskType): number {
+function taskFieldSpeedKmh(type: TaskType, agent?: Agent): number {
+  // The Self-Propelled Windrower is the one speed keyed to the MACHINE rather
+  // than the task (2026-07-25): a purpose-built windrower runs its header
+  // faster than a tractor pulling a mower over the same ground, and that speed
+  // is half of what the machine is for now its width is a realistic 25 ft. A
+  // tractor+mower on the very same `mow` task still gets the default.
+  if (agent?.kind === "windrower") return gameConfig.work.windrowerSpeedKmh;
   if (type === "rake") return gameConfig.forage.rakeSpeedKmh;
   if (type === "bale") return gameConfig.forage.baleSpeedKmh;
   // The heavy passes got their own speeds 2026-07-24 — the shared default is
@@ -2284,13 +2310,13 @@ function tickAgent(
           continue;
         }
         task.unloadPhase = "dumping";
-        task.phaseTimer = gameConfig.hauling.dumpMinutes;
+        task.phaseTimer = grainDumpMinutes(trailer.cargoTons ?? 0);
         continue;
       }
 
       if (task.unloadPhase === "dumping") {
         agent.state = "working";
-        const timer = task.phaseTimer ?? gameConfig.hauling.dumpMinutes;
+        const timer = task.phaseTimer ?? grainDumpMinutes(trailer.cargoTons ?? 0);
         const used = Math.min(timer, budget);
         budget -= used;
         const left = timer - used;
@@ -2448,6 +2474,19 @@ function tickAgent(
         // Field sold mid-haul — nothing left to reference. Drop the whole job.
         finishHaul(save, task, agent, events);
         continue;
+      }
+
+      // How big this job is, for the Work Queue's progress bar (2026-07-25).
+      // A HIGH-WATER MARK rather than a count taken at task creation, because
+      // baling and hauling overlap (maintainer request, 2026-07-23) — bales
+      // keep landing in the field while the relay is already clearing it, and a
+      // fixed denominator would show progress running past 100%. Counting what
+      // the rigs are carrying too keeps it from dipping as they load up.
+      {
+        const spikesImpl = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "haySpikes");
+        const carried = (spikesImpl?.cargoBales ?? 0) + (trailerImpl?.cargoBales ?? 0);
+        const seen = (haulField.baleLocations?.length ?? 0) + carried;
+        if (seen > (task.haulTotalBales ?? 0)) task.haulTotalBales = seen;
       }
 
       // --- TRAILER brain ---
@@ -2952,7 +2991,7 @@ function tickAgent(
     // Working: drive the coverage path at field speed; swept in-field distance ×
     // swath = area worked, which is where doneAcres comes from (physical model).
     const path = getActivePath(save, task, field, agent);
-    const speed = (taskFieldSpeedKmh(task.type) * 1000) / 60; // meters per sim-minute
+    const speed = (taskFieldSpeedKmh(task.type, agent) * 1000) / 60; // meters per sim-minute
     let dist = pathDistRuntime.get(task.id);
     if (dist === undefined) dist = distanceAtAcres(path, task.doneAcres, task.totalAcres);
 
@@ -3099,7 +3138,7 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
       break;
     case "mulch":
       // Residue shredded + worked back in: the surface returns to bare stubble,
-      // and the field carries a +7% boost into its NEXT crop (residueMulched,
+      // and the field carries a `mulchBonusPct` boost into its NEXT crop (residueMulched,
       // consumed by that harvest — productivityMultiplier, farming.ts). Mulching
       // is the alternative to baling, so any un-baled residue is now spent.
       field.status = "stubble";
@@ -3441,7 +3480,7 @@ function plantDue(now: SimTime, plan: FieldPlan): boolean {
  *
  * The plow WAITS while this is true (maintainer request, 2026-07-23). Plowing
  * turns the residue under, so a plow that ran ahead of a scheduled mulch would
- * silently cancel it and its +7% yield bonus — the mulch has to go first.
+ * silently cancel it and its yield bonus — the mulch has to go first.
  * Perennials never mulch (canMulch is false for them), so this is always false
  * there.
  */

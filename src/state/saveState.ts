@@ -237,6 +237,16 @@ export interface Building {
    * silo a store can hold a mix). Filled by the bale-hauling relay
    * (`sim/tasks.ts` haulBales). Both kinds cap at their `capacityBales`. */
   storedBales?: Partial<Record<BaleProduct, number>>;
+  /** Bale-storage-only (2026-07-25): the FRACTION of a bale of each product
+   * that has rotted but not yet cost a whole bale.
+   *
+   * Spoilage is a percentage of the pile per month, so it almost never lands on
+   * a whole number — and `storedBales` has to stay integral, since a bale is a
+   * physical object that gets hauled, sold and drawn on the map. So the
+   * fractional remainder accrues here and a bale is removed each time it passes
+   * 1. Cleared when a product's pile empties, so an emptied store can't carry
+   * stale debt into the next load. See `tickBaleSpoilage` (sim/buildings.ts). */
+  spoilAccrued?: Partial<Record<BaleProduct, number>>;
   /** Bale-storage-only (optional): dedicate this store to ONE product — only
    * that product hauls in. Unassigned (undefined) accepts any product (the
    * default; mirrors an unassigned silo but bales may then be mixed). */
@@ -360,6 +370,15 @@ export interface FarmTask {
    * spikes tractor uses `phaseTimer`; the trailer needs its own so both can
    * pause simultaneously). */
   trailerTimer?: number;
+  /** haulBales-only (2026-07-25): the most bales this job has ever had to move
+   * — what's still in the field plus what the rigs are carrying, kept as a
+   * HIGH-WATER mark. It's the denominator of the Work Queue's progress bar,
+   * which a haul task had no way to draw before (it isn't acres-based).
+   *
+   * A running maximum rather than a count taken at creation because baling and
+   * hauling deliberately overlap: fresh bales keep landing in a field the relay
+   * is already clearing, so a fixed total would send the bar past 100%. */
+  haulTotalBales?: number;
   /** haulBales-only: true while a hauler is parked with nowhere to put bales
    * (no Bale Storage exists, or every eligible store is full) — ⚠️ in the UI. */
   waitingForStorage?: boolean;
