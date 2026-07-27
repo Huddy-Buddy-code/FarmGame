@@ -36,8 +36,8 @@ beforeEach(() => {
 // beforeEach above — the module itself only touches `localStorage` inside
 // function bodies, so import order relative to the polyfill doesn't matter.
 import {
-  ensureActiveFarm, listFarms, getActiveFarmId, getFarmMeta, createFarm, renameFarm,
-  switchFarm, deleteFarm, persistGame, loadGame, loadGameFor, clearSavedGame,
+  ensureActiveFarm, listFarms, getActiveFarmId, getFarmMeta, getActiveFarm, createFarm, renameFarm,
+  switchFarm, deleteFarm, persistGame, loadGame, loadGameFor, clearSavedGame, DEFAULT_COUNTY_ID,
 } from "../src/state/persistence";
 import { newGame } from "../src/state/saveState";
 
@@ -76,7 +76,7 @@ describe("multi-farm persistence (maintainer request, 2026-07-13)", () => {
     const first = ensureActiveFarm();
     persistGame({ save: freshSave(), clockNow: 100 });
 
-    const second = createFarm("Big Sky Acres");
+    const second = createFarm("Big Sky Acres", "story-ia");
     expect(getActiveFarmId()).toBe(second.id);
     expect(listFarms().map((f) => f.name).sort()).toEqual(["Big Sky Acres", "Farm 1"]);
     expect(loadGame()).toBeNull(); // the NEW active farm has no save yet
@@ -88,7 +88,7 @@ describe("multi-farm persistence (maintainer request, 2026-07-13)", () => {
 
   it("an empty/whitespace name falls back to a default rather than an empty farm name", () => {
     ensureActiveFarm();
-    const f = createFarm("   ");
+    const f = createFarm("   ", "story-ia");
     expect(f.name.trim().length).toBeGreaterThan(0);
   });
 
@@ -103,7 +103,7 @@ describe("multi-farm persistence (maintainer request, 2026-07-13)", () => {
   it("switchFarm changes which farm loadGame/persistGame operate on", () => {
     const a = ensureActiveFarm();
     persistGame({ save: freshSave(), clockNow: 1 });
-    const b = createFarm("Second");
+    const b = createFarm("Second", "story-ia");
     persistGame({ save: freshSave(), clockNow: 2 });
 
     switchFarm(a.id);
@@ -122,7 +122,7 @@ describe("multi-farm persistence (maintainer request, 2026-07-13)", () => {
   it("deleteFarm removes its save data and metadata", () => {
     const a = ensureActiveFarm();
     persistGame({ save: freshSave(), clockNow: 1 });
-    const b = createFarm("Second");
+    const b = createFarm("Second", "story-ia");
     persistGame({ save: freshSave(), clockNow: 2 });
 
     deleteFarm(b.id);
@@ -133,7 +133,7 @@ describe("multi-farm persistence (maintainer request, 2026-07-13)", () => {
   it("deleting the ACTIVE farm switches to another existing farm", () => {
     const a = ensureActiveFarm();
     persistGame({ save: freshSave(), clockNow: 1 });
-    const b = createFarm("Second"); // now active
+    const b = createFarm("Second", "story-ia"); // now active
     persistGame({ save: freshSave(), clockNow: 2 });
 
     const newActive = deleteFarm(b.id);
@@ -167,9 +167,69 @@ describe("multi-farm persistence (maintainer request, 2026-07-13)", () => {
 
     const meta = ensureActiveFarm();
     expect(meta.name).toBe("Farm 1");
+    expect(meta.countyId).toBe(DEFAULT_COUNTY_ID); // pre-county save = Story County
     expect(listFarms()).toHaveLength(1);
     expect(loadGame()!.clockNow).toBe(777);
     // The legacy key is cleaned up after migration.
     expect(localStorage.getItem("farm-sim-save-v1")).toBeNull();
+  });
+});
+
+describe("farm countyId (home-town counties, 2026-07-26)", () => {
+  it("createFarm records the county; listFarms and getActiveFarm expose it", () => {
+    ensureActiveFarm();
+    const f = createFarm("Palouse Wheat Co", "whitman-wa");
+    expect(f.countyId).toBe("whitman-wa");
+    expect(getFarmMeta(f.id)!.countyId).toBe("whitman-wa");
+    expect(getActiveFarm()!.id).toBe(f.id);
+    expect(getActiveFarm()!.countyId).toBe("whitman-wa");
+    expect(listFarms().every((m) => typeof m.countyId === "string" && m.countyId.length > 0)).toBe(true);
+  });
+
+  it("ensureActiveFarm on a fresh install creates a DEFAULT_COUNTY_ID farm", () => {
+    expect(ensureActiveFarm().countyId).toBe(DEFAULT_COUNTY_ID);
+  });
+
+  it("a pre-county index (farms without countyId) is backfilled AND rewritten in storage", () => {
+    // Simulate the pre-2026-07-26 index shape verbatim.
+    localStorage.setItem(
+      "farm-sim-index-v1",
+      JSON.stringify({
+        activeId: "farm-1",
+        farms: [
+          { id: "farm-1", name: "Farm 1", createdAt: 1, updatedAt: 2 },
+          { id: "farm-2", name: "Old Second", createdAt: 3, updatedAt: 4 },
+        ],
+      }),
+    );
+
+    const farms = listFarms();
+    expect(farms).toHaveLength(2);
+    expect(farms.every((f) => f.countyId === DEFAULT_COUNTY_ID)).toBe(true);
+    // The migration writes back, so the raw stored JSON now carries countyId
+    // (one-time upgrade, not a re-derivation on every read).
+    const stored = JSON.parse(localStorage.getItem("farm-sim-index-v1")!) as {
+      farms: { id: string; countyId?: string }[];
+    };
+    expect(stored.farms.every((f) => f.countyId === DEFAULT_COUNTY_ID)).toBe(true);
+  });
+
+  it("the countyId save-stamp round-trips, and un-stamped saves still load", () => {
+    ensureActiveFarm();
+    persistGame({ save: freshSave(), clockNow: 10, countyId: DEFAULT_COUNTY_ID });
+    expect(loadGame()!.countyId).toBe(DEFAULT_COUNTY_ID);
+
+    // A pre-county save blob (no stamp) remains loadable as-is.
+    const f2 = createFarm("Second", "story-ia");
+    persistGame({ save: freshSave(), clockNow: 20 });
+    const loaded = loadGameFor(f2.id)!;
+    expect(loaded.clockNow).toBe(20);
+    expect(loaded.countyId).toBeUndefined();
+  });
+
+  it("deleting the last farm auto-creates a replacement that has a countyId", () => {
+    const only = ensureActiveFarm();
+    deleteFarm(only.id);
+    expect(getActiveFarm()!.countyId).toBe(DEFAULT_COUNTY_ID);
   });
 });

@@ -1222,6 +1222,59 @@
       #montage .card { padding: 18px 34px; font-size: 22px; font-weight: 700; text-align: center; }
       #montage .card .mo { font-size: 30px; }
 
+      /* ---------- Home screen (main menu, 2026-07-26) ---------- */
+      /* Opaque — it shows BEFORE the map exists, so there's nothing to peek at
+         behind it. Above every in-game surface. */
+      #home-screen {
+        position: absolute; inset: 0; z-index: 150; display: none;
+        background: var(--cream); overflow-y: auto;
+        align-items: flex-start; justify-content: center;
+      }
+      #home-screen .hs-card {
+        width: min(560px, 92vw); margin: 7vh 0 40px; padding: 22px 26px;
+      }
+      #home-screen h1 { margin: 0 0 2px; font-size: 26px; }
+      #home-screen .hs-tag { color: #8a7658; font-size: 13px; margin-bottom: 16px; }
+      #home-screen h2 { margin: 14px 0 6px; font-size: 16px; }
+      #hs-farms .farm-row { cursor: default; }
+      #hs-new-toggle { width: 100%; margin-top: 10px; }
+      #hs-new { display: none; margin-top: 12px; border-top: 1.5px solid var(--wood); padding-top: 12px; }
+      #hs-new .hs-field { margin: 8px 0; }
+      #hs-new label { display: block; font-size: 12px; font-weight: 700; margin-bottom: 3px; }
+      #hs-new input, #hs-new select {
+        width: 100%; padding: 7px 10px; font: inherit; border-radius: 10px;
+        border: 1.5px solid var(--wood); background: var(--cream); box-sizing: border-box;
+      }
+      #hs-county-list {
+        max-height: 180px; overflow-y: auto; margin-top: 4px;
+        border: 1.5px solid var(--wood); border-radius: 10px; background: var(--cream);
+      }
+      #hs-county-list:empty { display: none; }
+      .hs-county-opt { padding: 6px 10px; cursor: pointer; font-size: 13px; }
+      .hs-county-opt:hover { background: var(--cream-2); }
+      .hs-county-opt .hs-badge {
+        float: right; font-size: 11px; color: var(--green-dark); font-weight: 700;
+      }
+      #hs-picked {
+        display: none; margin-top: 10px; background: var(--cream-2);
+        border: 1.5px solid var(--wood); border-radius: 12px; padding: 10px; gap: 12px;
+        align-items: center;
+      }
+      #hs-thumb { width: 128px; height: 98px; border-radius: 8px; object-fit: cover; background: #7a6a4a; }
+      #hs-picked .hs-picked-info { flex: 1; }
+      #hs-picked .hs-picked-name { font-weight: 700; }
+      #hs-picked .hs-picked-sub { font-size: 12px; color: #8a7658; }
+      #hs-create { width: 100%; margin-top: 10px; }
+      #hs-progress { display: none; margin-top: 10px; font-size: 13px; }
+      #hs-progress .progress { margin-top: 5px; }
+      #hs-progress .fill { width: 100%; animation: hs-pulse 1.2s ease-in-out infinite; }
+      @keyframes hs-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+      #hs-error {
+        display: none; margin-top: 10px; padding: 8px 12px; border-radius: 10px;
+        background: rgba(199, 81, 70, 0.12); border: 1.5px solid var(--red);
+        color: var(--red); font-size: 13px;
+      }
+
       /* ---------- Dev corner ---------- */
       #dev {
         position: absolute; bottom: 12px; left: 12px; z-index: 15;
@@ -1348,8 +1401,7 @@
       <h2>⚙️ Farms</h2>
       <div class="sub">Switching or deleting reloads the page — the active farm autosaves first</div>
       <div class="settings-new">
-        <input id="settings-new-name" type="text" placeholder="New farm name…" />
-        <button id="settings-new-create" class="primary">＋ Create</button>
+        <button id="settings-new-menu" class="primary">＋ New farm… (main menu)</button>
       </div>
       <div id="settings-farms"></div>
     </div>
@@ -1433,6 +1485,46 @@
     <div id="toast" class="panel"></div>
 
     <div id="montage"><div class="card panel"><div class="mo" id="montage-month">April</div><div>The weeks roll by…</div></div></div>
+
+    <!-- Home screen (main menu): shown every launch, before the map boots.
+         Farm list + "new farm in any CONUS county" picker (src/ui/homeScreen.ts). -->
+    <div id="home-screen">
+      <div class="hs-card panel">
+        <h1>🚜 Farm Logistics Sim</h1>
+        <div class="hs-tag">Build a farm in your home town — real satellite imagery, real roads.</div>
+        <h2>Your farms</h2>
+        <div id="hs-farms"></div>
+        <button id="hs-new-toggle" class="primary">＋ New Farm</button>
+        <div id="hs-new">
+          <div class="hs-field">
+            <label for="hs-name">Farm name</label>
+            <input id="hs-name" type="text" placeholder="e.g. Sunrise Acres" />
+          </div>
+          <div class="hs-field">
+            <label for="hs-state">State</label>
+            <select id="hs-state"></select>
+          </div>
+          <div class="hs-field">
+            <label for="hs-county">County</label>
+            <input id="hs-county" type="text" placeholder="Type to search…" autocomplete="off" />
+            <div id="hs-county-list"></div>
+          </div>
+          <div id="hs-picked">
+            <img id="hs-thumb" alt="" draggable="false" />
+            <span class="hs-picked-info">
+              <div class="hs-picked-name" id="hs-picked-name"></div>
+              <div class="hs-picked-sub" id="hs-picked-sub"></div>
+            </span>
+          </div>
+          <button id="hs-create" class="primary" disabled>Start farming here</button>
+          <div id="hs-progress">
+            <span id="hs-progress-label">Preparing…</span>
+            <div class="progress"><div class="fill"></div></div>
+          </div>
+          <div id="hs-error"></div>
+        </div>
+      </div>
+    </div>
 
     <div id="dev">
       <div class="row" id="status-naip">NAIP: …</div>

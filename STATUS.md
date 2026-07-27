@@ -2027,6 +2027,144 @@ elsewhere would stall a cut.
 
 **630/630 passing, typecheck + build clean.**
 
+## 2026-07-26 — overlay upload deadlock (the reveal-pipeline follow-up)
+
+Read MapLibre's CanvasSource source before implementing the planned
+`setAnimating` switch — the real bug was worse than the audit said, and the
+planned fix would have made it worse:
+
+- A playing canvas source reports `hasTransition() → true`, which re-sets
+  `_styleDirty` after every render → the map schedules another repaint →
+  **"idle" never fires while any canvas source is playing.**
+- `markDirty()`'s pattern (`play()` → `once("idle")` → `pause()`) was therefore
+  deadlocked: the pause could never run. Every surface that ever got a
+  `markDirty()` — i.e. every field, from first render — stayed playing for the
+  whole session: continuous ~60 fps repaint, full-canvas GPU re-upload of every
+  field every frame, plus one leaked idle handler per markDirty call. This, not
+  the 8/s reveal throttle, was the sustained-stutter source.
+- `setAnimating` (never called from anywhere) was the same disease on purpose —
+  deleted instead of adopted.
+
+Changes:
+
+- `src/map/overlay.ts` — `markDirty()` is now a synchronous one-shot upload:
+  `play(); pause();` — MapLibre's `pause()` runs `prepare()` (a
+  `texture.update(canvas)`) while the playing flag is still up, then clears
+  it. No idle handler, no repaint loop. Off-screen edge: `prepare()` skips
+  the upload when the source's quad has no live tile, so a `pendingUpload`
+  flag + a map `render` listener retries until the quad is next drawn (one
+  frame late, only when panning back to a field repainted off-screen).
+- `src/main.ts` — `stampReveal` takes/returns a route-segment cursor
+  (`Reveal.seg`): `lastDist` is monotonic per task, so stamping resumes where
+  it left off and breaks at the first segment past `to`, instead of rescanning
+  the whole route every frame. Reveal upload throttle (120 ms) unchanged —
+  it's the right rate now that each upload really is just one upload.
+
+**630/630 passing, typecheck clean.** Needs maintainer eyes (no preview here):
+strip-by-strip reveal during fieldwork; final strips surviving task end; an
+off-screen field's repaint looking right after panning back to it.
+
+## 2026-07-25 — two more sprites
+
+- **Square Baler** — new art (`SquareBaler_sideleft.png`). First photographic
+  sprite for either baler beyond the round one; size-agnostic, since only Medium
+  is sold. Previously fell back to a hand-drawn SVG.
+- **Windrower** — replacement art, overwriting the old `Windrower_sideleft.png`
+  (the previous full-res is still in `_drafts/` and in git history).
+- Both arrived as raw `ChatGPT Image ….png` exports sitting in
+  `src/assets/Equipment/` — the SHIPPED directory, at full res. Moved to
+  `art-source/` under real names, resized to 256, raw exports deleted.
+- The windrower source is **1536×1024**. `machineImgTag` renders into a
+  forced-square `<img>`, so a straight resize stretches the machine vertically —
+  it's padded to a transparent square first now, then resized. The old windrower
+  sprite had been squashed. Documented in CLAUDE.md.
+- `tests/machineImages.test.ts` +2: both baler kinds resolve to different
+  pictures (and the `bailer` alias still works), and the no-size-token form
+  resolves for every size column.
+
+**632/632 passing, typecheck + build clean. dist 3.69 MB (18 sprites, 1.15 MB).**
+
+## 2026-07-27 — plow headlands 6 → 3
+
+Maintainer report: too many headland laps now the plow widths are realistic. The
+count was set when a Large plow was 20 ft; at 50 ft, six laps was a 91 m border
+— on a 40-acre square, 45% of the field driven as headland before the interior
+fill even starts. Three laps is 46 m (23%), which reads as a border again.
+
+| | 6 laps | 3 laps |
+|---|---|---|
+| Small 15 ft | 27 m (14%) | 14 m (7%) |
+| Medium 30 ft | 55 m (27%) | 27 m (14%) |
+| Large 50 ft | 91 m (45%) | 46 m (23%) |
+
+One-line change in `TASK_HEADLANDS` (sim/coverage.ts). **Texture and reveal
+needed no separate edit** — `headlandLapsForStatus` (field/fieldRender.ts) reads
+that same table for the frame it paints, and the reveal stamps along the
+coverage path built from it, so both follow by construction. That shared source
+was deliberate (2026-07-20) precisely so the drive path and the finished texture
+can't drift apart.
+
+Two stale test names/comments naming "plow's 6" updated; neither asserted it.
+
+**102 headland/coverage tests passing** (`coverage`, `farming`,
+`headlandProgress`, `headlandShapes`).
+
+## 2026-07-27 — home screen + any-CONUS-county play (4 phases, one session)
+
+The "build a farm in your home town" feature. A main-menu home screen shows
+EVERY launch: pick a farm (each farm is bound to a county) or create one in
+any of 3,109 CONUS counties. Hybrid data model (maintainer decisions):
+bundled counties (story-ia) load instantly; any other county fetches roads
+live from Overpass (~10–30 s once) and caches in IndexedDB. Plan file:
+`~/.claude/plans/make-a-plan-on-gentle-harp.md`.
+
+- **Phase 1 — county-bound farms.** `persistence.ts`: `FarmMeta.countyId`
+  (backfill migration to `story-ia` on first index read, write-back once),
+  `createFarm(name, countyId)`, `getActiveFarm()`, optional
+  `PersistedGame.countyId` integrity stamp (FarmMeta authoritative; boot
+  warns on mismatch, trusts the meta). `main.ts` boots from
+  `activeFarm.countyId`; the `COUNTY_ID` constant is gone.
+- **Phase 2 — national county index.** `tools/build-county-index.mjs`
+  (Census cb_2024_us_county_500k via new devDep `shapefile`) →
+  `public/counties/index.json`: 3,109 CONUS counties (AK/HI/territories
+  excluded — no NAIP coverage), 434 KB, stable slug ids (`story-ia` matches
+  the bundled package by construction; VA independent-city collisions
+  handled). `src/county/countyIndex.ts` loads it; UTM zone derived from
+  center lng at runtime. The committed index is validated by
+  `tests/countyIndex.test.ts` — the suite is the review gate for rebuilds.
+- **Phase 3 — runtime builder + cache.** `overpass.ts` (pure query+convert,
+  replicating the bundled extract recipe exactly — 8 highway classes,
+  `major=1` ⇔ motorway/trunk/primary/secondary; `EXTRACT_RECIPE_VERSION`
+  gates caches), `idbCache.ts` (best-effort, all failures degrade to
+  rebuild), `builder.ts` (manifest synthesis — zone/zoom derived; Overpass
+  POST with two mirrors, 180 s timeout, byte-count progress,
+  `CountyBuildError` with per-mirror reasons). `registry.ts` `loadCounty` is
+  now bundled → IDB cache → live build. Known limit: huge urban counties
+  (LA, Cook) mean very large Overpass responses — documented, not solved.
+- **Phase 4 — the home screen.** `#home-screen` (opaque, z 150) +
+  `src/ui/homeScreen.ts`: farm rows (summary + county name), Play/Delete;
+  New Farm = state select → county type-ahead → NAIP `exportImage`
+  thumbnail → BUILD-FIRST create (the county downloads in the menu with
+  progress; the farm is only created on success, so a failed build can't
+  strand a farm). Boot orchestration in `main.ts`: `boot()` consumes a
+  per-tab `sessionStorage` autoboot flag before any await; the menu
+  resolves only for the already-active farm, every other choice reloads
+  with the flag set. County-load failures re-offer the menu with the error;
+  crashes AFTER the county loaded (`mainStarted`) don't re-run `main()`.
+  Settings tab: Load sets the autoboot flag (in-game switches skip the
+  menu); the inline create form became a "New farm… (main menu)" button.
+  `farmSummaryLine` extracted to `src/state/farmSummary.ts`.
+
+**668/668 passing, typecheck + build clean.** ⚠️ PROJECT_BRIEF still frames
+v1 as "one county" (§12 step 1) — needs a maintainer-approved amendment for
+the hybrid model; `county/types.ts`'s "no live Overpass" header was already
+updated. Maintainer visual checklist: (1) fresh profile → menu → create a
+farm in a live county (e.g. Lancaster PA) → progress → boots with roads
+working; (2) reload → menu → that farm boots instantly from cache; (3)
+network off → create a live county → error banner, no ghost farm, retry
+works after reconnect; (4) Settings Load skips the menu; deleting the
+active farm lands on it; (5) a pre-feature profile's farms appear and play.
+
 ## Known gaps / unverified
 
 - **Field panel Schedule calendar drag-and-drop is logic-tested only** — no

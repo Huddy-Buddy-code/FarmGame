@@ -25,9 +25,18 @@ const LEGACY_KEY = "farm-sim-save-v1";
 const INDEX_KEY = "farm-sim-index-v1";
 const FARM_KEY_PREFIX = "farm-sim-farm-v1:";
 
+/** The county every farm belonged to before farms knew about counties
+ * (2026-07-26) — also the fallback for any farm record missing one. */
+export const DEFAULT_COUNTY_ID = "story-ia";
+
 export interface PersistedGame {
   save: SaveState;
   clockNow: SimTime;
+  /** Integrity stamp (2026-07-26): the county this save's UTM geometry belongs
+   * to. FarmMeta.countyId stays authoritative — on mismatch the boot warns and
+   * trusts the meta (the stamp self-heals on the next autosave). Optional so
+   * pre-county saves load unchanged. */
+  countyId?: string;
   /** Legacy (pre-task-queue saves): fields that were mid-harvest. New saves
    * don't write this — in-progress work lives in save.tasks now. */
   harvestingIds?: string[];
@@ -40,6 +49,11 @@ export interface PersistedGame {
 export interface FarmMeta {
   id: string;
   name: string;
+  /** Which county this farm plays in (2026-07-26). AUTHORITATIVE — the save
+   * blob's geometry is UTM meters in this county's zone, so booting a farm
+   * means loading THIS county. Pre-county farms are backfilled to
+   * [[DEFAULT_COUNTY_ID]] on first index read. */
+  countyId: string;
   /** Date.now() ms — for sorting/display in the Settings tab. */
   createdAt: number;
   updatedAt: number;
@@ -59,7 +73,20 @@ function readIndex(): FarmIndex {
   if (raw) {
     try {
       const idx = JSON.parse(raw) as FarmIndex;
-      if (Array.isArray(idx.farms)) return idx;
+      if (Array.isArray(idx.farms)) {
+        // Backfill migration (2026-07-26): farms created before counties
+        // existed have no countyId — they're all Story County by construction.
+        // Written back once, so this is a one-time upgrade per browser.
+        let dirty = false;
+        for (const f of idx.farms) {
+          if (!f.countyId) {
+            f.countyId = DEFAULT_COUNTY_ID;
+            dirty = true;
+          }
+        }
+        if (dirty) writeIndex(idx);
+        return idx;
+      }
     } catch {
       /* fall through to a fresh index below */
     }
@@ -71,7 +98,10 @@ function readIndex(): FarmIndex {
     localStorage.setItem(farmKey(id), legacy);
     localStorage.removeItem(LEGACY_KEY);
     const now = Date.now();
-    const idx: FarmIndex = { activeId: id, farms: [{ id, name: "Farm 1", createdAt: now, updatedAt: now }] };
+    const idx: FarmIndex = {
+      activeId: id,
+      farms: [{ id, name: "Farm 1", countyId: DEFAULT_COUNTY_ID, createdAt: now, updatedAt: now }],
+    };
     writeIndex(idx);
     return idx;
   }
@@ -111,26 +141,33 @@ export function ensureActiveFarm(): FarmMeta {
   if (idx.activeId && idx.farms.some((f) => f.id === idx.activeId)) {
     return idx.farms.find((f) => f.id === idx.activeId)!;
   }
-  const meta = registerFarm(idx, "Farm 1");
+  const meta = registerFarm(idx, "Farm 1", DEFAULT_COUNTY_ID);
   idx.activeId = meta.id;
   writeIndex(idx);
   return meta;
 }
 
-function registerFarm(idx: FarmIndex, name: string): FarmMeta {
+/** The active farm's metadata, if any farm is active. Convenience over
+ * `getFarmMeta(getActiveFarmId()!)` for boot code that needs the countyId. */
+export function getActiveFarm(): FarmMeta | undefined {
+  const idx = readIndex();
+  return idx.activeId ? idx.farms.find((f) => f.id === idx.activeId) : undefined;
+}
+
+function registerFarm(idx: FarmIndex, name: string, countyId: string): FarmMeta {
   const now = Date.now();
-  const meta: FarmMeta = { id: freshFarmId(idx), name, createdAt: now, updatedAt: now };
+  const meta: FarmMeta = { id: freshFarmId(idx), name, countyId, createdAt: now, updatedAt: now };
   idx.farms.push(meta);
   return meta;
 }
 
 /** Create a new, empty farm (no save data — the caller's `newGame()` writes
- * the first `persistGame()` once play starts) and make it active. Caller
- * reloads the page afterward, same pattern as Reset. */
-export function createFarm(name: string): FarmMeta {
+ * the first `persistGame()` once play starts) in the given county and make it
+ * active. Caller reloads the page afterward, same pattern as Reset. */
+export function createFarm(name: string, countyId: string): FarmMeta {
   const idx = readIndex();
   const trimmed = name.trim();
-  const meta = registerFarm(idx, trimmed || `Farm ${idx.farms.length + 1}`);
+  const meta = registerFarm(idx, trimmed || `Farm ${idx.farms.length + 1}`, countyId);
   idx.activeId = meta.id;
   writeIndex(idx);
   return meta;

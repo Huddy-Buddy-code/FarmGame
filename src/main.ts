@@ -37,10 +37,11 @@ import {
 import { distanceAtAcres } from "./sim/coverage";
 import type { CoveragePath } from "./sim/coverage";
 import {
-  persistGame, loadGame, ensureActiveFarm, listFarms, createFarm,
+  persistGame, loadGame, ensureActiveFarm, listFarms,
   switchFarm, deleteFarm, getActiveFarmId, loadGameFor,
 } from "./state/persistence";
-import type { PersistedGame } from "./state/persistence";
+import { farmSummaryLine } from "./state/farmSummary";
+import { runHomeScreen, AUTOBOOT_KEY, MENU_OPEN_NEW_KEY } from "./ui/homeScreen";
 import { sellBales, netWorth, baleInventory, sellAllOfProduct, tickAutoSell } from "./sim/economy";
 import {
   grainUnitPrice, baleUnitPrice, seasonalBonus, monthOf, peakSaleMonth, effectiveSellPlan,
@@ -97,14 +98,12 @@ import type { FarmTask, Agent, Implement, FieldStatus, TaskType, CompletedTask, 
 import { gameConfig, FEET_TO_METERS } from "./config/gameConfig";
 import type { CropId, EquipmentSize, BaleProduct } from "./config/gameConfig";
 
-// Which county to play. Later this comes from a save / county picker.
-const COUNTY_ID = "story-ia";
-
 // Multi-farm saves (maintainer request, 2026-07-13): exactly one farm is
 // "active" at a time — everything below talks to THAT farm's save, same as
 // the old single-slot behavior. The Settings tab creates/loads/deletes farms
 // by switching which one is active and reloading the page (see wireSettingsTab).
-ensureActiveFarm();
+// The farm carries WHICH COUNTY it plays in (2026-07-26) — boot loads that.
+const activeFarm = ensureActiveFarm();
 
 // Load the persisted game if there is one; otherwise start fresh. The game
 // auto-saves (see wirePersistence), so refreshes drop you where you were.
@@ -115,6 +114,15 @@ if (loaded) {
   clock.setTime(loaded.clockNow);
   initIdCounters(save);
   if (loaded.daysPerMonth) setDaysPerMonth(loaded.daysPerMonth);
+  // County integrity stamp (2026-07-26): the save says which county its UTM
+  // geometry belongs to. FarmMeta is authoritative — a mismatch means the
+  // index was hand-edited or half-written; warn and carry on (the stamp
+  // self-heals on the next autosave).
+  if (loaded.countyId && loaded.countyId !== activeFarm.countyId) {
+    console.warn(
+      `Save stamped for county "${loaded.countyId}" but farm "${activeFarm.id}" says "${activeFarm.countyId}" — trusting the farm.`,
+    );
+  }
   // Pre-task-queue saves: give them the new arrays, and turn any legacy
   // mid-harvest markers into queued harvest tasks so the combine resumes them.
   save.tasks ??= [];
@@ -212,7 +220,14 @@ function devStatus(id: string, text: string, cls?: "ok" | "err") {
 }
 
 async function main() {
-  const county = await loadCounty(COUNTY_ID);
+  // For runtime-built counties (not bundled), surface build progress in the
+  // dev corner; the home screen (Phase 4) adds the real progress UI.
+  const county = await loadCounty(activeFarm.countyId, (stage, d) => {
+    const mb = d?.bytes ? ` ${(d.bytes / 1e6).toFixed(1)} MB` : "";
+    devStatus("status-osm", `Roads: ${stage}${mb}…`);
+  });
+  mainStarted = true; // past the county load — failures after this are mid-boot crashes
+
   const m = county.manifest;
 
   setProjection(m.utm.zone, m.utm.hemisphere);
@@ -826,6 +841,9 @@ interface Reveal {
    * 0.5 m/px field canvas is megabytes; re-uploading it every frame while a
    * machine worked was the main source of sustained stutter). */
   lastUpload: number;
+  /** Route-segment cursor: `lastDist` only ever advances, so stamping resumes
+   * scanning the route here instead of from segment 0 every frame. */
+  seg: number;
 }
 
 /** Min real-ms between GPU uploads of a revealing surface (~8/s reads as
@@ -912,7 +930,7 @@ function updateReveals(): void {
         swathM: task.type === "weed" || task.type === "fertilize" ? undefined : path.swath,
         seed: hashSeed(task.fieldId),
       });
-      r = { taskId: task.id, fieldId: task.fieldId, baked, lastDist: 0, lastUpload: 0 };
+      r = { taskId: task.id, fieldId: task.fieldId, baked, lastDist: 0, lastUpload: 0, seg: 0 };
       reveals.set(task.id, r);
     }
 
@@ -921,7 +939,7 @@ function updateReveals(): void {
     // whole canvas is what costs — throttle IT, not the stamping.
     const revealDist = distanceAtAcres(path, task.doneAcres, task.totalAcres);
     if (revealDist > r.lastDist + 1e-6) {
-      stampReveal(surface, r.baked, path, r.lastDist, revealDist);
+      r.seg = stampReveal(surface, r.baked, path, r.lastDist, revealDist, r.seg);
       r.lastDist = revealDist;
       const rt = performance.now();
       if (rt - r.lastUpload > REVEAL_UPLOAD_MS) {
@@ -933,17 +951,26 @@ function updateReveals(): void {
 }
 
 /** Blit the baked NEW texture onto `surface` along the route between full-route
- * distances `from` and `to`, one swath-wide strip per in-field lane segment. */
+ * distances `from` and `to`, one swath-wide strip per in-field lane segment.
+ * `startSeg` is the caller's cursor from the previous stamp (`from` is
+ * monotonic per task, so earlier segments never need rescanning); returns the
+ * cursor to pass next time. */
 function stampReveal(
   surface: { ctx: CanvasRenderingContext2D; toPixel: (m: Meters) => [number, number] },
   baked: HTMLCanvasElement,
   path: CoveragePath,
   from: number,
   to: number,
-): void {
+  startSeg: number,
+): number {
   const ctx = surface.ctx;
   const half = (path.swath / 2) * 1.08; // slight overlap avoids seams between lanes
-  for (let i = 0; i < path.pts.length - 1; i++) {
+  // Advance the cursor past segments that end before `from`; stop the loop at
+  // the first segment that starts at/after `to` (cum is monotonic).
+  let cursor = startSeg;
+  while (cursor < path.pts.length - 1 && path.cum[cursor + 1]! <= from) cursor++;
+  for (let i = cursor; i < path.pts.length - 1; i++) {
+    if (path.cum[i]! >= to) break;
     if (!path.inField[i]) continue;
     const segA = path.cum[i]!;
     const segB = path.cum[i + 1]!;
@@ -979,6 +1006,7 @@ function stampReveal(
     ctx.drawImage(baked, 0, 0); // baked is transparent outside the field, so safe
     ctx.restore();
   }
+  return cursor;
 }
 
 function lerpAlong(a: Meters, b: Meters, distA: number, distB: number, d: number): Meters {
@@ -2428,19 +2456,13 @@ function wireSettingsTab() {
   $("btn-settings").addEventListener("click", () => toggleToolbarPanel("settingstab", refreshSettingsTab));
   $("settings-close").addEventListener("click", () => ($("settingstab").style.display = "none"));
 
-  const nameInput = $("settings-new-name") as HTMLInputElement;
-  const createBtn = $("settings-new-create") as HTMLButtonElement;
-  const doCreate = () => {
-    // Flush the OUTGOING farm's state before switching — persistGame() always
-    // writes to whichever farm is active AT CALL TIME, so this must run
-    // before createFarm() flips activeId to the new (blank) farm.
+  // Creating a farm needs the county picker, which lives on the home screen —
+  // this button just flushes the current farm and reloads into the menu with
+  // the New Farm section pre-expanded (no autoboot flag, so the menu shows).
+  $("settings-new-menu").addEventListener("click", () => {
     saveBeforeSwitch();
-    createFarm(nameInput.value);
+    sessionStorage.setItem(MENU_OPEN_NEW_KEY, "1");
     location.reload();
-  };
-  createBtn.addEventListener("click", doCreate);
-  nameInput.addEventListener("keypress", (e) => {
-    if (e.key === "Enter") doCreate();
   });
 }
 
@@ -2449,21 +2471,7 @@ function wireSettingsTab() {
  * whatever happened since the last 5s tick). */
 function saveBeforeSwitch(): void {
   resetting = true; // reuse the same "don't let a stray timer write after us" guard as Reset
-  persistGame({ save, clockNow: clock.time(), daysPerMonth: getDaysPerMonth() });
-}
-
-/** One line of "what's in this save" without touching the shared calendar
- * module's daysPerMonth (that's a live global for the ACTIVE farm's pace —
- * reading a different farm's saved pace through it would corrupt the
- * currently-playing farm's calendar math). Computed directly from the
- * PersistedGame's own daysPerMonth instead. */
-function farmSummaryLine(pg: PersistedGame | null): string {
-  if (!pg) return "Not started yet";
-  const mpm = (pg.daysPerMonth ?? 30) * MINUTES_PER_DAY;
-  const totalMonths = START_MONTH + Math.floor(pg.clockNow / mpm);
-  const year = 1 + Math.floor(totalMonths / MONTHS_PER_YEAR);
-  const acres = pg.save.fields.reduce((sum, f) => sum + areaAcres(f.boundary), 0);
-  return `Year ${year} · $${Math.round(pg.save.money).toLocaleString()} · ${acres.toFixed(0)} ac`;
+  persistGame({ save, clockNow: clock.time(), countyId: activeFarm.countyId, daysPerMonth: getDaysPerMonth() });
 }
 
 function refreshSettingsTab(): void {
@@ -2475,7 +2483,9 @@ function refreshSettingsTab(): void {
   const activeId = getActiveFarmId();
   for (const meta of listFarms()) {
     const isActive = meta.id === activeId;
-    const pg = isActive ? { save, clockNow: clock.time(), daysPerMonth: getDaysPerMonth() } : loadGameFor(meta.id);
+    const pg = isActive
+      ? { save, clockNow: clock.time(), countyId: activeFarm.countyId, daysPerMonth: getDaysPerMonth() }
+      : loadGameFor(meta.id);
     const row = document.createElement("div");
     row.className = "farm-row" + (isActive ? " active" : "");
     row.innerHTML = `
@@ -2492,6 +2502,8 @@ function refreshSettingsTab(): void {
       loadBtn.addEventListener("click", () => {
         saveBeforeSwitch();
         switchFarm(meta.id);
+        // An explicit in-game choice — boot straight into it, skip the menu.
+        sessionStorage.setItem(AUTOBOOT_KEY, meta.id);
         location.reload();
       });
       row.appendChild(loadBtn);
@@ -3424,7 +3436,7 @@ let resetting = false;
 
 function doSave() {
   if (resetting) return; // switching/deleting a farm is wiping this save — don't write it back
-  persistGame({ save, clockNow: clock.time(), daysPerMonth: getDaysPerMonth() });
+  persistGame({ save, clockNow: clock.time(), countyId: activeFarm.countyId, daysPerMonth: getDaysPerMonth() });
 }
 
 function wirePersistence() {
@@ -5269,7 +5281,49 @@ function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (c) => map[c]!);
 }
 
-main().catch((err) => {
-  devStatus("status-naip", "Failed to load county: " + (err as Error).message, "err");
+// ---------------------------------------------------------------------------
+// Boot (2026-07-26): the home screen (main menu) shows every launch, BEFORE
+// the map/county load. Picking the already-active farm resolves the menu and
+// falls through to main(); any other choice reloads the page with the
+// AUTOBOOT flag set, and the reloaded boot skips the menu.
+// ---------------------------------------------------------------------------
+/** Set once main() gets past the county load — a failure AFTER this point is
+ * a mid-boot crash (map, wiring), where re-showing the menu and running
+ * main() a second time would double-initialize everything. */
+let mainStarted = false;
+
+async function boot(): Promise<void> {
+  // Consume the flag BEFORE any await — a crash later can never leave a stale
+  // flag that would skip the menu on the next real launch (sessionStorage is
+  // per-tab, so other tabs are unaffected either way).
+  const target = sessionStorage.getItem(AUTOBOOT_KEY);
+  sessionStorage.removeItem(AUTOBOOT_KEY);
+  // Show the menu unless this reload explicitly targeted the farm that is in
+  // fact active now (a flag for a DIFFERENT id means the farm was deleted or
+  // switched in another tab between reloads — the menu sorts that out).
+  if (target !== activeFarm.id) {
+    await runHomeScreen({ activeFarmId: activeFarm.id });
+  }
+  try {
+    await main();
+  } catch (err) {
+    console.error(err);
+    if (mainStarted) {
+      // Mid-boot crash after the county loaded — don't re-run main().
+      devStatus("status-naip", "Boot failed: " + (err as Error).message, "err");
+      return;
+    }
+    // County load/build failed (bad network, Overpass down). Re-offer the
+    // menu with the error shown; picking this farm again retries main().
+    await runHomeScreen({
+      activeFarmId: activeFarm.id,
+      error: (err as Error).message,
+    });
+    await main();
+  }
+}
+
+boot().catch((err) => {
+  devStatus("status-naip", "Failed to start: " + (err as Error).message, "err");
   console.error(err);
 });

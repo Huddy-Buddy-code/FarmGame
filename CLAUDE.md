@@ -32,6 +32,9 @@ that.
   Edit/Write tools, which encode correctly.
   - Corollary: **check `git diff --stat` before committing.** A line count far
     larger than the change is the tell; `git checkout -- <file>` and redo it.
+- `tools/` holds build-time data scripts (county index). Their OUTPUT
+  (`public/counties/index.json`) is committed; the downloaded source data
+  (Census shapefile zips) is not — keep it outside the repo.
 
 ## Machine sprites (2026-07-25)
 
@@ -45,5 +48,12 @@ the resize (dist 31 MB → 5.3 MB). Workflow for new art:
    outside the Vite glob; `_drafts/` remains gitignored scratch).
 3. Drop a 256×256 resize into `src/assets/Equipment/` under the same name —
    PowerShell System.Drawing with HighQualityBicubic works fine.
+   **PAD a non-square source to a square on transparency FIRST**, then resize.
+   `machineImgTag` renders into a forced-square `<img>`, so squashing e.g. a
+   1536×1024 generation straight to 256×256 stretches the machine vertically
+   (the windrower shipped that way until 2026-07-25). Letterboxing is correct.
 
-Never put a 1024 px PNG in `src/assets/Equipment/`.
+Never put a 1024 px PNG in `src/assets/Equipment/`, and never leave a raw export
+(`ChatGPT Image ….png`) there — every PNG in that directory is globbed into the
+build, and an unparseable name silently registers as a junk sprite entry. Raw
+exports belong in `_drafts/` (gitignored) or `art-source/` under a real name.
