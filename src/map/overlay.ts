@@ -77,10 +77,14 @@ export class Surface {
       type: "canvas",
       canvas: this.canvas,
       coordinates: corners,
-      // Static by default: MapLibre only re-uploads while "playing". We play() for a
-      // single frame on markDirty(), so an idle overlay costs nothing.
+      // Static: markDirty() does a one-shot synchronous upload per change (see
+      // below) — the source must never sit "playing", which would force a
+      // permanent every-frame repaint + re-upload loop.
       animate: false,
     });
+    // Retry path for markDirty() calls that land while the quad is off-screen
+    // (prepare() can't upload without a live tile) — see flushUpload().
+    map.on("render", this.onRender);
     map.addLayer({
       id: this.layerId,
       type: "raster",
@@ -125,48 +129,55 @@ export class Surface {
     this.markDirty();
   }
 
-  private animating = false;
+  /** A markDirty() that couldn't upload yet (source quad off-screen) — retried
+   * from the map's render event until the quad is next drawn. */
+  private pendingUpload = false;
+  private readonly onRender = (): void => this.flushUpload();
 
   /**
-   * Keep the canvas source re-uploading every frame (for a live animation like
-   * the fieldwork reveal) vs. letting it idle. Cheaper and cleaner than calling
-   * `markDirty()` per frame, which would register a fresh `once("idle")` handler
-   * each time. Pair setAnimating(true) at the start with (false) at the end.
+   * Re-upload the canvas to the GPU, exactly once.
+   *
+   * NOT play()-until-"idle" (the pre-2026-07-25 pattern): a playing canvas
+   * source reports `hasTransition() → true`, which makes the map schedule
+   * another repaint after EVERY render — so the "idle" event that was supposed
+   * to pause() it could never fire. Every surface that ever got a markDirty()
+   * stayed playing for the rest of the session: the map repainted at display
+   * rate forever, re-uploading every such surface's full canvas each frame,
+   * and each markDirty() leaked one more never-to-fire idle handler.
+   *
+   * Instead: `play(); pause();` — pause() runs prepare() synchronously while
+   * the playing flag is still up, which is a one-shot `texture.update(canvas)`
+   * with no repaint loop and no event handlers.
    */
-  setAnimating(on: boolean): void {
-    if (this.destroyed || on === this.animating) return;
-    this.animating = on;
-    const src = this.map.getSource(this.sourceId) as CanvasSource | undefined;
-    if (!src) return;
-    if (on) {
-      src.play();
-      this.map.triggerRepaint();
-    } else {
-      src.pause();
-    }
+  markDirty(): void {
+    if (this.destroyed) return;
+    this.pendingUpload = true;
+    this.flushUpload();
+    // Draw the fresh texture (or, if the quad was off-screen, give the retry
+    // path one render to run — it does NOT self-repaint, so a hidden surface
+    // costs one no-op render now and nothing more until it scrolls into view).
+    this.map.triggerRepaint();
   }
 
-  /** Force a one-frame GPU re-upload of the canvas, then return to idle. */
-  markDirty(): void {
-    if (this.animating) {
-      // Already re-uploading every frame; nothing to schedule.
-      this.map.triggerRepaint();
-      return;
-    }
-    if (this.destroyed) return;
+  private flushUpload(): void {
+    if (!this.pendingUpload || this.destroyed) return;
     const src = this.map.getSource(this.sourceId) as CanvasSource | undefined;
     if (!src) return;
+    // Off-screen: the source's ground quad has no live tile, so prepare()
+    // (inside pause()) would return without uploading. Keep the upload
+    // pending — onRender retries whenever the map next draws, and the first
+    // render with the quad in view flushes it (one frame late, imperceptible).
+    if (Object.keys(src.tiles).length === 0) return;
     src.play();
-    this.map.once("idle", () => {
-      if (!this.destroyed) src.pause();
-    });
-    this.map.triggerRepaint();
+    src.pause();
+    this.pendingUpload = false;
   }
 
   /** Remove the layer + source from the map. The surface is unusable afterward. */
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.map.off("render", this.onRender);
     if (this.map.getLayer(this.layerId)) this.map.removeLayer(this.layerId);
     if (this.map.getSource(this.sourceId)) this.map.removeSource(this.sourceId);
   }
