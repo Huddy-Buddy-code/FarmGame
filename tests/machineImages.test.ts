@@ -28,6 +28,26 @@ describe("size sprites resolve", () => {
     expect(machineImageUrl("harvester", "large")).toBeTruthy();
   });
 
+  it("both baler kinds have their own art, and it isn't the same picture", () => {
+    // `Baler_sideleft.png` aliases onto the internal "bailer" spelling; the
+    // square baler needs no alias. They're size-agnostic (only Medium is sold),
+    // so this also covers the `<Kind>_sideleft.png` no-size form resolving for
+    // every size column.
+    const round = machineImageUrl("bailer", "medium");
+    const square = machineImageUrl("squareBaler", "medium");
+    expect(round).toBeTruthy();
+    expect(square).toBeTruthy();
+    expect(square).not.toBe(round);
+    for (const size of ["small", "medium", "large"] as const) {
+      expect(machineImageUrl("squareBaler", size), size).toBe(square);
+    }
+  });
+
+  it("the windrower resolves without a size token", () => {
+    expect(machineImageUrl("windrower", "large")).toBeTruthy();
+    expect(machineImageUrl("windrower", "medium")).toBe(machineImageUrl("windrower", "large"));
+  });
+
   it("every size sprite is a DISTINCT file — a doubled extension shows up here", () => {
     // If a variant file fell through to the size branch it would land on top of
     // one of these, making two sizes share a URL.
