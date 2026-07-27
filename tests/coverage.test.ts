@@ -130,7 +130,7 @@ describe("headland laps", () => {
     expect(boundsOf(innerBoundary)).toEqual([30, 30, 370, 170]);
   });
 
-  it("degrades gracefully when a field is too small for the requested laps (e.g. plow's 6)", () => {
+  it("degrades gracefully when a field is too small for the requested laps", () => {
     const tiny: Meters[] = [[0, 0], [60, 0], [60, 60], [0, 60]];
     expect(() => buildHeadlandLaps(tiny, 10, 6)).not.toThrow();
     const { rings, innerBoundary } = buildHeadlandLaps(tiny, 10, 6);

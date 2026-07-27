@@ -279,10 +279,13 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
     expect(tractor.state).toBe("idle");
   });
 
-  it("plow's 6 headland laps still fully complete the field (physical model)", () => {
-    // Maintainer spec (2026-07-20): plow drives 6 perimeter laps (headlands
-    // last), then the straight interior lane-fill — verifies the new
-    // buildHeadlandCoveragePath wiring end to end, not just the geometry.
+  it("plow's headland laps still fully complete the field (physical model)", () => {
+    // Plow drives its perimeter laps (headlands LAST), then the straight
+    // interior lane-fill — verifies the buildHeadlandCoveragePath wiring end to
+    // end, not just the geometry. Deliberately reads the lap count from
+    // TASK_HEADLANDS rather than naming it: it went 6 → 3 on 2026-07-25 when
+    // the realistic plow widths landed, and what matters here is that whatever
+    // the count is, the field still finishes.
     const save = gameWithAgents();
     const field = freshField("stubble");
     save.fields.push(field);

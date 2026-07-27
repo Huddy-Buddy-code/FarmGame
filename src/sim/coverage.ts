@@ -215,7 +215,16 @@ export interface HeadlandConfig {
   order: "first" | "last";
 }
 export const TASK_HEADLANDS: Partial<Record<TaskType, HeadlandConfig>> = {
-  plow: { laps: 6, order: "last" },
+  // 3, not 6 (maintainer report, 2026-07-25: "too many now with the new
+  // widths"). The count was set when a Large plow was 20 ft, so six laps was a
+  // 37 m border; at the realistic 50 ft it became 91 m — on a 40-acre square
+  // that's nearly half the field driven as headland before the interior fill
+  // starts. Three laps at 50 ft is 46 m, which reads as a border again.
+  //
+  // Texture and reveal need no separate change: `headlandLapsForStatus`
+  // (field/fieldRender.ts) reads this table for the frame it paints, and the
+  // reveal stamps along the coverage path built from it, so both follow.
+  plow: { laps: 3, order: "last" },
   plant: { laps: 3, order: "last" },
   fertilize: { laps: 1, order: "last" },
   weed: { laps: 1, order: "last" },
