@@ -21,6 +21,12 @@ import type { LngLat, Meters } from "./geo/coords";
 import { areaAcres, pointInPolygon, nearestPointOnPolygon, centroidOf } from "./geo/geometry";
 import { naipSource } from "./map/naip";
 import { addRoadsLayer } from "./map/roadsLayer";
+import { addCountyBoard, boundaryBbox, unionBbox } from "./map/countyBoard";
+import { configureNaipCache, naipProtocolHandler } from "./map/tileCache";
+import {
+  countyPrefetchPlan, tilesNearPoints, runPrefetch, ASSET_ZOOMS, ASSET_RADIUS_M,
+} from "./map/naipPrefetch";
+import type { TileId } from "./map/tileCache";
 import { OverlayEngine } from "./map/overlay";
 import { newGame } from "./state/saveState";
 import type { SaveState, Field, Building, BuildingKind } from "./state/saveState";
@@ -245,14 +251,28 @@ async function main() {
   devStatus("status-osm", `Roads: ${county.roads.features.length} ✓`, "ok");
   $("attr").innerHTML = `${m.imagery.attribution} · ${m.roads.attribution}`;
 
+  // NAIP tiles go through the persistent IndexedDB cache (tileCache.ts) —
+  // register the protocol before the map exists so the very first tile load
+  // already writes through it.
+  configureNaipCache({ imageServer: m.imagery.imageServer });
+  maplibregl.addProtocol("naip", naipProtocolHandler);
+
+  // The board bbox: manifest bbox is hand-tuned for the VIEW and can be
+  // smaller than the true polygon (Story's north edge pokes 10 km past it) —
+  // pan limits must fit both, plus room for the county label off the north edge.
+  const boardBbox = county.boundary ? unionBbox(m.bbox, boundaryBbox(county.boundary)) : m.bbox;
+
   const map = new maplibregl.Map({
     container: "map",
     center: m.center,
     zoom: m.defaultZoom,
     maxBounds: [
-      [m.bbox[0] - 0.15, m.bbox[1] - 0.15],
-      [m.bbox[2] + 0.15, m.bbox[3] + 0.15],
+      [boardBbox[0] - 0.15, boardBbox[1] - 0.15],
+      [boardBbox[2] + 0.15, boardBbox[3] + 0.15],
     ],
+    // Keep more decoded tiles in memory than the default working set — panning
+    // around the county re-evicts less (the IDB cache still backstops misses).
+    maxTileCacheSize: 512,
     attributionControl: { compact: false },
     style: {
       version: 8,
@@ -275,6 +295,16 @@ async function main() {
 
   map.on("load", () => {
     addRoadsLayer(map, county.roads);
+    // Game board: mask everything outside the county, border stroke, big
+    // zoomed-out label. Added BEFORE field surfaces so player content stays
+    // on top. No boundary (TIGERweb down at build time) → no board, still playable.
+    if (county.boundary) {
+      addCountyBoard(map, county.boundary, {
+        name: m.name,
+        state: m.state,
+        labelMaxZoom: m.defaultZoom + 1,
+      });
+    }
     overlay = new OverlayEngine(map);
     wireFieldDrawing(map);
     wireBuildingPlacement(map);
@@ -297,9 +327,60 @@ async function main() {
     clock.play(); // the world breathes from the start (idle-game 1×)
     requestAnimationFrame(gameLoop);
     startBackgroundTick();
+    // Warm the imagery cache once the initial view has had its turn at the
+    // network: whole county at browse zooms + high-res around player assets.
+    setTimeout(() => {
+      const assets: LngLat[] = [
+        toLngLat(homePos),
+        ...save.fields.map((f) => toLngLat(centroidOf(f.boundary))),
+        ...save.buildings.map((b) => toLngLat(b.pos)),
+      ];
+      queuePrefetch(countyPrefetchPlan(boardBbox, assets));
+    }, 4000);
   });
 
   updateHud();
+}
+
+// ---------------------------------------------------------------------------
+// NAIP prefetch queue — one prefetch runs at a time (a purchase mid-boot just
+// appends its patch after the county-wide warmup). Progress and the final
+// tally land on the dev corner's NAIP line; failures are silent by design
+// (a missed tile stays a live fetch, exactly like before the cache).
+// ---------------------------------------------------------------------------
+let prefetchChain: Promise<unknown> = Promise.resolve();
+
+function queuePrefetch(tiles: TileId[]): void {
+  if (tiles.length === 0) return;
+  prefetchChain = prefetchChain
+    .then(() =>
+      runPrefetch(tiles, {
+        concurrency: 3,
+        onProgress: (done, total) => {
+          if (done % 25 === 0 || done === total) devStatus("status-naip", `NAIP: caching ${done}/${total}…`);
+        },
+      }),
+    )
+    .then((res) => {
+      // Failures are non-fatal (a miss stays a live fetch) but must be VISIBLE —
+      // the 2026-07-28 fetch-binding bug failed every tile and the old "cache ✓"
+      // line would have looked healthy over a black map.
+      if (res.failed > 0) {
+        devStatus("status-naip", `NAIP: cache ${res.fetched} new, ${res.failed} failed ⚠`, "err");
+      } else {
+        devStatus("status-naip", `NAIP: cache ✓ (${res.fetched} new, ${res.cached} warm)`, "ok");
+      }
+    })
+    .catch(() => {});
+}
+
+/** High-res imagery around a newly bought field / placed building — the
+ * county-wide browse zooms were already warmed at boot. */
+function prefetchAroundAsset(pos: Meters): void {
+  const ll = toLngLat(pos);
+  const tiles: TileId[] = [];
+  for (const z of ASSET_ZOOMS) tiles.push(...tilesNearPoints([ll], ASSET_RADIUS_M, z));
+  queuePrefetch(tiles);
 }
 
 // ---------------------------------------------------------------------------
@@ -965,6 +1046,19 @@ function stampReveal(
 ): number {
   const ctx = surface.ctx;
   const half = (path.swath / 2) * 1.08; // slight overlap avoids seams between lanes
+  // The LONGITUDINAL counterpart to that lateral overlap. `ctx.clip()` antialiases
+  // the quad edge, so where two consecutive stamps meet, the shared edge pixel takes
+  // ~50% coverage from each and composites to ~75% — the old texture bleeds through
+  // as a hairline seam. How MANY seams a lane collects is purely a function of sim
+  // speed (this runs once per frame, so 1x stamps every few metres and bands visibly,
+  // while 60x sweeps a whole lane in one stamp). Lapping each stamp back over its
+  // predecessor's leading edge buries that edge under opaque texture, so the result
+  // is identical at any speed. BACKWARD only — padding forward would reveal ground
+  // ahead of the machine.
+  const [ox, oy] = surface.toPixel([0, 0]);
+  const [tx, ty] = surface.toPixel([100, 0]);
+  const pxPerM = Math.hypot(tx - ox, ty - oy) / 100 || 1;
+  const pad = 2 / pxPerM; // ~2 px of lap, whatever the surface's metres-per-pixel
   // Advance the cursor past segments that end before `from`; stop the loop at
   // the first segment that starts at/after `to` (cum is monotonic).
   let cursor = startSeg;
@@ -988,11 +1082,13 @@ function stampReveal(
     dy /= len;
     const px = -dy * half;
     const py = dx * half;
+    // Trailing edge lapped back over the previous stamp (see `pad` above).
+    const q0: Meters = [p0[0] - dx * pad, p0[1] - dy * pad];
     const quad: Meters[] = [
-      [p0[0] + px, p0[1] + py],
+      [q0[0] + px, q0[1] + py],
       [p1[0] + px, p1[1] + py],
       [p1[0] - px, p1[1] - py],
-      [p0[0] - px, p0[1] - py],
+      [q0[0] - px, q0[1] - py],
     ];
     ctx.save();
     ctx.beginPath();
@@ -3792,6 +3888,7 @@ function wireFieldDrawing(map: maplibregl.Map) {
       // Seed gates at the road side + opposite, then hand the player the
       // same drag-to-place editor so they can designate the real entry points.
       field.accessPoints = defaultAccessPoints(field.boundary, roadNetRef);
+      prefetchAroundAsset(centroidOf(field.boundary)); // warm high-res imagery here
       updateHud();
       toast(`🌾 Bought ${boughtAcres.toFixed(1)} ac for $${paid.toLocaleString()}`);
       openFieldPanel(field.id);
@@ -3848,6 +3945,7 @@ function wireBuildingPlacement(map: maplibregl.Map) {
     const size = kind === "silo" ? pendingSiloSize : undefined;
     try {
       buyBuildingAt(save, kind, pos, size);
+      prefetchAroundAsset(pos); // warm high-res imagery here
       updateHud();
       refreshBuildingMarkers();
       toast(`🏗️ Built ${buildingDisplayName(kind, size)} for $${buildingPrice(kind, size).toLocaleString()}`);

@@ -13,11 +13,14 @@
  *   - manifest.json  — identity, UTM zone, bounds, imagery source, attribution
  *   - roads.geojson  — pre-built OSM road extract (same recipe the runtime
  *     builder replicates — see overpass.ts)
+ *   - boundary.geojson — the county polygon for the game-board edge (same
+ *     recipe as the runtime TIGERweb fetch — see tigerweb.ts)
  *   - (later) buyers.geojson, storage sites, a self-hosted routing graph, and
  *     optionally cached NAIP tiles for fully-offline imagery.
  */
 
 import type { FeatureCollection } from "geojson";
+import type { CountyBoundary } from "./tigerweb";
 
 export type CountyId = string;
 
@@ -45,10 +48,16 @@ export interface CountyManifest {
   defaultZoom: number;
   imagery: ImagerySource;
   roads: { file: string; attribution: string };
+  /** Bundled packages name their boundary file; runtime manifests omit it
+   * (the polygon comes from TIGERweb, not a file). Optional so hand-written
+   * manifests that predate the game board still parse. */
+  boundary?: { file: string };
 }
 
-/** A loaded county: its manifest plus the resolved data assets. */
+/** A loaded county: its manifest plus the resolved data assets. The boundary
+ * is cosmetic (game-board edge) — null means "no board", never a boot failure. */
 export interface CountyPackage {
   manifest: CountyManifest;
   roads: FeatureCollection;
+  boundary: CountyBoundary | null;
 }

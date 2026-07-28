@@ -13,6 +13,7 @@ import type { CountyIndexEntry } from "./countyIndex";
 import { utmZoneForLng } from "./countyIndex";
 import type { CountyManifest, CountyPackage } from "./types";
 import { buildOverpassQuery, overpassToRoads, EXTRACT_RECIPE_VERSION } from "./overpass";
+import { fetchCountyBoundary, type FetchBoundaryOptions } from "./tigerweb";
 import { putCachedCounty } from "./idbCache";
 
 /** The single national CONUS mosaic — same server for every county. */
@@ -143,9 +144,17 @@ export async function fetchOverpass(query: string, opts: FetchOverpassOptions = 
   );
 }
 
-/** Build a county package end-to-end: manifest + live roads + cache write. */
-export async function buildCounty(entry: CountyIndexEntry, onProgress?: BuildProgress): Promise<CountyPackage> {
+/** Build a county package end-to-end: manifest + live roads + boundary + cache write. */
+export async function buildCounty(
+  entry: CountyIndexEntry,
+  onProgress?: BuildProgress,
+  boundaryOpts?: FetchBoundaryOptions,
+): Promise<CountyPackage> {
   const manifest = buildCountyManifest(entry);
+  // Boundary (TIGERweb) and roads (Overpass) are independent servers — fetch
+  // in parallel; roads dominate the wait. Boundary failure is non-fatal (null,
+  // see tigerweb.ts) — registry.ts retries the backfill on later cache hits.
+  const boundaryPromise = fetchCountyBoundary(entry.fips, boundaryOpts);
   let json: unknown;
   try {
     json = await fetchOverpass(buildOverpassQuery(entry.bbox), { onProgress });
@@ -161,6 +170,7 @@ export async function buildCounty(entry: CountyIndexEntry, onProgress?: BuildPro
     throw err;
   }
   const roads = overpassToRoads(json);
+  const boundary = await boundaryPromise;
   onProgress?.("cache-write");
   await putCachedCounty({
     id: entry.id,
@@ -168,6 +178,7 @@ export async function buildCounty(entry: CountyIndexEntry, onProgress?: BuildPro
     fetchedAt: Date.now(),
     manifest,
     roads,
+    boundary,
   });
-  return { manifest, roads };
+  return { manifest, roads, boundary };
 }

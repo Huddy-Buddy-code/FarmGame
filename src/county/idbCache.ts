@@ -14,6 +14,7 @@
 
 import type { FeatureCollection } from "geojson";
 import type { CountyManifest } from "./types";
+import type { CountyBoundary } from "./tigerweb";
 import { EXTRACT_RECIPE_VERSION } from "./overpass";
 
 const DB_NAME = "farm-sim-counties";
@@ -26,6 +27,10 @@ export interface CachedCounty {
   fetchedAt: number;
   manifest: CountyManifest;
   roads: FeatureCollection;
+  /** County polygon for the game board. Absent on pre-boundary records and
+   * null when the TIGERweb fetch failed — both mean "try to backfill on the
+   * next load" (registry.ts), NOT a recipe bump (roads are still good). */
+  boundary?: CountyBoundary | null;
 }
 
 function openDb(): Promise<IDBDatabase> {

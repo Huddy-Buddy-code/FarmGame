@@ -2165,6 +2165,87 @@ network off → create a live county → error banner, no ghost farm, retry
 works after reconnect; (4) Settings Load skips the menu; deleting the
 active farm lands on it; (5) a pre-feature profile's farms appear and play.
 
+## 2026-07-28 — game-board edge + persistent NAIP tile cache
+
+Two maintainer asks: (1) the county edge was "messy" — imagery and roads
+just ran out at different places; (2) imagery re-fetched inconsistently on
+every revisit. Root causes: the runtime never had the county POLYGON (only a
+bbox), and every NAIP tile was a live `exportImage` render with no cache but
+the browser's.
+
+- **County boundary data.** `src/county/tigerweb.ts` fetches the polygon
+  from Census TIGERweb by FIPS (GeoJSON, precision 5 ≈ 1 m, ~24 KB;
+  null-on-any-failure — the boundary is cosmetic, never blocks boot).
+  Bundled tier: `tools/fetch-county-boundary.mjs` (same recipe) generated
+  `public/counties/story-ia/boundary.geojson`; manifest lists it. Runtime
+  tier: `builder.ts` fetches it in parallel with Overpass; cached in the IDB
+  record (`CachedCounty.boundary`); `registry.ts` BACKFILLS null/pre-feature
+  cache records on later loads (no recipe bump — roads stay valid).
+- **The board** (`src/map/countyBoard.ts`): world-sized mask fill with the
+  county as a hole (dark wood #221a10) above imagery+roads — hides ALL
+  spill in one stroke; cased border (wood casing / cream core); big HTML
+  county label north of the boundary (style has no glyph fonts, so a symbol
+  layer can't do text), zoom-gated at `defaultZoom + 1`. ⚠️ Geometry derives
+  from the BOUNDARY, not the manifest bbox — Story's hand-tuned bbox ends at
+  42.11 N but the county reaches 42.209; maxBounds now uses the union.
+- **Tile cache** (`src/map/tileCache.ts`): raster source now requests
+  `naip://tile/{z}/{x}/{y}` through a MapLibre custom protocol → IndexedDB
+  (`farm-sim-naip`, one lazy connection, strictly best-effort) → exportImage
+  only on miss. Source `maxzoom: 17` (NAIP's real ~1 m ceiling) so z18+
+  overzooms instead of re-requesting. Module has NO maplibre import
+  (main.ts does `addProtocol`) so the whole cache runs in the node suite via
+  injectable fetch/store. Map `maxTileCacheSize: 512`.
+- **Prefetch** (`src/map/naipPrefetch.ts`): 4 s after boot — whole county
+  at z10–13 (~hundreds of tiles), then z14–17 within 1200 m of every
+  field/building/farmstead; plan capped at 3000 tiles, 3 concurrent,
+  failures silent (a miss stays a live fetch). New field/building purchases
+  queue their own high-res patch. Progress on the dev corner's NAIP line.
+
+**Shipped bug, caught by maintainer screenshot (black map, board fine):**
+`loadTile` called `config.fetchFn(url)` — native fetch invoked with
+`this === config` throws "Illegal invocation" in Chrome, so EVERY tile
+failed. Node tests missed it (doubles ignore `this`). Fixed by wrapping the
+fetch at configure time; regression test's double now enforces unbound
+invocation (verified failing against the buggy code). Two follow-ons: the
+dev line reports `N failed ⚠` in red instead of a healthy-looking "cache ✓"
+over a black map, and the label strips ", Iowa" from bundled names (the
+state code line was doubling it).
+
+**702/702 passing (48 new: tigerweb, countyBoard, tileCache, naipPrefetch),
+typecheck clean.** Maintainer visual checklist: (1) sharp cream/wood county
+edge, dark outside, imagery+roads clipped; (2) county name floats north when
+zoomed out, fades in close; (3) label position sensible on a runtime county
+too (build one fresh — boundary comes from TIGERweb); (4) pan around, reload
+— imagery should reappear instantly (dev corner "NAIP: cache ✓"); (5) DevTools
+offline after a session: cached areas still render.
+
+## 2026-07-28 — BUGFIX: revealed field texture varied with sim speed
+
+Maintainer screenshot: a plowed field showed distinct bands — some hazy and
+horizontally striped, some the correct dark texture — depending on the sim
+speed the ground was worked at.
+
+Cause: `stampReveal` (main.ts) reveals worked ground by `ctx.clip()` +
+`drawImage`, and clip edges are ANTIALIASED. Two consecutive stamps meeting
+at a shared edge each contribute ~50% coverage to that pixel, which composites
+`source-over` to ~75% — 25% of the OLD texture bleeds through as a hairline
+seam. Stamp COUNT is what varies: `updateReveals()` runs once per frame, so at
+1× a lane is stamped every few metres (seam every ~2 px, and enough of them
+that the whole band reads lighter) while at 60× the lane is one clean sweep.
+
+Fix: give the along-path direction the same treatment the ACROSS-path
+direction already had (`half = swath/2 * 1.08`, "slight overlap avoids seams
+between lanes") — lap each stamp's trailing edge ~2 px back over its
+predecessor, burying the antialiased edge under opaque texture. Backward only;
+padding forward would reveal ground ahead of the machine. Lap is computed in
+metres from `surface.toPixel` so it holds at any surface scale (large fields
+clamp to `MAX_SURFACE_PX` and are coarser than the nominal 0.5 m/px).
+
+Same double-composite as the existing lateral overlap, so it's safe for the
+same reason. **701/701 passing, typecheck clean** — no new tests: `stampReveal`
+is canvas-2D code inside main.ts and the suite runs in plain Node.
+⚠️ Needs eyes: work one field at 1× and another at max speed, compare.
+
 ## Known gaps / unverified
 
 - **Field panel Schedule calendar drag-and-drop is logic-tested only** — no

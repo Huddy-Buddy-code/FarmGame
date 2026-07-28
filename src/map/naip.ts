@@ -3,8 +3,15 @@
  *
  * USDA NAIP imagery is public domain and is the sanctioned satellite source
  * (Google/Esri imagery is explicitly forbidden — see brief §2). We consume it
- * from USDA's APFO ArcGIS ImageServer via its `exportImage` endpoint, which
- * MapLibre can drive as a raster source using the {bbox-epsg-3857} template.
+ * from USDA's APFO ArcGIS ImageServer via its `exportImage` endpoint.
+ *
+ * Since 2026-07-28 tiles are addressed as `naip://tile/{z}/{x}/{y}` through
+ * the custom protocol in tileCache.ts — cache-first against IndexedDB, hitting
+ * the ImageServer only on a miss — instead of MapLibre's raw
+ * {bbox-epsg-3857} template. main.ts must call `configureNaipCache()` with
+ * the manifest's ImageServer and register the protocol BEFORE creating the
+ * map; the manifest still owns the server URL, this just moves where it's
+ * consumed.
  *
  * NOTE (data spike): USDA retired the per-state/per-year ImageServers; there is
  * now ONE national mosaic (USDA_CONUS_PRIME) covering the whole CONUS. Serving our
@@ -14,28 +21,19 @@
 
 import type { RasterSourceSpecification } from "maplibre-gl";
 import type { NaipArcgisImagery } from "../county/types";
+import { TILE_MAXZOOM } from "./tileCache";
 
 /**
- * Build a MapLibre raster source from a county's NAIP imagery manifest entry.
- * `exportImage` returns a rendered image for the requested web-mercator bbox.
- * The ImageServer URL comes from the county package, not a hardcoded constant.
+ * Build the MapLibre raster source for a county's NAIP imagery. The tile URLs
+ * go through the "naip" protocol (see header); `maxzoom` overzooms past NAIP's
+ * real ~1 m resolution instead of requesting z18+ server renders.
  */
 export function naipSource(imagery: NaipArcgisImagery): RasterSourceSpecification {
-  const params = new URLSearchParams({
-    bbox: "{bbox-epsg-3857}",
-    bboxSR: "3857",
-    imageSR: "3857",
-    size: "256,256",
-    format: "jpgpng",
-    transparent: "false",
-    f: "image",
-  });
-  // URLSearchParams encodes the {bbox-epsg-3857} braces; MapLibre needs them raw.
-  const query = decodeURIComponent(params.toString());
   return {
     type: "raster",
-    tiles: [`${imagery.imageServer}/exportImage?${query}`],
+    tiles: ["naip://tile/{z}/{x}/{y}"],
     tileSize: 256,
+    maxzoom: TILE_MAXZOOM,
     attribution: imagery.attribution,
   };
 }

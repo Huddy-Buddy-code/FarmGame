@@ -1196,6 +1196,21 @@
         background: var(--cream); border: 2px solid var(--wood);
         border-radius: 8px; padding: 4px 5px; box-shadow: var(--shadow);
       }
+      /* County name floating north of the game-board edge (countyBoard.ts).
+         Decorative — never eats map clicks; fades out past labelMaxZoom. */
+      .county-label {
+        text-align: center; pointer-events: none; user-select: none;
+        color: var(--cream); white-space: nowrap;
+        text-shadow: 0 2px 6px rgba(0, 0, 0, 0.55), 0 0 2px rgba(0, 0, 0, 0.8);
+        opacity: 1; transition: opacity 0.35s ease;
+      }
+      .county-label.hidden { opacity: 0; }
+      .county-label-name { font-size: 34px; font-weight: 800; letter-spacing: 5px; line-height: 1.1; }
+      .county-label-state {
+        font-size: 16px; font-weight: 700; letter-spacing: 10px; color: var(--gold);
+        line-height: 1.2; margin-top: 2px;
+      }
+
       .building-popup { font-size: 13px; min-width: 160px; }
       .building-popup .bp-title { font-weight: 700; margin-bottom: 4px; }
       .building-popup .bp-cap { color: #8a7658; margin-bottom: 8px; }

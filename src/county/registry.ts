@@ -16,7 +16,8 @@ import type { CountyId, CountyManifest, CountyPackage } from "./types";
 import type { FeatureCollection } from "geojson";
 import { loadCountyIndex, findCounty } from "./countyIndex";
 import { buildCounty, type BuildProgress } from "./builder";
-import { getCachedCounty } from "./idbCache";
+import { fetchCountyBoundary, type CountyBoundary } from "./tigerweb";
+import { getCachedCounty, putCachedCounty } from "./idbCache";
 
 /** Counties shipped with the app as pre-built packages (tier 1). */
 export const BUNDLED_COUNTIES: { id: CountyId; name: string }[] = [
@@ -47,7 +48,15 @@ async function loadBundledCounty(id: CountyId): Promise<CountyPackage> {
   }
   const roads = (await roadsRes.json()) as FeatureCollection;
 
-  return { manifest, roads };
+  // Boundary is cosmetic (game board): a manifest without one, or a fetch
+  // failure, boots the county without a board edge rather than throwing.
+  let boundary: CountyBoundary | null = null;
+  if (manifest.boundary) {
+    const res = await fetch(`${root}/${manifest.boundary.file}`).catch(() => null);
+    if (res?.ok) boundary = (await res.json()) as CountyBoundary;
+  }
+
+  return { manifest, roads, boundary };
 }
 
 /** Resolve a county package by id: bundled → IndexedDB cache → live build. */
@@ -55,7 +64,17 @@ export async function loadCounty(id: CountyId, onProgress?: BuildProgress): Prom
   if (isBundled(id)) return loadBundledCounty(id);
 
   const cached = await getCachedCounty(id);
-  if (cached) return { manifest: cached.manifest, roads: cached.roads };
+  if (cached) {
+    // Backfill the boundary for records cached before the game board existed
+    // (or whose TIGERweb fetch failed at build time). One quick attempt per
+    // load; still-null just means another try next boot.
+    let boundary = cached.boundary ?? null;
+    if (!boundary) {
+      boundary = await fetchCountyBoundary(cached.manifest.fips);
+      if (boundary) await putCachedCounty({ ...cached, boundary });
+    }
+    return { manifest: cached.manifest, roads: cached.roads, boundary };
+  }
 
   const entry = findCounty(await loadCountyIndex(), id);
   if (!entry) throw new Error(`County "${id}" not found in the index`);

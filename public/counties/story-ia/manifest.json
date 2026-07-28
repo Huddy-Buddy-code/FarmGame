@@ -15,5 +15,6 @@
   "roads": {
     "file": "roads.geojson",
     "attribution": "© OpenStreetMap contributors (ODbL)"
-  }
+  },
+  "boundary": { "file": "boundary.geojson" }
 }
