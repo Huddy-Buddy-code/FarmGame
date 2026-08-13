@@ -46,7 +46,7 @@ export class Surface {
   readonly layerId: string;
   private destroyed = false;
 
-  constructor(map: MlMap, id: string, bounds: BoundsMeters, metersPerPixel: number) {
+  constructor(map: MlMap, id: string, bounds: BoundsMeters, metersPerPixel: number, beforeId?: string) {
     this.map = map;
     this.bounds = bounds;
     this.metersPerPixel = metersPerPixel;
@@ -85,12 +85,23 @@ export class Surface {
     // Retry path for markDirty() calls that land while the quad is off-screen
     // (prepare() can't upload without a live tile) — see flushUpload().
     map.on("render", this.onRender);
-    map.addLayer({
-      id: this.layerId,
-      type: "raster",
-      source: this.sourceId,
-      paint: { "raster-opacity": 1, "raster-resampling": "nearest", "raster-fade-duration": 0 },
-    });
+    map.addLayer(
+      {
+        id: this.layerId,
+        type: "raster",
+        source: this.sourceId,
+        paint: { "raster-opacity": 1, "raster-resampling": "nearest", "raster-fade-duration": 0 },
+      },
+      // Without this, every surface stacks on TOP of whatever was already
+      // added — so the FIRST field ever rendered ends up under the
+      // once-only "field-outlines"/"field-labels" layers (added right after
+      // it), but every LATER field's texture lands on top of them instead,
+      // burying its own label under its own raster (2026-08-13 bug report:
+      // "only Field 1 has a label" — three fields existed, one just happened
+      // to be first). `beforeId` lets the caller pin new surfaces below a
+      // layer that must always stay on top, however many surfaces follow.
+      beforeId,
+    );
   }
 
   /** Meters -> this surface's canvas pixel coordinates (north-up ground, y flips). */
@@ -195,10 +206,13 @@ export class OverlayEngine {
     this.map = map;
   }
 
-  /** Create (or replace) a named surface covering `bounds` (meters). */
-  createSurface(id: string, bounds: BoundsMeters, metersPerPixel = OVERLAY_METERS_PER_PIXEL): Surface {
+  /** Create (or replace) a named surface covering `bounds` (meters).
+   * `beforeId` inserts the surface's raster layer below an existing layer
+   * (e.g. "field-labels") instead of stacking it on top of everything added
+   * so far — see the comment in `Surface`'s constructor for why this matters. */
+  createSurface(id: string, bounds: BoundsMeters, metersPerPixel = OVERLAY_METERS_PER_PIXEL, beforeId?: string): Surface {
     this.surfaces.get(id)?.destroy();
-    const surface = new Surface(this.map, id, bounds, metersPerPixel);
+    const surface = new Surface(this.map, id, bounds, metersPerPixel, beforeId);
     this.surfaces.set(id, surface);
     return surface;
   }

@@ -23,15 +23,21 @@ describe("crop config invariants", () => {
     }
   });
 
-  it("grain crops price + yield positive; perennials realize value as bales instead", () => {
+  it("grain crops price + yield positive; non-grain crops realize value as bales or silage instead", () => {
     for (const id of cropIds) {
       const c = gameConfig.crops[id];
       if (c.producesGrain !== false) {
         expect(c.sellPricePerTon, `${id}.sellPricePerTon`).toBeGreaterThan(0);
         expect(c.baseYieldTonsPerAcre, `${id}.baseYieldTonsPerAcre`).toBeGreaterThan(0);
-      } else {
-        expect(c.perennial, `${id} non-grain must be perennial forage`).toBe(true);
+      } else if (c.perennial) {
+        // Perennial forage (grass/alfalfa): value realized as bales.
         expect(c.baleProduct, `${id}.baleProduct`).toBeDefined();
+      } else {
+        // A chop-only annual (Forage, 2026-08-12): no combine route and no
+        // bales either — the whole plant leaves as silage, nothing else.
+        expect(c.silageProduct, `${id}.silageProduct`).toBeDefined();
+        expect(c.silageTonsPerAcre, `${id}.silageTonsPerAcre`).toBeGreaterThan(0);
+        expect(c.baleProduct, `${id}.baleProduct`).toBeUndefined();
       }
     }
   });

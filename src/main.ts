@@ -19,18 +19,20 @@ import { loadCounty } from "./county/registry";
 import { setProjection, toMeters, toLngLat } from "./geo/coords";
 import type { LngLat, Meters } from "./geo/coords";
 import { areaAcres, pointInPolygon, nearestPointOnPolygon, centroidOf } from "./geo/geometry";
-import { naipSource } from "./map/naip";
+import { naipSource, naipTileUrlTemplate } from "./map/naip";
 import { addRoadsLayer } from "./map/roadsLayer";
 import { addCountyBoard, boundaryBbox, unionBbox } from "./map/countyBoard";
-import { configureNaipCache, naipProtocolHandler } from "./map/tileCache";
+import { configureNaipCache, naipProtocolHandler, NAIP_PROVIDERS, DEFAULT_NAIP_PROVIDER } from "./map/tileCache";
 import {
-  countyPrefetchPlan, tilesNearPoints, runPrefetch, ASSET_ZOOMS, ASSET_RADIUS_M,
+  countyPrefetchPlan, tilesNearPoints, runPrefetch, viewportPrefetchPlan, ASSET_ZOOMS, ASSET_RADIUS_M,
 } from "./map/naipPrefetch";
 import type { TileId } from "./map/tileCache";
 import { OverlayEngine } from "./map/overlay";
 import { newGame } from "./state/saveState";
 import type { SaveState, Field, Building, BuildingKind } from "./state/saveState";
 import { buyFieldFromBoundary, renderField, initIdCounters, sellField, hashSeed } from "./field/fields";
+import { updateBaleLayer, baleIconFor } from "./field/baleLayer";
+import { confirmDialog, promptDialog } from "./ui/modal";
 import { drawFieldTexture } from "./field/fieldRender";
 import { updateBuildingMarkers, BUILDING_ICON } from "./field/buildingRender";
 import {
@@ -39,6 +41,7 @@ import {
   barnSlotTotal, nearestFarmYard,
   baleStorageCapacityOf, storedBalesTotal, assignBaleStorageProduct,
   tickBaleSpoilage, baleSpoilRateOf,
+  bunkerCapacityOf, silageCapacityTons, silageStoredTons, buildingIsSized,
 } from "./sim/buildings";
 import { distanceAtAcres } from "./sim/coverage";
 import type { CoveragePath } from "./sim/coverage";
@@ -48,7 +51,7 @@ import {
 } from "./state/persistence";
 import { farmSummaryLine } from "./state/farmSummary";
 import { runHomeScreen, AUTOBOOT_KEY, MENU_OPEN_NEW_KEY } from "./ui/homeScreen";
-import { sellBales, netWorth, baleInventory, sellAllOfProduct, tickAutoSell } from "./sim/economy";
+import { sellBales, netWorth, baleInventory, sellAllOfProduct, tickAutoSell, silageInventory, sellSilage } from "./sim/economy";
 import {
   grainUnitPrice, baleUnitPrice, seasonalBonus, monthOf, peakSaleMonth, effectiveSellPlan,
   SELLABLE_GRAINS, SELLABLE_BALES,
@@ -64,9 +67,10 @@ import {
   tickFarming, growthProgress, yieldRange, productivityMultiplier, yieldModifierSteps, inPlantingWindow, canPlow,
   hasStandingCrop, inWeedingWindow, canFertilizeNow, isPerennial, canSeedPerennial,
   isPerennialDormant, harvestMonthsRemaining, harvestWindowMonthsFor, baleTonsOf, baleProductForField,
+  canWrapBales, cropMakesSilage, isChopOnlyCrop,
 } from "./sim/farming";
 import {
-  ensureAgents, initTaskIds, enqueueTask, cancelTask, taskCost, tasksFor,
+  ensureAgents, initTaskIds, enqueueTask, cancelTask, forceCancelActiveTask, restartActiveTask, taskCost, tasksFor,
   isFieldHarvesting, effectiveStatus, tickTasks, autoManageAll, autoManageField,
   buyAgent, sellAgent, buyImplement, sellImplement,
   agentPrice, implementPrice, implementName, getCoveragePath,
@@ -81,7 +85,7 @@ import { buildRoadNetwork } from "./sim/roadNet";
 import type { RoadNetwork } from "./sim/roadNet";
 import { defaultAccessPoints } from "./sim/access";
 import {
-  MACHINE_ICON, IMPLEMENT_ICON_SVG, tractorIconSvg, baleIconSvg, squareBaleIconSvg,
+  MACHINE_ICON, IMPLEMENT_ICON_SVG, tractorIconSvg, baleIconSvg,
   plowIconSvg, planterIconSvg, sprayerIconSvg, rakeIconSvg, grainTrailerIconSvg,
   grainHeaderIconSvg, mowerIconSvg, mulcherIconSvg, haySpikesIconSvg, baleTrailerIconSvg,
 } from "./ui/icons";
@@ -96,10 +100,9 @@ import {
 import {
   fieldCategoryTotal, fieldNetCashflow, fieldLedgerYears,
 } from "./sim/fieldLedger";
-import {
-  legalMonthsFor, effectiveMonthFor, setScheduleOverride,
-} from "./sim/schedule";
-import type { ScheduleTaskType } from "./sim/schedule";
+import { setScheduleOverride } from "./sim/schedule";
+import { projectRotation, splitAbs } from "./sim/rotationTimeline";
+import type { AbsMonth, TimelineTaskKind } from "./sim/rotationTimeline";
 import type { FarmTask, Agent, Implement, FieldStatus, TaskType, CompletedTask, FieldPlan } from "./state/saveState";
 import { gameConfig, FEET_TO_METERS } from "./config/gameConfig";
 import type { CropId, EquipmentSize, BaleProduct } from "./config/gameConfig";
@@ -201,6 +204,8 @@ type Mode = "none" | "field" | `building:${BuildingKind}`;
 let mode: Mode = "none";
 /** Size armed for the NEXT silo placement (set by the Buildings shop button
  * just before `mode` becomes "building:silo"; ignored for every other kind). */
+/** Size chosen in the shop for the SIZED building kinds (silo, silage
+ * bunker), carried across the click-to-place step. */
 let pendingSiloSize: EquipmentSize = "small";
 
 let overlay: OverlayEngine;
@@ -216,6 +221,13 @@ const FIELD_PANEL_TABS: FieldPanelTab[] = ["view", "schedule", "finances", "sett
 let fieldPanelTab: FieldPanelTab = "view";
 /** Where new machines park (county center / farmstead-to-be), in UTM meters. */
 let homePos: Meters = [0, 0];
+
+/** Which NAIP host serves imagery — a player-visible Settings toggle (added
+ * 2026-08-12 after USDA APFO went unreachable mid-session with no code-side
+ * cause). Persisted like autoSkipEnabled below so a switch survives reload. */
+const NAIP_PROVIDER_KEY = "farm.naipProvider";
+let activeNaipProvider: string =
+  NAIP_PROVIDERS.find((p) => p.id === localStorage.getItem(NAIP_PROVIDER_KEY))?.id ?? DEFAULT_NAIP_PROVIDER;
 
 const $ = (id: string) => document.getElementById(id)!;
 
@@ -254,7 +266,7 @@ async function main() {
   // NAIP tiles go through the persistent IndexedDB cache (tileCache.ts) —
   // register the protocol before the map exists so the very first tile load
   // already writes through it.
-  configureNaipCache({ imageServer: m.imagery.imageServer });
+  configureNaipCache();
   maplibregl.addProtocol("naip", naipProtocolHandler);
 
   // The board bbox: manifest bbox is hand-tuned for the VIEW and can be
@@ -276,7 +288,13 @@ async function main() {
     attributionControl: { compact: false },
     style: {
       version: 8,
-      sources: { naip: naipSource(m.imagery) },
+      // Vendored SDF glyphs (public/fonts, via tools/fetch-glyphs.mjs). Without
+      // this NO layer in the style can render text at all — that's why the
+      // county label had to be an HTML marker before 2026-07-30. Only "Noto
+      // Sans Bold" range 0-255 is on disk; naming any other stack silently
+      // renders nothing.
+      glyphs: `${import.meta.env.BASE_URL}fonts/{fontstack}/{range}.pbf`,
+      sources: { naip: naipSource(m.imagery, activeNaipProvider) },
       layers: [{ id: "naip", type: "raster", source: "naip" }],
     },
   });
@@ -292,6 +310,7 @@ async function main() {
   });
 
   wireMiddleMousePan(map);
+  map.on("moveend", scheduleViewportPrefetch);
 
   map.on("load", () => {
     addRoadsLayer(map, county.roads);
@@ -318,6 +337,7 @@ async function main() {
     wireStructuresTab();
     wireFinanceTab();
     wireSettingsTab();
+    wireDevTools();
     wirePersistence();
     // Re-render every field from the loaded save (textures + outlines).
     for (const f of save.fields) renderField(map, overlay, f, clock.time());
@@ -356,6 +376,7 @@ function queuePrefetch(tiles: TileId[]): void {
     .then(() =>
       runPrefetch(tiles, {
         concurrency: 3,
+        provider: activeNaipProvider,
         onProgress: (done, total) => {
           if (done % 25 === 0 || done === total) devStatus("status-naip", `NAIP: caching ${done}/${total}…`);
         },
@@ -372,6 +393,29 @@ function queuePrefetch(tiles: TileId[]): void {
       }
     })
     .catch(() => {});
+}
+
+let lastViewportPrefetchKey = "";
+let viewportPrefetchTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Warms a ring of tiles around wherever the camera currently is (see
+ * viewportPrefetchPlan's header — the boot-time plan only covers known
+ * assets, so scouting elsewhere in the county always live-rendered with
+ * nothing pre-cached). Debounced: a drag or zoom fires several `moveend`s in
+ * quick succession, and only the settled position is worth a prefetch call. */
+function scheduleViewportPrefetch(): void {
+  if (viewportPrefetchTimer !== null) clearTimeout(viewportPrefetchTimer);
+  viewportPrefetchTimer = setTimeout(() => {
+    viewportPrefetchTimer = null;
+    if (!mapRef) return;
+    const z = mapRef.getZoom();
+    const b = mapRef.getBounds();
+    const bbox: [number, number, number, number] = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+    const key = `${activeNaipProvider}:${Math.round(z)}:${bbox.map((v) => v.toFixed(3)).join(",")}`;
+    if (key === lastViewportPrefetchKey) return;
+    lastViewportPrefetchKey = key;
+    queuePrefetch(viewportPrefetchPlan(bbox, z));
+  }, 400);
 }
 
 /** High-res imagery around a newly bought field / placed building — the
@@ -535,7 +579,7 @@ function repaintGrowthStages(now: number, alreadyPainted: { id: string }[]) {
 // fallback; every rendered UI icon (map dots, queue rows, equipment panel) uses
 // the SVGs below instead — a classic big-tractor/combine silhouette in the
 // game's own cozy palette, not a real manufacturer's colors/logo.
-const AGENT_EMOJI: Record<string, string> = { tractor: "🚜", harvester: "🌾", windrower: "🌿" };
+const AGENT_EMOJI: Record<string, string> = { tractor: "🚜", harvester: "🌾", windrower: "🌿", forageHarvester: "🌱" };
 
 /** Implements that get NO badge beside their machine on the map — the machine's
  * own icon is the whole picture.
@@ -566,7 +610,7 @@ function machineIconHtml(kind: string, size: EquipmentSize | undefined, px: numb
  * Combines got this 2026-07-21, the windrower 2026-07-24 (maintainer request) —
  * it's a full self-propelled machine, not a tractor with a mower on the back,
  * and it should look like one on the map. */
-const BIG_MAP_ICON_KINDS = new Set<string>(["harvester", "windrower"]);
+const BIG_MAP_ICON_KINDS = new Set<string>(["harvester", "windrower", "forageHarvester"]);
 function agentIconPx(kind: string): number {
   return BIG_MAP_ICON_KINDS.has(kind) ? 78 : 60;
 }
@@ -821,88 +865,19 @@ function updateAgentMarkers(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Bale markers: physical bales, each drawn at the exact spot the baler dropped it
-// (field.baleLocations). They accumulate live as the baler works and persist
-// until sold. Markers are appended incrementally as bales drop (no rebuild churn);
-// only a truly enormous field is subsampled, and then EVENLY so coverage stays
-// uniform rather than dropping the last-worked corner.
+// Bale markers: physical bales, each drawn at the exact spot the baler dropped
+// it (field.baleLocations). They accumulate live as the baler works and persist
+// until sold.
+//
+// The rendering itself lives in field/baleLayer.ts — one GPU symbol layer, not
+// the ~600-per-field DOM markers this used to be (see that module's header for
+// why). This wrapper just keeps the call site and its `mapRef` guard.
 // ---------------------------------------------------------------------------
-const MAX_BALE_MARKERS = 600; // per-field perf ceiling; real fields sit well under this
-
-/**
- * The icon for a bale PRODUCT — round or rectangular, tinted for hay / alfalfa
- * / straw (maintainer request, 2026-07-24: "make sure the Square Bales have an
- * icon on the Field and Inventory for a rectangular hay, straw, or alfalfa
- * bale").
- *
- * Round and square are separate products at separate prices, so telling them
- * apart at a glance is the whole job. Everywhere a bale is drawn goes through
- * here, so the two can never disagree about shape.
- */
-function baleIconFor(product: BaleProduct, px: number): string {
-  const cfg = gameConfig.baleProducts[product];
-  return cfg.square ? squareBaleIconSvg(px, cfg.color) : baleIconSvg(px, cfg.color);
-}
-
-function makeBaleMarker(p: Meters, product: BaleProduct): maplibregl.Marker {
-  const el = document.createElement("div");
-  el.className = "bale-dot";
-  el.innerHTML = baleIconFor(product, 14);
-  return new maplibregl.Marker({ element: el }).setLngLat(toLngLat(p)).addTo(mapRef!);
-}
-
-/** What a field's dropped bales ARE — drives both the marker shape and its tint. */
-function baleProductOf(field: Field): BaleProduct {
-  return field.baleProduct ?? "cornStover";
-}
-
-/** Markers for a field's bales — all of them, or an EVEN subsample if a field
- * somehow tops the ceiling (uniform coverage, never a bare last corner). */
-function baleMarkersFor(locs: Meters[], product: BaleProduct): maplibregl.Marker[] {
-  if (locs.length <= MAX_BALE_MARKERS) return locs.map((p) => makeBaleMarker(p, product));
-  const out: maplibregl.Marker[] = [];
-  for (let i = 0; i < MAX_BALE_MARKERS; i++) out.push(makeBaleMarker(locs[Math.floor((i * locs.length) / MAX_BALE_MARKERS)]!, product));
-  return out;
-}
-
-// `count` = how many baleLocations the markers currently represent. `product`
-// too, since it decides the SHAPE drawn: a field re-baled with the other baler
-// has to redraw, not just append (2026-07-24).
-const baleMarkers = new Map<string, { count: number; product: BaleProduct; markers: maplibregl.Marker[] }>();
-
 function updateBaleMarkers(): void {
   if (!mapRef) return;
-  const wanted = new Set<string>();
-  for (const field of save.fields) {
-    const locs = field.baleLocations ?? [];
-    if (locs.length === 0) continue;
-    wanted.add(field.id);
-    const product = baleProductOf(field);
-    const existing = baleMarkers.get(field.id);
-    if (existing && existing.count === locs.length && existing.product === product) continue; // no change
-    if (!existing || existing.product !== product) {
-      // New field, or its bales changed shape/product — redraw rather than
-      // append, or a square-baled field would keep the round icons it started
-      // the season with.
-      if (existing) for (const m of existing.markers) m.remove();
-      baleMarkers.set(field.id, { count: locs.length, product, markers: baleMarkersFor(locs, product) });
-    } else if (locs.length > existing.count && locs.length <= MAX_BALE_MARKERS) {
-      // Common case while baling: just add markers for the NEW drops.
-      for (let i = existing.count; i < locs.length; i++) existing.markers.push(makeBaleMarker(locs[i]!, product));
-      existing.count = locs.length;
-    } else {
-      // Shrank (some sold), or crossed the subsample ceiling — rebuild.
-      for (const m of existing.markers) m.remove();
-      baleMarkers.set(field.id, { count: locs.length, product, markers: baleMarkersFor(locs, product) });
-    }
-  }
-  // Drop markers for fields that were sold or had their bales sold.
-  for (const [id, entry] of baleMarkers) {
-    if (!wanted.has(id)) {
-      for (const m of entry.markers) m.remove();
-      baleMarkers.delete(id);
-    }
-  }
+  // Fire-and-forget: the only await inside is the one-time icon rasterization,
+  // and a failure there costs the bale icons, not the frame.
+  void updateBaleLayer(mapRef, save.fields);
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,6 +1088,13 @@ function lerpAlong(a: Meters, b: Meters, distA: number, distB: number, d: number
 /** Task id currently being drag-reordered in the Jobs list, if any. */
 let draggingTaskId: string | null = null;
 
+/** Task id currently SELECTED (clicked) in the Work Queue, if any (2026-08-12).
+ * Generic — not tied to any one feature — so a row can carry per-task actions
+ * without cluttering every row all the time: today that's just active-task
+ * Restart/Cancel (shown only on its own row once selected), but the same
+ * selection state is meant to grow other task-specific panels/actions later. */
+let selectedTaskId: string | null = null;
+
 function sectionDivider(label: string): HTMLElement {
   const d = document.createElement("div");
   d.className = "qp-sub";
@@ -1145,13 +1127,18 @@ const IMPLEMENT_GROUP: Record<ImplementKind, ImplementGroup> = {
   mulcher: "Yield Modifiers",
   cornHeader: "Harvesting",
   grainHeader: "Harvesting",
+  rowCropHead: "Harvesting",
+  pickupHead: "Harvesting",
   mower: "Hay & Silage Tools",
   rake: "Hay & Silage Tools",
   bailer: "Hay & Silage Tools",
   squareBaler: "Hay & Silage Tools",
+  baleWrapper: "Hay & Silage Tools",
+  combiBaler: "Hay & Silage Tools",
   haySpikes: "Hay & Silage Tools",
   grainTrailer: "Trailers",
   baleTrailer: "Trailers",
+  forageWagon: "Trailers",
 };
 
 const IMPLEMENT_KIND_NAME: Record<ImplementKind, string> = {
@@ -1159,6 +1146,8 @@ const IMPLEMENT_KIND_NAME: Record<ImplementKind, string> = {
   bailer: "Round Baler", squareBaler: "Square Baler", grainTrailer: "Grain Trailer", mower: "Mower",
   mulcher: "Mulcher", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
   cornHeader: "Corn Header", grainHeader: "Grain Header",
+  baleWrapper: "Bale Wrapper", combiBaler: "Combi Baler",
+  forageWagon: "Forage Wagon", rowCropHead: "Row-Crop Head", pickupHead: "Pickup Head",
 };
 function implementInfoLines(kind: ImplementKind, size: EquipmentSize): { name: string; detail: string } {
   const name = `${IMPLEMENT_KIND_NAME[kind]} - ${SIZE_LABEL[size]}`;
@@ -1428,6 +1417,82 @@ function buildBaleTrailerRow(task: FarmTask): HTMLElement | null {
  * already committed — reordering them would be meaningless/risky) and show
  * the working machine's icon; queued jobs carry no icon, are drag-reorderable,
  * and get a cancel button. */
+/** Restart/Cancel for an ACTIVE task — the "it's stuck, get me out" escape
+ * hatch (maintainer request, 2026-08-12: reloading doesn't clear a wedged
+ * task since the save state IS what's broken). Restart wipes the task's
+ * cached route/phase state and lets it re-derive everything fresh in place;
+ * Cancel drops it outright (no refund) and frees the machine for other work.
+ * Shown on every active row, including the system tasks (unload/haul/sell) —
+ * those are exactly the phase-machine-heavy ones most likely to wedge.
+ * Icon-only, tucked in the row's bottom-left corner (2026-08-12 follow-up —
+ * the labeled buttons ate too much width for something used rarely): the
+ * title attribute carries the label instead of visible text. */
+function buildActiveTaskControls(task: FarmTask): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "qr-active-controls";
+
+  const restartBtn = document.createElement("button");
+  restartBtn.className = "qr-restart";
+  restartBtn.textContent = "↻";
+  restartBtn.title = "Stuck? Reset this job's route/phase — it picks back up in place";
+  restartBtn.addEventListener("click", () => {
+    try {
+      restartActiveTask(save, task.id);
+      lastQueueKey = " init";
+      refreshQueuePanel();
+      if (selectedFieldId) refreshFieldPanel(true);
+      toast("↻ Restarted");
+    } catch (err) {
+      toast("❌ " + (err as Error).message, 3500);
+    }
+  });
+  wrap.appendChild(restartBtn);
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "qr-force-cancel";
+  cancelBtn.textContent = "⛔";
+  cancelBtn.title = "Stuck? Drop this job entirely and free up the machine — no refund";
+  cancelBtn.addEventListener("click", async () => {
+    if (!(await confirmDialog({
+      title: `Cancel this ${TASK_NOUN[task.type] ?? task.type} job?`,
+      body: "The machine working it is freed up immediately, but there's no refund — this is meant for a job that's genuinely stuck, not a normal cancel.",
+      okLabel: "Cancel job", danger: true,
+    }))) return;
+    try {
+      forceCancelActiveTask(save, task.id);
+      if (selectedTaskId === task.id) selectedTaskId = null; // the row it was on is gone
+      updateHud();
+      lastQueueKey = " init";
+      refreshQueuePanel();
+      if (selectedFieldId) refreshFieldPanel(true);
+      toast("⛔ Canceled");
+    } catch (err) {
+      toast("❌ " + (err as Error).message, 3500);
+    }
+  });
+  wrap.appendChild(cancelBtn);
+
+  return wrap;
+}
+
+/** Click-to-select wiring shared by every branch below (2026-08-12) —
+ * highlights the row and is what buildActiveTaskControls gates on, so the
+ * Restart/Cancel icons only show up for the one task you've actually clicked
+ * instead of cluttering every active row. Ignores clicks that land on a
+ * button inside the row (cancel/restart) so those keep their own behavior
+ * rather than also toggling selection. Not tied to the active-controls
+ * feature specifically — selection is meant to carry other per-task
+ * actions/panels later too. */
+function wireRowSelection(row: HTMLElement, task: FarmTask): void {
+  row.classList.toggle("selected", task.id === selectedTaskId);
+  row.addEventListener("click", (e) => {
+    if ((e.target as HTMLElement).closest("button")) return;
+    selectedTaskId = selectedTaskId === task.id ? null : task.id;
+    lastQueueKey = " init";
+    refreshQueuePanel();
+  });
+}
+
 function buildQueueRow(task: FarmTask): HTMLElement {
   const isActive = task.status === "active";
   const agent = isActive && task.agentId ? save.agents.find((a) => a.id === task.agentId) : undefined;
@@ -1448,7 +1513,9 @@ function buildQueueRow(task: FarmTask): HTMLElement {
         <div class="qr-sub">${sub}</div>
         ${implementRowHtml(task, agent)}
       </span>`;
-    return row; // system task — not draggable/cancelable, it self-regenerates
+    wireRowSelection(row, task);
+    if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task));
+    return row; // system task — not draggable/reorderable, it self-regenerates
   }
 
   if (task.type === "haulBales") {
@@ -1477,7 +1544,9 @@ function buildQueueRow(task: FarmTask): HTMLElement {
         ${isActive && job.total > 0 ? `<div class="progress"><div class="fill" style="width:${job.pct.toFixed(0)}%"></div></div>` : ""}
         ${implementRowHtml(task, agent)}
       </span>`;
-    return row; // system task — not draggable/cancelable, it self-regenerates
+    wireRowSelection(row, task);
+    if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task));
+    return row; // system task — not draggable/reorderable, it self-regenerates
   }
 
   if (task.type === "sell") {
@@ -1501,7 +1570,9 @@ function buildQueueRow(task: FarmTask): HTMLElement {
         <div class="qr-sub">${phase[task.sellPhase ?? "toSource"] ?? ""}${left > 0 ? ` · ${Math.round(left)} left in storage` : ""}</div>
         ${implementRowHtml(task, agent)}
       </span>`;
-    return row; // system task — self-regenerating, not draggable/cancelable
+    wireRowSelection(row, task);
+    if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task));
+    return row; // system task — self-regenerating, not draggable/reorderable
   }
 
   const hours = estimateTaskHours(save, task);
@@ -1570,6 +1641,8 @@ function buildQueueRow(task: FarmTask): HTMLElement {
     });
     row.appendChild(btn);
   }
+  wireRowSelection(row, task);
+  if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task));
 
   return row;
 }
@@ -1686,8 +1759,8 @@ function refreshQueuePanel(): void {
  * feed's `TASK_PAST_VERB` ("Plowed") reads as a lie on a blocked row. */
 const TASK_NOUN: Record<TaskType, string> = {
   plow: "Plow", plant: "Plant", harvest: "Harvest", mow: "Mow",
-  mulch: "Mulch", weed: "Weed", fertilize: "Fertilize", rake: "Rake", bale: "Bale",
-  unloadHarvester: "Haul grain", haulBales: "Haul bales", sell: "Sell run",
+  mulch: "Mulch", weed: "Weed", fertilize: "Fertilize", rake: "Rake", bale: "Bale", wrap: "Wrap",
+  chop: "Chop", unloadHarvester: "Haul grain", haulBales: "Haul bales", sell: "Sell run",
 };
 
 /** A ⚠️ row for work that can't proceed — task + field, then why. Deliberately
@@ -1713,8 +1786,8 @@ function buildBlockedRow(b: BlockedWork): HTMLElement {
 
 const TASK_PAST_VERB: Record<TaskType, string> = {
   plow: "Plowed", plant: "Planted", harvest: "Harvested", mow: "Mowed",
-  mulch: "Mulched", weed: "Weeded", fertilize: "Fertilized", rake: "Raked", bale: "Baled",
-  unloadHarvester: "Hauled", haulBales: "Hauled bales", sell: "Sold",
+  mulch: "Mulched", weed: "Weeded", fertilize: "Fertilized", rake: "Raked", bale: "Baled", wrap: "Wrapped",
+  chop: "Chopped", unloadHarvester: "Hauled", haulBales: "Hauled bales", sell: "Sold",
 };
 
 /** One compact, non-interactive row per finished job OR sale — sized like a
@@ -2192,7 +2265,8 @@ function refreshInventory(force = false) {
   const fieldBaleKey = baleInventory(save, clock.time()).map((s) => `${s.product}:${s.bales}`).join(",");
   // Also keyed on the current month (seasonal prices shift the strip + badges)
   // and the sell schedule.
-  const key = `${grainKey}#${bldgKey}#${fieldBaleKey}#m${monthOf(clock.time())}#${JSON.stringify(save.sellSchedule ?? {})}`;
+  const silageKey = JSON.stringify(save.silage ?? {});
+  const key = `${grainKey}#${bldgKey}#${fieldBaleKey}#${silageKey}#m${monthOf(clock.time())}#${JSON.stringify(save.sellSchedule ?? {})}`;
   if (!force && key === lastInventoryKey) return;
   lastInventoryKey = key;
 
@@ -2264,8 +2338,12 @@ function refreshInventory(force = false) {
     actions.appendChild(locateButton(name, silo.pos));
     const refund = buildingPrice("silo", silo.size);
     actions.appendChild(
-      iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, () => {
-        if (!confirm(`Sell ${name} for $${refund.toLocaleString()}?`)) return;
+      iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, async () => {
+        if (!(await confirmDialog({
+          title: `Sell ${name}?`,
+          body: `You'll get back $${refund.toLocaleString()}.`,
+          okLabel: "Sell", danger: true,
+        }))) return;
         sellBuilding(save, silo.id);
         toast(`💰 Sold ${name} for $${refund.toLocaleString()}`);
         refreshInventory(true);
@@ -2276,6 +2354,50 @@ function refreshInventory(force = false) {
     card.appendChild(actions);
     wireStorageSelection(card, `silo:${silo.id}`);
     rows.appendChild(card);
+  }
+
+  // --- Silage bunkers (2026-07-31, Phase 2). Pooled farm-wide rather than
+  // per-building: a bunker takes any silage and has no assignment, so the
+  // player's real question is "how much silage have I got and what's it
+  // worth", not which slab it's sitting on. ---
+  const bunkers = save.buildings.filter((b) => b.kind === "silageBunker");
+  const silageRows = silageInventory(save);
+  if (bunkers.length > 0 || silageRows.length > 0) {
+    rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">🧱 Silage Bunkers</div>`);
+    const cap = silageCapacityTons(save);
+    const stored = silageStoredTons(save);
+    const pct = cap > 0 ? Math.min(100, (stored / cap) * 100) : 0;
+    const level = pct >= 95 ? "full" : pct >= 75 ? "high" : "ok";
+    rows.insertAdjacentHTML("beforeend",
+      `<div class="silo-card">
+         <div class="sc-top"><span class="sc-name">${bunkers.length} bunker${bunkers.length === 1 ? "" : "s"}</span>
+         <span class="sc-cap">${stored.toFixed(0)} / ${cap.toLocaleString()} t</span></div>
+         <div class="silo-bar"><div class="silo-fill ${level}" style="width:${pct.toFixed(1)}%"></div></div>
+       </div>`);
+    if (cap === 0) {
+      rows.insertAdjacentHTML("beforeend",
+        `<div class="silo-bar-empty">No bunker built — a chopper's wagons will divert to a Sell Point instead.</div>`);
+    }
+    for (const s of silageRows) {
+      const row = document.createElement("div");
+      row.className = "inv-row";
+      row.innerHTML =
+        `<span class="ir-name">${s.emoji} ${escapeHtml(s.name)}</span>` +
+        `<span class="ir-qty">${s.tons.toFixed(0)} t</span>` +
+        `<span class="ir-val">$${s.value.toLocaleString()}</span>`;
+      const btn = document.createElement("button");
+      btn.className = "shop-buy";
+      btn.textContent = `Sell · $${s.pricePerTon}/t`;
+      btn.addEventListener("click", () => {
+        const r = sellSilage(save, s.product, s.tons, clock.time());
+        updateHud();
+        refreshInventory(true);
+        refreshQueuePanel();
+        toast(`💰 Sold ${r.tons.toFixed(0)} t of ${s.name} for $${r.revenue.toLocaleString()}`);
+      });
+      row.appendChild(btn);
+      rows.appendChild(row);
+    }
   }
 
   // --- Bale storage structures (2026-07-17): now hold hauled bales (per
@@ -2338,8 +2460,12 @@ function refreshInventory(force = false) {
       actions.appendChild(locateButton(name, b.pos));
       const refund = buildingPrice(b.kind);
       actions.appendChild(
-        iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, () => {
-          if (!confirm(`Sell ${name} for $${refund.toLocaleString()}?`)) return;
+        iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, async () => {
+          if (!(await confirmDialog({
+            title: `Sell ${name}?`,
+            body: `You'll get back $${refund.toLocaleString()}.`,
+            okLabel: "Sell", danger: true,
+          }))) return;
           sellBuilding(save, b.id);
           toast(`💰 Sold ${name} for $${refund.toLocaleString()}`);
           refreshInventory(true);
@@ -2485,13 +2611,15 @@ function refreshFinanceTab(force = false) {
     refi.className = "ll-btn refi";
     refi.textContent = "🔄";
     refi.title = `Refinance — fresh ${gameConfig.loan.termMonths / 12}-yr term, $${gameConfig.loan.refinanceFee.toLocaleString()} fee added to principal`;
-    refi.addEventListener("click", () => {
-      const ok = confirm(
-        `Refinance the Year ${loan.originYear} loan?\n\n` +
+    refi.addEventListener("click", async () => {
+      const ok = await confirmDialog({
+        title: `Refinance the Year ${loan.originYear} loan?`,
+        body:
           `This resets it to a fresh ${gameConfig.loan.termMonths / 12}-year term at ${loan.ratePercent}% and ` +
           `recalculates the monthly payment from the current balance. A $${gameConfig.loan.refinanceFee.toLocaleString()} ` +
           `fee gets added to the loan's principal — it isn't charged in cash.`,
-      );
+        okLabel: "Refinance",
+      });
       if (!ok) return;
       refinanceLoan(save, loan.id);
       updateHud();
@@ -2548,6 +2676,38 @@ function refreshFinanceTab(force = false) {
 // state elsewhere (clock, calendar pace, id counters, ...) boots up correct
 // for whichever save is now active, rather than needing a live teardown path.
 // ---------------------------------------------------------------------------
+/** How much the dev cash button grants per click. */
+const DEV_CASH_GRANT = 1_000_000;
+
+/**
+ * DEV-SERVER ONLY testing affordances (2026-07-31, maintainer request: "add
+ * 1 MM to the Dev server cash so i can test").
+ *
+ * Gated on `import.meta.env.DEV`, which Vite compiles to a literal `false` in
+ * a production build — so the whole block is dead code the bundler drops, and
+ * a deployed game can never show a cash button.
+ *
+ * The grant is deliberately NOT recorded in the ledger. It isn't farm income,
+ * and booking it would skew the very cashflow report you'd use to judge
+ * whether a chopper or a bunker actually pays for itself.
+ */
+function wireDevTools(): void {
+  if (!import.meta.env.DEV) return;
+  const host = $("dev-tools");
+  const btn = document.createElement("button");
+  btn.textContent = `+$${(DEV_CASH_GRANT / 1_000_000).toFixed(0)}M`;
+  btn.title = "Dev server only — grant cash for testing. Not booked to the ledger.";
+  btn.addEventListener("click", () => {
+    save.money += DEV_CASH_GRANT;
+    updateHud();
+    refreshEquipTab(true);
+    refreshStructuresTab(true);
+    refreshFinanceTab(true);
+    toast(`🧪 Dev: +$${DEV_CASH_GRANT.toLocaleString()} — now $${Math.round(save.money).toLocaleString()}`);
+  });
+  host.appendChild(btn);
+}
+
 function wireSettingsTab() {
   $("btn-settings").addEventListener("click", () => toggleToolbarPanel("settingstab", refreshSettingsTab));
   $("settings-close").addEventListener("click", () => ($("settingstab").style.display = "none"));
@@ -2609,8 +2769,12 @@ function refreshSettingsTab(): void {
     delBtn.className = "farm-del";
     delBtn.textContent = "🗑";
     delBtn.title = `Delete ${meta.name}`;
-    delBtn.addEventListener("click", () => {
-      if (!confirm(`Delete "${meta.name}"? This can't be undone.`)) return;
+    delBtn.addEventListener("click", async () => {
+      if (!(await confirmDialog({
+        title: `Delete "${meta.name}"?`,
+        body: "This farm and its save are gone for good — this can't be undone.",
+        okLabel: "Delete", danger: true,
+      }))) return;
       const wasActive = isActive;
       deleteFarm(meta.id); // picks (or creates) the next active farm internally
       if (wasActive) {
@@ -2622,6 +2786,35 @@ function refreshSettingsTab(): void {
     });
     row.appendChild(delBtn);
     rows.appendChild(row);
+  }
+
+  refreshNaipProviderRow();
+}
+
+/** Switch which NAIP host serves imagery — see activeNaipProvider's comment.
+ * Persists the choice, then forces the live source to drop its tiles and
+ * reload under the new provider: `setTiles()` with a URL that actually
+ * changed (the provider segment) is what makes MapLibre treat every visible
+ * tile as needing a fresh request instead of reusing what's already drawn. */
+function switchNaipProvider(id: string): void {
+  if (id === activeNaipProvider) return;
+  activeNaipProvider = id;
+  localStorage.setItem(NAIP_PROVIDER_KEY, id);
+  const source = mapRef?.getSource("naip") as maplibregl.RasterTileSource | undefined;
+  source?.setTiles([naipTileUrlTemplate(id)]);
+  refreshNaipProviderRow();
+}
+
+function refreshNaipProviderRow(): void {
+  const row = $("settings-naip-providers");
+  row.innerHTML = "";
+  for (const p of NAIP_PROVIDERS) {
+    const pill = document.createElement("button");
+    pill.className = "naip-provider-pill" + (p.id === activeNaipProvider ? " active" : "");
+    pill.textContent = (p.id === activeNaipProvider ? "✓ " : "") + p.label;
+    pill.title = p.imageServer;
+    pill.addEventListener("click", () => switchNaipProvider(p.id));
+    row.appendChild(pill);
   }
 }
 
@@ -2909,8 +3102,12 @@ function buildStructuresList(): void {
     actions.className = "ec-actions";
     actions.appendChild(locateButton(name, b.pos));
     actions.appendChild(
-      iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, () => {
-        if (!confirm(`Sell ${name} for $${refund.toLocaleString()}?`)) return;
+      iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, async () => {
+        if (!(await confirmDialog({
+          title: `Sell ${name}?`,
+          body: `You'll get back $${refund.toLocaleString()}.`,
+          okLabel: "Sell", danger: true,
+        }))) return;
         sellBuilding(save, b.id);
         toast(`💰 Sold ${name} for $${refund.toLocaleString()}`);
         afterStructuresChange();
@@ -2986,6 +3183,8 @@ function structureSpecText(b: Building): string {
       return "Rally point — gear parks here";
     case "sellPoint":
       return "Bale hauler fallback — sells on the spot when storage is full/missing";
+    case "silageBunker":
+      return `${bunkerCapacityOf(b.size ?? "small").toLocaleString()} t silage · farm total ${silageCapacityTons(save).toLocaleString()} t`;
   }
 }
 
@@ -3188,6 +3387,19 @@ function buildEquipShop(): void {
     },
   });
 
+  // Self-Propelled Forage Harvester (2026-07-31): the chopper. Priciest
+  // machine in the game, and it cannot turn a wheel without a Forage Wagon —
+  // which the spec line says outright, since buying one alone is a dead end.
+  line("Forage Harvester", machineIconHtml("forageHarvester", "large", 78), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.forageHarvester[s].widthFt} ft · chops silage · needs a Forage Wagon`,
+    price: agentPrice("forageHarvester", s),
+    onBuy: () => {
+      const a = buyAgent(save, "forageHarvester", s, spawnPos());
+      afterFleetChange();
+      toast(`Bought ${a.name} — parked at the yard`);
+    },
+  }])));
+
   // The shop is grouped exactly like the owned list (2026-07-24) — fourteen
   // implement kinds in one flat run was unreadable.
   const widthSpec = (kind: "plow" | "planter" | "sprayer", s: EquipmentSize) =>
@@ -3250,12 +3462,45 @@ function buildEquipShop(): void {
       price: implementPrice("squareBaler", "medium"), onBuy: buyImpl("squareBaler", "medium"),
     },
   });
+  // Silage Phase 1 (2026-07-31). The cheap route into baleage and the
+  // one-pass route — see `baleProducts`' balance note for the trade.
+  line("Bale Wrapper", implementIconHtml("baleWrapper", "medium", 26), {
+    medium: {
+      spec: "wraps round bales into baleage · same month as baling",
+      price: implementPrice("baleWrapper", "medium"), onBuy: buyImpl("baleWrapper", "medium"),
+    },
+  });
+  line("Combi Baler", implementIconHtml("combiBaler", "medium", 26), {
+    medium: {
+      spec: "bales AND wraps in one pass · never misses the window",
+      price: implementPrice("combiBaler", "medium"), onBuy: buyImpl("combiBaler", "medium"),
+    },
+  });
+  // The chopper's two heads (2026-07-31) — which one a job needs depends on
+  // the crop, exactly like the combine's.
+  line("Row-Crop Head", implementIconHtml("rowCropHead", "medium", 26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.rowCropHead[s].widthFt} ft · chops standing corn, whole plant`,
+    price: implementPrice("rowCropHead", s), onBuy: buyImpl("rowCropHead", s),
+  }])));
+  line("Pickup Head", implementIconHtml("pickupHead", "medium", 26), {
+    medium: {
+      spec: "picks a mown windrow up · grass & alfalfa haylage",
+      price: implementPrice("pickupHead", "medium"), onBuy: buyImpl("pickupHead", "medium"),
+    },
+  });
   // Hay Spikes: in-field bale collector — Small (1 bale) & Medium (2).
   line("Hay Spikes", haySpikesIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
     spec: `${haySpikesCapacityBales(s)} bale${haySpikesCapacityBales(s) === 1 ? "" : "s"} · collects`, price: implementPrice("haySpikes", s), onBuy: buyImpl("haySpikes", s),
   }])));
 
   section("Trailers");
+  // Forage Wagon: bigger than the grain line at every tier — chopped forage is
+  // bulky, and the chopper stops dead whenever no wagon is taking material, so
+  // capacity here is what keeps the whole silage harvest moving.
+  line("Forage Wagon", implementIconHtml("forageWagon", "medium", 26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.forageWagon[s].capacityTons} t silage`,
+    price: implementPrice("forageWagon", s), onBuy: buyImpl("forageWagon", s),
+  }])));
   line("Grain Trailer", grainTrailerIconSvg(26), Object.fromEntries(SIZES.map((s) => [s, {
     spec: `${grainTrailerCapacityBushels(s).toLocaleString()} bu (~${grainTrailerCapacityTons(s).toFixed(0)} t corn)`,
     price: implementPrice("grainTrailer", s), onBuy: buyImpl("grainTrailer", s),
@@ -3280,7 +3525,7 @@ function buildStructuresShop(): void {
 
   const placeBuilding = (kind: BuildingKind, size?: EquipmentSize) => () => {
     mode = `building:${kind}`;
-    if (kind === "silo") pendingSiloSize = size ?? "small";
+    if (buildingIsSized(kind)) pendingSiloSize = size ?? "small";
     $("structurestab").style.display = "none";
     toast(`🏗️ Click the map to place your ${buildingDisplayName(kind, size)}`);
   };
@@ -3289,7 +3534,14 @@ function buildStructuresShop(): void {
     price: buildingPrice("silo", s),
     onBuy: placeBuilding("silo", s),
   }])));
-  const OTHER_BUILDINGS: Array<[Exclude<BuildingKind, "silo">, string]> = [
+  // Silage Bunker (2026-07-31) — sized like a silo, so it gets the same
+  // three-column treatment rather than joining the flat list below.
+  shopLine(shop, "Silage Bunker", `<span class="shop-emoji">${BUILDING_ICON.silageBunker}</span>`, Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${bunkerCapacityOf(s).toLocaleString()} t silage · takes any product`,
+    price: buildingPrice("silageBunker", s),
+    onBuy: placeBuilding("silageBunker", s),
+  }])));
+  const OTHER_BUILDINGS: Array<[Exclude<BuildingKind, "silo" | "silageBunker">, string]> = [
     // The rot rate belongs HERE above all — it's the only thing separating
     // these two, and the point of purchase is where that has to be visible.
     // (`unlimited` was also a lie on the Area: it's been capped since
@@ -3391,8 +3643,12 @@ function buildEquipMachines(): void {
 
     const refund = agent.purchaseCost ?? (agent.size ? agentPrice(agent.kind as EquipmentKind, agent.size) : 0);
     actions.appendChild(
-      iconButton("💰", agent.state !== "idle" ? `${agent.name} is mid-job` : `Sell · $${refund.toLocaleString()}`, agent.state !== "idle", () => {
-        if (!confirm(`Sell ${agent.name} for $${refund.toLocaleString()}?`)) return;
+      iconButton("💰", agent.state !== "idle" ? `${agent.name} is mid-job` : `Sell · $${refund.toLocaleString()}`, agent.state !== "idle", async () => {
+        if (!(await confirmDialog({
+          title: `Sell ${agent.name}?`,
+          body: `You'll get back $${refund.toLocaleString()}.`,
+          okLabel: "Sell", danger: true,
+        }))) return;
         const { refund: paid } = sellAgent(save, agent.id);
         afterFleetChange();
         toast(`💰 Sold ${agent.name} for $${paid.toLocaleString()}`);
@@ -3455,8 +3711,12 @@ function buildEquipImplements(): void {
       const actions = document.createElement("div");
       actions.className = "ec-actions";
       actions.appendChild(
-        iconButton("💰", busy ? `${host!.name} is using this` : `Sell · $${refund.toLocaleString()}`, busy, () => {
-          if (!confirm(`Sell ${implementName(save, impl)} for $${refund.toLocaleString()}?`)) return;
+        iconButton("💰", busy ? `${host!.name} is using this` : `Sell · $${refund.toLocaleString()}`, busy, async () => {
+          if (!(await confirmDialog({
+            title: `Sell ${implementName(save, impl)}?`,
+            body: `You'll get back $${refund.toLocaleString()}.`,
+            okLabel: "Sell", danger: true,
+          }))) return;
           const { refund: paid } = sellImplement(save, impl.id);
           afterFleetChange();
           toast(`💰 Sold for $${paid.toLocaleString()}`);
@@ -3870,7 +4130,7 @@ function wireFieldDrawing(map: maplibregl.Map) {
 
   /** Shared by the double-click-to-close gesture and the "Purchase Field"
    * button — confirm the price, then buy + name + hand off to gate placement. */
-  function finishField(boundary: Meters[]) {
+  async function finishField(boundary: Meters[]) {
     if (boundary.length < 3) {
       toast("Need at least 3 corners — try again");
       updateDraft();
@@ -3879,12 +4139,17 @@ function wireFieldDrawing(map: maplibregl.Map) {
     const acres = areaAcres(boundary);
     const cost = Math.round(acres * gameConfig.landPricePerAcre);
     endDrawing();
-    if (!confirm(`Buy this ${acres.toFixed(1)} ac field for $${cost.toLocaleString()}?`)) return;
+    if (!(await confirmDialog({
+      title: `Buy this ${acres.toFixed(1)} ac field?`,
+      body: `It'll cost $${cost.toLocaleString()} at $${gameConfig.landPricePerAcre.toLocaleString()}/acre.`,
+      okLabel: "Buy field",
+    }))) return;
     try {
       const { field, acres: boughtAcres, cost: paid } = buyFieldFromBoundary(map, overlay, save, boundary);
       const defaultName = `Field ${save.fields.length}`; // buyFieldFromBoundary already pushed it
-      const chosen = prompt("Name this field:", defaultName);
+      const chosen = await promptDialog({ title: "Name this field", value: defaultName });
       field.name = (chosen ?? "").trim() || defaultName;
+      renderField(map, overlay, field, clock.time()); // buy-time render predates the name
       // Seed gates at the road side + opposite, then hand the player the
       // same drag-to-place editor so they can designate the real entry points.
       field.accessPoints = defaultAccessPoints(field.boundary, roadNetRef);
@@ -3913,7 +4178,7 @@ function wireFieldDrawing(map: maplibregl.Map) {
   });
 
   $("df-cancel").addEventListener("click", endDrawing);
-  $("df-finish").addEventListener("click", () => finishField(verts.slice()));
+  $("df-finish").addEventListener("click", () => void finishField(verts.slice()));
 
   map.on("click", (e) => {
     if (mode !== "field") return;
@@ -3925,7 +4190,7 @@ function wireFieldDrawing(map: maplibregl.Map) {
     if (mode !== "field") return;
     // The double-click's two single clicks each pushed the same vertex; drop one.
     verts.pop();
-    finishField(verts.slice());
+    void finishField(verts.slice());
   });
 }
 
@@ -3942,7 +4207,7 @@ function wireBuildingPlacement(map: maplibregl.Map) {
     const kind = mode.slice("building:".length) as BuildingKind;
     mode = "none";
     const pos = toMeters([e.lngLat.lng, e.lngLat.lat]);
-    const size = kind === "silo" ? pendingSiloSize : undefined;
+    const size = buildingIsSized(kind) ? pendingSiloSize : undefined;
     try {
       buyBuildingAt(save, kind, pos, size);
       prefetchAroundAsset(pos); // warm high-res imagery here
@@ -3983,6 +4248,8 @@ function buildingCapacityText(building: Building): string {
       return "Rally point — new equipment parks here";
     case "sellPoint":
       return "No capacity — a bale hauler sells here on the spot when Bale Storage is missing or full";
+    case "silageBunker":
+      return `Silage: ${silageStoredTons(save).toFixed(0)} / ${silageCapacityTons(save).toLocaleString()} t farm-wide · this bunker holds ${bunkerCapacityOf(building.size ?? "small").toLocaleString()} t · takes any silage`;
   }
 }
 
@@ -4016,8 +4283,12 @@ function onBuildingClick(building: Building): void {
   const sellBtn = document.createElement("button");
   sellBtn.className = "shop-buy";
   sellBtn.textContent = `Sell · $${refund.toLocaleString()}`;
-  sellBtn.addEventListener("click", () => {
-    if (!confirm(`Sell ${name} for $${refund.toLocaleString()}?`)) return;
+  sellBtn.addEventListener("click", async () => {
+    if (!(await confirmDialog({
+      title: `Sell ${name}?`,
+      body: `You'll get back $${refund.toLocaleString()}.`,
+      okLabel: "Sell", danger: true,
+    }))) return;
     sellBuilding(save, building.id);
     updateHud();
     refreshBuildingMarkers();
@@ -4046,12 +4317,13 @@ function wireFieldSelection(map: maplibregl.Map) {
     $(`fp-tab-${t}`).addEventListener("click", () => switchFieldPanelTab(t));
   }
 
-  $("fp-rename").addEventListener("click", () => {
+  $("fp-rename").addEventListener("click", async () => {
     const field = save.fields.find((f) => f.id === selectedFieldId);
     if (!field) return;
-    const chosen = prompt("Rename this field:", fieldLabel(field));
+    const chosen = await promptDialog({ title: "Rename this field", value: fieldLabel(field) });
     if (chosen === null) return; // cancelled — keep the existing name
     field.name = chosen.trim() || field.name;
+    renderField(mapRef, overlay, field, clock.time()); // the map label reads the name
     refreshFieldPanel(true);
     refreshFieldsTab();
   });
@@ -4075,11 +4347,15 @@ function wireFieldSelection(map: maplibregl.Map) {
     refreshFieldPanel(true);
   });
 
-  $("fp-sell").addEventListener("click", () => {
+  $("fp-sell").addEventListener("click", async () => {
     const field = save.fields.find((f) => f.id === selectedFieldId);
     if (!field) return;
     const refund = field.purchaseCost ?? Math.round(areaAcres(field.boundary) * gameConfig.landPricePerAcre);
-    if (!confirm(`Sell ${fieldLabel(field)} for $${refund.toLocaleString()}?`)) return;
+    if (!(await confirmDialog({
+      title: `Sell ${fieldLabel(field)}?`,
+      body: `You'll get back $${refund.toLocaleString()}. Any standing crop and queued work goes with it.`,
+      okLabel: "Sell field", danger: true,
+    }))) return;
     try {
       const { refund: paid } = sellField(mapRef, overlay, save, field.id);
       updateHud();
@@ -4230,7 +4506,7 @@ function fieldMsg(text: string) {
 }
 
 /** Queue a task from a panel button, with shared feedback plumbing. */
-function queueFromPanel(field: Field, type: "plow" | "plant" | "harvest" | "mow" | "mulch" | "weed" | "fertilize" | "rake" | "bale", crop?: CropId): void {
+function queueFromPanel(field: Field, type: "plow" | "plant" | "harvest" | "chop" | "mow" | "mulch" | "weed" | "fertilize" | "rake" | "bale", crop?: CropId): void {
   try {
     const task = enqueueTask(save, field, type, clock.time(), crop);
     updateHud();
@@ -4303,8 +4579,6 @@ function refreshPlanEditor(field: Field, auto: boolean): void {
   // no way to clear it. Harmless in the sim — `forageDue` gates on the field
   // actually having residue — but it would misreport the plan.
   for (const p of plans) if (p.bale && !cropMakesBales(p.crop)) p.bale = false;
-  const activeIdx = activeRotationIdx(field);
-  const viewIdx = Math.min(perennialField ? 0 : scheduleViewStepIdx, plans.length - 1);
 
   // --- Rotation name + Copy / Paste -----------------------------------------
   const nameInput = document.createElement("input");
@@ -4358,149 +4632,27 @@ function refreshPlanEditor(field: Field, auto: boolean): void {
     // The pasted sequence is a different length/shape — restart it rather than
     // leaving the pointer indexing into a step that no longer means the same thing.
     field.rotationIndex = 0;
-    scheduleViewStepIdx = 0;
     toast(`⎘ Pasted rotation onto ${fieldLabel(field)}`);
     editPlans();
   });
   head.appendChild(pasteBtn);
 
-  // --- The sequence, as a VERTICAL list starting at the current crop --------
-  // Maintainer request, 2026-07-24: the rotation reads top to bottom from
-  // whatever is growing now, rather than in raw array order — what matters is
-  // what's in the ground and what's coming, not where a step sits in the array.
-  //
-  // The array index travels with each row (`realIdx`): `scheduleViewStepIdx`
-  // and `removeRotationStep` both address the array, and quietly feeding either
-  // of them a display position would change which crop the field grows.
-  container.insertAdjacentHTML(
-    "beforeend",
-    perennialField
-      ? `<div class="plan-hint">Perennial stand — one crop, cut every year (no rotation).</div>`
-      : `<div class="plan-hint">The rotation runs top to bottom, then loops. Click a crop to schedule it.</div>`,
-  );
-
-  const chips = document.createElement("div");
-  chips.className = "crop-chips";
-
-  const order = plans.map((_, i) => (activeIdx + i) % plans.length);
-  order.forEach((realIdx, place) => {
-    const plan = plans[realIdx]!;
-    const cfg = gameConfig.crops[plan.crop];
-    const isCurrent = realIdx === activeIdx;
-
-    const rowEl = document.createElement("div");
-    rowEl.className = "crop-row";
-    if (!perennialField) {
-      // The pointer sits on the step the field is ON, which after a plow is the
-      // crop about to go in rather than one that's growing — so the top row
-      // only claims to be "current" when something actually IS growing.
-      const topLabel = field.crop ? "Current" : "Next up";
-      rowEl.insertAdjacentHTML(
-        "beforeend",
-        `<span class="crop-place${isCurrent ? " now" : ""}">${
-          isCurrent ? topLabel : place === 1 ? "Next" : "Then"
-        }</span>`,
-      );
-    }
-
-    // The icon button picks which step the calendar below is showing. It's the
-    // crop's emoji only — the name lives in this row's own dropdown, so
-    // repeating it here would just cost width in a narrow panel.
-    const chip = document.createElement("button");
-    chip.className = "crop-chip" + (realIdx === viewIdx ? " selected" : "") + (isCurrent ? " current" : "");
-    chip.title = `${cfg.name} — show this crop's schedule`;
-    chip.innerHTML =
-      `<span class="cc-emoji">${cfg.emoji}</span>` +
-      (cropMakesBales(plan.crop) ? baleIconSvg(13, gameConfig.baleProducts[cfg.baleProduct ?? "straw"].color) : "");
-    chip.addEventListener("click", () => {
-      scheduleViewStepIdx = realIdx;
-      lastPlansKey = "";
-      lastScheduleCalKey = "";
-      refreshFieldPanel(true);
-    });
-    rowEl.appendChild(chip);
-
-    // A dropdown PER ROW (maintainer request, 2026-07-24), replacing the single
-    // shared picker that only edited whichever step happened to be selected.
-    const sel = document.createElement("select");
-    sel.className = "plan-crop";
-    for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
-      const opt = document.createElement("option");
-      opt.value = cropId;
-      opt.textContent = `${gameConfig.crops[cropId].emoji} ${gameConfig.crops[cropId].name}`;
-      if (cropId === plan.crop) opt.selected = true;
-      sel.appendChild(opt);
-    }
-    sel.addEventListener("change", () => {
-      plan.crop = sel.value as CropId;
-      if (!cropMakesBales(plan.crop)) plan.bale = false; // baling is forage-only
-      // Switching TO a perennial collapses the rotation to this single step;
-      // perennials also default to baling (hay) and never weed.
-      if (isPerennial(plan.crop)) {
-        field.plans = [plan];
-        field.rotationIndex = 0;
-        scheduleViewStepIdx = 0;
-        plan.weed = false;
-        plan.bale = true;
-      }
-      // The new crop's legal months are different — a month override carried
-      // over from the old crop would be re-validated away silently, so clear it
-      // here and let the calendar show real defaults.
-      plan.schedule = undefined;
-      editPlans();
-    });
-    rowEl.appendChild(sel);
-
-    // ...and its own remove button, now that a row is self-contained. A single
-    // shared ✕ acting on "the selected one" made no sense once every row had
-    // its own controls.
-    const del = document.createElement("button");
-    del.className = "plan-del";
-    del.textContent = "✕";
-    del.disabled = plans.length <= 1;
-    del.title = plans.length <= 1 ? "A rotation needs at least one crop" : `Remove ${cfg.name} from the rotation`;
-    del.addEventListener("click", () => {
-      // Pointer arithmetic lives in the sim (removeRotationStep) — getting it
-      // wrong silently changes which crop the field is growing.
-      removeRotationStep(field, realIdx);
-      scheduleViewStepIdx = Math.min(scheduleViewStepIdx, (field.plans?.length ?? 1) - 1);
-      editPlans();
-    });
-    rowEl.appendChild(del);
-
-    chips.appendChild(rowEl);
-  });
-
-  // Perennial stands don't rotate — no "add step" button (maintainer request).
-  if (!perennialField) {
-    const add = document.createElement("button");
-    add.className = "chip-add";
-    add.textContent = "＋ Add a crop";
-    add.disabled = plans.length >= 5;
-    add.title = plans.length >= 5 ? "A rotation holds at most 5 crops" : "Add another crop to the rotation";
-    add.addEventListener("click", () => {
-      if (plans.length >= 5) return;
-      // Default the new step to a DIFFERENT, non-perennial crop for an easy rotation.
-      const crops = (Object.keys(gameConfig.crops) as CropId[]).filter((c) => !gameConfig.crops[c].perennial);
-      const nextCrop = crops.find((c) => c !== plans[plans.length - 1]!.crop) ?? crops[0]!;
-      plans.push({ crop: nextCrop, bale: cropMakesBales(nextCrop) });
-      scheduleViewStepIdx = plans.length - 1; // jump to the new step's schedule
-      editPlans();
-    });
-    chips.appendChild(add);
-  }
-  container.appendChild(chips);
+  // The crop LIST that used to live here is gone (maintainer, 2026-07-31:
+  // "the crop selection at the top is redundant"). Choosing a crop, adding a
+  // step and removing one all happen on the calendar's own block headers now —
+  // this editor keeps only the rotation's name and its copy/paste.
 }
 
-/** Rebuild just the field panel's shared header (title/sub/status) — shown
+/** Rebuild just the field panel's shared header (title + acreage) — shown
  * above the tab content regardless of which side-tab is active. Cheap enough
- * to run unconditionally on every refresh, no change-detection needed. */
+ * to run unconditionally on every refresh, no change-detection needed.
+ *
+ * The status pill went in the 2026-07-31 space-clearing pass (maintainer
+ * request): the Work Queue already reports what a field is doing, and the
+ * calendar shows where it is in its cycle. */
 function refreshFieldPanelHeader(field: Field): void {
-  const pending = tasksFor(save, field.id);
-  const activeTask = pending.find((t) => t.status === "active");
   $("fp-title").textContent = "🌾 " + fieldLabel(field);
   $("fp-sub").textContent = `${areaAcres(field.boundary).toFixed(1)} acres`;
-  $("fp-status").textContent = activeTask ? taskVerb(activeTask) : field.status;
 }
 
 /** Rebuild the panel contents from the selected field's current state —
@@ -4646,6 +4798,30 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
     });
     actions.appendChild(btn);
 
+    // WRAP into baleage (2026-07-31). Only offered while the same-month window
+    // is open, and the button says how long that is — miss it and these bales
+    // are hay for good, which is the one bit of timing pressure in the feature.
+    if (canWrapBales(field, clock.time()) && tasksFor(save, field.id, "wrap").length === 0) {
+      const wrapCost = taskCost(field, "wrap");
+      const wrapBtn = document.createElement("button");
+      wrapBtn.innerHTML = `🎁 Wrap into Baleage<br><span class="small">$${wrapCost.toLocaleString()}</span>`;
+      wrapBtn.title = save.implements.some((i) => i.kind === "baleWrapper")
+        ? "Seal these bales in plastic — baleage barely spoils in storage. Has to happen this month."
+        : "Needs a Bale Wrapper (Equipment → Hay & Silage Tools)";
+      wrapBtn.addEventListener("click", () => {
+        try {
+          enqueueTask(save, field, "wrap", clock.time());
+          updateHud();
+          refreshQueuePanel();
+          refreshFieldPanel(true);
+          toast("🎁 Wrap queued — these bales become baleage");
+        } catch (err) {
+          toast("❌ " + (err as Error).message, 3500);
+        }
+      });
+      actions.appendChild(wrapBtn);
+    }
+
     // Haul these bales to Bale Storage (a Hay-Spikes tractor collects them,
     // pulling in a Bale Trailer if one's idle). Hidden once a haul's already
     // covering the field — baling auto-queues one (maintainer request,
@@ -4655,7 +4831,7 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
       haulBtn.innerHTML = `🚜 Haul to Storage`;
       haulBtn.title = "Send a Hay-Spikes tractor to move these bales into Bale Storage";
       haulBtn.addEventListener("click", () => {
-        if (!queueHaulBales(save, field.id)) {
+        if (!queueHaulBales(save, field.id, clock.time())) {
           toast("Nothing to haul, or a haul's already running");
           return;
         }
@@ -4835,8 +5011,11 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
     }
 
     if (!auto && field.status === "ready") {
-      // Perennial forage is CUT with a mower (→ rake → bale); annuals are
-      // combined. Whichever applies, offer the one button.
+      // Perennial forage is CUT with a mower (→ rake → bale); a chop-only
+      // annual (Forage) only ever chops; everything else is combined. Exactly
+      // one button per crop — the route was decided at planting, not here
+      // (2026-08-12: silage used to be an in-season fork on Corn itself; see
+      // `isChopOnlyCrop`).
       if (isPerennial(field.crop)) {
         if (tasksFor(save, field.id, "mow").length === 0) {
           const cost = taskCost(field, "mow");
@@ -4846,6 +5025,18 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
           btn.addEventListener("click", () => queueFromPanel(field, "mow"));
           actions.appendChild(btn);
         }
+      } else if (isChopOnlyCrop(field.crop)) {
+        if (tasksFor(save, field.id, "chop").length === 0) {
+          const chopCost = taskCost(field, "chop");
+          const chopBtn = document.createElement("button");
+          chopBtn.className = "primary";
+          chopBtn.innerHTML = `🌱 Queue Chop (Silage) <span class="small">$${chopCost.toLocaleString()}</span>`;
+          chopBtn.title = save.agents.some((a) => a.kind === "forageHarvester")
+            ? "Chop the whole plant for silage — no grain, no residue"
+            : "Needs a Forage Harvester and a Forage Wagon (Equipment)";
+          chopBtn.addEventListener("click", () => queueFromPanel(field, "chop"));
+          actions.appendChild(chopBtn);
+        }
       } else if (tasksFor(save, field.id, "harvest").length === 0) {
         const btn = document.createElement("button");
         btn.className = "primary";
@@ -4853,6 +5044,18 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
         btn.addEventListener("click", () => queueFromPanel(field, "harvest"));
         actions.appendChild(btn);
       }
+    }
+
+    // Haylage (Phase 2): a cut perennial can be chopped off the windrow
+    // instead of raked and baled. Sits beside the Rake/Bale buttons below.
+    if (!auto && isPerennial(field.crop) && field.status === "harvested" && field.forageReady
+        && cropMakesSilage(field.crop) && tasksFor(save, field.id, "chop").length === 0) {
+      const chopCost = taskCost(field, "chop");
+      const chopBtn = document.createElement("button");
+      chopBtn.innerHTML = `🌱 Chop for Haylage <span class="small">$${chopCost.toLocaleString()}</span>`;
+      chopBtn.title = "Chop the windrow into a bunker instead of baling it — needs a rake pass first";
+      chopBtn.addEventListener("click", () => queueFromPanel(field, "chop"));
+      actions.appendChild(chopBtn);
     }
 
     // Optional post-harvest residue pass (annuals we aren't baling): available
@@ -4908,18 +5111,24 @@ function renderQueuePlow(field: Field): void {
 
   const plowableNow = canPlow(eff) && !isPerennial(field.crop) && !(eff === "harvested" && forageDue(save, field));
   const cost = taskCost(field, "plow");
-  host.insertAdjacentHTML(
-    "beforeend",
-    `<div class="small">${plowableNow ? "Plow to prepare for planting." : "Plow now to clear this field and start over."}</div>`,
-  );
+  // Compact, and the explanation moved into the tooltip: this button shares a
+  // row with Reset now (maintainer, 2026-07-31), and a sentence above it was
+  // costing the calendar vertical space.
   const btn = document.createElement("button");
   btn.className = "primary";
-  btn.innerHTML = `🚜 Queue Plow <span class="small">$${cost.toLocaleString()}</span>`;
+  btn.innerHTML = `🚜 Plow <span class="small">$${cost.toLocaleString()}</span>`;
+  btn.title = plowableNow
+    ? "Plow to prepare for planting"
+    : "Plow now to clear this field and start over — forfeits the standing crop and any residue";
   if (plowableNow) {
     btn.addEventListener("click", () => queueFromPanel(field, "plow"));
   } else {
-    btn.addEventListener("click", () => {
-      if (!confirm(`Plowing ${fieldLabel(field)} now clears its current crop and any residue. Continue?`)) return;
+    btn.addEventListener("click", async () => {
+      if (!(await confirmDialog({
+        title: `Plow ${fieldLabel(field)} now?`,
+        body: "This clears the field's current crop and any residue.",
+        okLabel: "Plow it under", danger: true,
+      }))) return;
       try {
         forcePlow(save, field, clock.time());
         updateHud();
@@ -4941,14 +5150,8 @@ function renderQueuePlow(field: Field): void {
 /** Which rotation STEP (plans[] index) the calendar is currently showing —
  * independent of which step is actually running right now, so the player can
  * view/edit any step's schedule. Driven by the crop chips (2026-07-23, which
- * replaced the old ‹ Yr N › stepper). Reset to the running step whenever a
- * different field is selected. */
-let scheduleViewFieldId: string | null = null;
+ * replaced the old ‹ Yr N › stepper). */
 let scheduleViewStepIdx = 0;
-/** The Schedule calendar's own drag state — kept separate from the Work
- * Queue's `draggingTaskId` (different domain/shape), mirroring its
- * dragstart/dragover/drop pattern. */
-let draggingScheduleCell: { type: ScheduleTaskType } | null = null;
 
 /** Month ROWS top-to-bottom, in the game's season order (Mar→Feb, starting at
  * START_MONTH) so the year reads Spring→Winter down the calendar, matching the
@@ -4962,262 +5165,352 @@ function seasonOfMonth(m: number): ScheduleSeason {
   if (m >= 8 && m <= 10) return "fall";
   return "winter";
 }
-const SCHEDULE_SEASON_ICON: Record<ScheduleSeason, string> = { spring: "🌱", summer: "☀️", fall: "🍂", winter: "❄️" };
+/** The Schedule timeline's own drag state — separate from the Work Queue's
+ * `draggingTaskId` (different domain/shape). */
+let draggingScheduleCell: { planIdx: number; kind: string } | null = null;
 
-/** One task COLUMN in the vertical calendar. A `type` marks a draggable/
- * overridable task (plow/plant/weed/fertilize/harvest); its absence marks a
- * fixed-timing column (mow/rake-bale/perennial fertilize) — rendered the same
- * as a scheduled cell but with no Available months to move to. */
-interface ScheduleColumn {
-  icon: string;
-  label: string;
-  type?: ScheduleTaskType;
-  legal: Set<number>;   // months the task MAY occupy (draggable cols only)
-  active: Set<number>;  // months it currently occupies (both kinds)
-  toggleProp?: "weed" | "fertilize" | "mulch" | "bale";
-  on: boolean;
-  plantMonth?: number;
-}
+const TL_TASK_ICON: Record<string, string> = {
+  plow: "🚜", plant: "🌱", fertilize: "🌿", weed: "💦", harvest: "🌾",
+  mulch: "🍂", mow: "🌾", bale: "📦", wrap: "🎁", silage: "🌱",
+};
+const TL_TASK_LABEL: Record<string, string> = {
+  plow: "Plow", plant: "Plant", fertilize: "Fertilize", weed: "Weed", harvest: "Harvest",
+  mulch: "Mulch", mow: "Mow (cut)", bale: "Rake / Bale", wrap: "Wrap (Baleage)", silage: "Chop (Silage)",
+};
 
 let lastScheduleCalKey = "";
+
+/** Task COLUMNS, left to right, in the order a crop actually experiences them.
+ * The header is the union across every step in the rotation, so a column means
+ * the same thing in every block. */
+const TL_COLUMN_ORDER: TimelineTaskKind[] = [
+  "plow", "plant", "fertilize", "weed", "mow", "harvest", "bale", "wrap", "silage", "mulch",
+];
+
+/** Field whose schedule was last auto-scrolled to today. Scrolling is a
+ * ONE-TIME courtesy when the panel opens — re-running it on every re-render
+ * yanked the view out from under the player every time they clicked a task
+ * (maintainer report, 2026-07-31). */
+let tlScrolledFieldId: string | null = null;
+
+/**
+ * The rotation TIMELINE (maintainer rework, 2026-07-31).
+ *
+ * LAYOUT: tasks run across the TOP axis, shared by every crop in the rotation.
+ * The vertical axis is the rotation itself — each step is a BLOCK of its own
+ * months, stacked in the order they happen. Today is a line across the grid.
+ *
+ * Why this shape: the field panel is narrow and tall. A month axis across the
+ * top meant permanent side-scrolling; a crop-per-column grid gave each crop one
+ * narrow column to hold every task, so two tasks in the same month collided.
+ * Tasks are a fixed, small column set that fits the width, and stacking crops
+ * downward is the one direction the panel has room to grow.
+ *
+ * THE CALENDAR IS THE WHOLE EDITOR (maintainer, 2026-07-31). Crop choice, adding
+ * and removing steps, turning optional operations on and off, and moving a task
+ * to another month all happen HERE — there is no separate crop list or toggle
+ * strip any more, because both were saying things the calendar already showed.
+ *
+ * Every task's AVAILABLE months are drawn all the time as dotted cells, not
+ * revealed on click. That's what let the click-to-select step disappear: you
+ * just click the month you want.
+ *
+ * All the arithmetic lives in `sim/rotationTimeline.ts` and is unit-tested;
+ * this only draws it. Moving a task still goes through `setScheduleOverride`
+ * with that month-of-year, so the override model is untouched.
+ */
 function refreshScheduleCalendar(field: Field, auto: boolean): void {
   const host = $("fp-schedule-grid");
   const msg = $("fp-schedule-msg");
+  const resetHost = $("fp-schedule-reset");
   if (!auto) {
-    // The schedule only drives the auto-manager — say so rather than leaving
-    // the tab blank when the field is under manual control.
     host.innerHTML = `<div class="fp-sched-hint">Turn on <b>Auto-manage</b> above to lay out this field's task schedule. The schedule tells the auto-manager which month to run each step — it has no effect while you drive the field manually from the View tab.</div>`;
     msg.textContent = "";
+    resetHost.innerHTML = "";
     lastScheduleCalKey = "";
     return;
   }
   if (!field.plans || field.plans.length === 0) field.plans = [defaultPlan()];
   const plans = field.plans;
   const perennialField = isPerennial(plans[0]!.crop);
-  const activeIdx = activeRotationIdx(field);
+  // One block per rotation step — see `ProjectOptions.maxBands`.
+  const timeline = projectRotation(field, clock.time());
 
-  // Which step the calendar shows is driven by the crop chips above
-  // (2026-07-23) — the old ‹ Yr N › stepper is gone. Landing on a new field
-  // starts on whatever step is actually running.
-  if (scheduleViewFieldId !== field.id) {
-    scheduleViewFieldId = field.id;
-    scheduleViewStepIdx = activeIdx;
-  }
-  if (scheduleViewStepIdx >= plans.length) scheduleViewStepIdx = plans.length - 1;
-  const viewIdx = perennialField ? 0 : scheduleViewStepIdx;
-  const plan = plans[viewIdx]!;
-
-  const key = [field.id, viewIdx, activeIdx, plans.length, JSON.stringify(plan)].join("|");
+  const key = [field.id, activeRotationIdx(field), JSON.stringify(plans), timeline.todayAbs].join("|");
   if (key === lastScheduleCalKey) return;
   lastScheduleCalKey = key;
 
-  // --- Build the task columns for this plan ---
-  const plantMonth = effectiveMonthFor("plant", plan.crop, plan.schedule?.plant);
-  const cols: ScheduleColumn[] = [];
-  const taskCol = (icon: string, label: string, type: ScheduleTaskType, pm: number | undefined, toggleProp?: "weed" | "fertilize" | "mulch"): void => {
-    const eff = effectiveMonthFor(type, plan.crop, plan.schedule?.[type], pm);
-    cols.push({
-      icon, label, type,
-      legal: new Set(legalMonthsFor(type, plan.crop, pm)),
-      active: new Set(eff !== undefined ? [eff] : []),
-      toggleProp, on: toggleProp ? !!plan[toggleProp] : true, plantMonth: pm,
-    });
-  };
-  const autoCol = (icon: string, label: string, months: number[], toggleProp?: "fertilize" | "bale"): void => {
-    cols.push({ icon, label, legal: new Set(), active: new Set(months), toggleProp, on: toggleProp ? !!plan[toggleProp] : true });
-  };
-  taskCol("🌱", "Plant", "plant", undefined);
-  if (perennialField) {
-    const cfg = gameConfig.crops[plan.crop];
-    autoCol("🌿", "Fertilize", cfg.fertilizeMonth !== undefined ? [cfg.fertilizeMonth] : [], "fertilize");
-    autoCol("🌾", "Mow", cfg.harvestMonths ?? []);
-    autoCol("📦", "Rake / Bale", cfg.harvestMonths ?? [], "bale");
-  } else {
-    // Fertilize before Weed (maintainer request, 2026-07-23) — it's also the
-    // order they open in: fertilize is legal from plant+1, weeding from plant+2.
-    taskCol("🌿", "Fertilize", "fertilize", plantMonth, "fertilize");
-    // No Weed column on a cover crop: an autumn-sown stand is never weeded, so
-    // the row would have no legal month to offer anyway.
-    if (!gameConfig.crops[plan.crop].coverCrop) {
-      taskCol("💦", "Weed", "weed", plantMonth, "weed");
-    }
-    taskCol("🌾", "Harvest", "harvest", plantMonth);
-    // Optional residue pass — an alternative to baling; off by default.
-    taskCol("🍂", "Mulch", "mulch", plantMonth, "mulch");
-    // Rake/Bale only exists for crops that actually leave balable residue
-    // (maintainer request, 2026-07-23) — offering the toggle on soybeans or
-    // potatoes let the player schedule a pass that could never run.
-    if (cropMakesBales(plan.crop)) {
-      const harvestEff = effectiveMonthFor("harvest", plan.crop, plan.schedule?.harvest, plantMonth);
-      autoCol("📦", "Rake / Bale", harvestEff !== undefined ? [harvestEff] : [], "bale");
-    }
-  }
-  // Plow LAST (maintainer request, 2026-07-23 — moved to the far-right column).
-  // It's the hand-off to the next crop, so it reads naturally at the end of the
-  // row even though its window is derived from the crop's own cycle like the
-  // other rows, and so needs the plant month.
-  //
-  // Hidden for a PERENNIAL stand (grass/alfalfa): it's plowed only once to
-  // establish and never re-plowed, so there's no recurring plow for the player
-  // to schedule. Auto-manage still does the one establishing plow on its own.
-  if (!perennialField) taskCol("🚜", "Plow", "plow", plantMonth);
-
-  // --- Legend + vertical grid (months down the rows, tasks across the cols) ---
   host.innerHTML = "";
-  host.insertAdjacentHTML(
-    "beforeend",
-    `<div class="fp-cal-legend">
-      <span><i class="lg-sched"></i>Scheduled — drag/click</span>
-      <span><i class="lg-legal"></i>Available</span>
-    </div>`,
-  );
-  const grid = document.createElement("div");
-  grid.className = "fp-vcal-grid";
-  grid.style.gridTemplateColumns = `58px repeat(${cols.length}, 1fr)`;
-  host.appendChild(grid);
-
-  // Header row: a blank corner + one task-icon header per column.
-  grid.insertAdjacentHTML("beforeend", `<div class="fp-vcal-corner"></div>`);
-  for (const c of cols) {
-    grid.insertAdjacentHTML("beforeend", `<div class="fp-vcal-head" title="${c.label}">${c.icon}</div>`);
+  if (timeline.bands.length === 0) {
+    host.insertAdjacentHTML("beforeend", `<div class="fp-sched-hint">No rotation steps yet — add a crop below.</div>`);
+    return;
   }
 
-  // A crop whose cycle runs past February (Winter Wheat: plant Sep, harvest
-  // Jun) puts its later tasks ABOVE its plant row in this fixed Mar→Feb grid.
-  // Mark those rows so the wrap reads as intended rather than as a bug
-  // (maintainer chose the fixed grid over a plant-month-relative one).
-  const rowOf = (m: number) => SCHEDULE_MONTH_ORDER.indexOf(m);
-  const plantRow = plantMonth !== undefined ? rowOf(plantMonth) : -1;
-  const wrapsTheYear =
-    plantRow >= 0 && cols.some((c) => [...c.active].some((m) => rowOf(m) < plantRow));
+  host.insertAdjacentHTML("beforeend",
+    `<div class="fp-cal-legend">
+      <span><i class="lg-sched"></i>Scheduled</span>
+      <span><i class="lg-legal"></i>Available — click to move</span>
+      <span><i class="lg-today"></i>Today</span>
+    </div>`);
 
-  // One row per month: a season-tinted month label + each task's cell.
-  let wrapMarked = false;
-  for (const m of SCHEDULE_MONTH_ORDER) {
-    const season = seasonOfMonth(m);
-    const firstOfSeason = m === 2 || m === 5 || m === 8 || m === 11;
-    // Rows above the plant row belong to the FOLLOWING calendar year.
-    const nextYear = wrapsTheYear && rowOf(m) < plantRow;
-    const monthCell = document.createElement("div");
-    monthCell.className = `fp-vmonth ${season}` + (nextYear ? " next-year" : "");
-    if (nextYear) monthCell.title = `${MONTH_SHORT[m]} of the following year — this crop overwinters`;
-    monthCell.innerHTML = `<span class="fp-vmonth-ico">${firstOfSeason ? SCHEDULE_SEASON_ICON[season] : ""}</span><span>${MONTH_SHORT[m]}</span>`;
-    grid.appendChild(monthCell);
-    for (const c of cols) grid.appendChild(scheduleCell(c, m, plan, msg));
-    // A divider after the last next-year row, i.e. where the following year
-    // hands back to the planting year.
-    if (nextYear && !wrapMarked && rowOf(m) === plantRow - 1) {
-      wrapMarked = true;
-      grid.insertAdjacentHTML(
-        "beforeend",
-        `<div class="fp-vcal-wrap" style="grid-column: 1 / -1">↑ next year · ↓ planting year</div>`,
-      );
+  // Columns: every task kind any step in this rotation uses, canonically
+  // ordered so a column means the same thing in every block.
+  const used = new Set<TimelineTaskKind>();
+  for (const band of timeline.bands) for (const t of band.tasks) used.add(t.kind);
+  const columns = TL_COLUMN_ORDER.filter((k) => used.has(k));
+  const colOf = (kind: TimelineTaskKind): number => 2 + columns.indexOf(kind);
+
+  const scroller = document.createElement("div");
+  scroller.className = "fp-tl-scroll";
+  const grid = document.createElement("div");
+  grid.className = "fp-tl-grid";
+  grid.style.gridTemplateColumns = `40px repeat(${columns.length}, minmax(28px, 1fr))`;
+  scroller.appendChild(grid);
+  host.appendChild(scroller);
+
+  let row = 1;
+
+  // --- Sticky task header ---
+  const corner = document.createElement("div");
+  corner.className = "fp-tl-corner";
+  corner.style.gridRow = String(row);
+  corner.style.gridColumn = "1";
+  grid.appendChild(corner);
+  for (const kind of columns) {
+    const head = document.createElement("div");
+    head.className = "fp-tl-thead";
+    head.style.gridRow = String(row);
+    head.style.gridColumn = String(colOf(kind));
+    head.textContent = TL_TASK_ICON[kind] ?? "•";
+    head.title = TL_TASK_LABEL[kind] ?? kind;
+    grid.appendChild(head);
+  }
+  row++;
+
+  /** Rows carrying a real month, for placing the today line afterwards. */
+  const monthRows: { abs: AbsMonth; row: number }[] = [];
+
+  for (const band of timeline.bands) {
+    const plan = plans[band.planIdx]!;
+    const cfg = gameConfig.crops[band.crop];
+
+    // --- Block header: the crop itself is edited here ---
+    const bhead = document.createElement("div");
+    bhead.className = "fp-tl-bhead" + (band.current ? " current" : "");
+    bhead.style.gridRow = String(row);
+    bhead.style.gridColumn = "1 / -1";
+    if (band.planted) {
+      bhead.insertAdjacentHTML("beforeend", `<span class="fp-tl-planted" title="Already in the ground">●</span>`);
+    }
+
+    // Crop picker — replaces the separate crop list that used to sit above the
+    // calendar saying the same thing twice.
+    const sel = document.createElement("select");
+    sel.className = "fp-tl-crop-sel";
+    for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
+      const opt = document.createElement("option");
+      opt.value = cropId;
+      opt.textContent = `${gameConfig.crops[cropId].emoji} ${gameConfig.crops[cropId].name}`;
+      if (cropId === plan.crop) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.title = `${cfg.name} — change this step's crop`;
+    sel.addEventListener("change", () => {
+      plan.crop = sel.value as CropId;
+      if (!cropMakesBales(plan.crop)) plan.bale = false; // baling is forage-only
+      // Switching TO a perennial collapses the rotation to this single step;
+      // perennials also default to baling (hay) and never weed.
+      if (isPerennial(plan.crop)) {
+        field.plans = [plan];
+        field.rotationIndex = 0;
+        plan.weed = false;
+        plan.bale = true;
+      }
+      // The new crop's legal months differ — an override carried over from the
+      // old crop would be re-validated away silently, so clear it and let the
+      // calendar show real defaults.
+      plan.schedule = undefined;
+      editPlans();
+    });
+    bhead.appendChild(sel);
+
+    const del = document.createElement("button");
+    del.className = "fp-tl-crop-del";
+    del.textContent = "✕";
+    del.disabled = plans.length <= 1;
+    del.title = plans.length <= 1 ? "A rotation needs at least one crop" : `Remove ${cfg.name} from the rotation`;
+    del.addEventListener("click", () => {
+      // Pointer arithmetic lives in the sim (removeRotationStep) — getting it
+      // wrong silently changes which crop the field is growing.
+      removeRotationStep(field, band.planIdx);
+      editPlans();
+    });
+    bhead.appendChild(del);
+    grid.appendChild(bhead);
+    row++;
+
+    // --- The months this step actually needs: first task (usually the plow,
+    //     which sits ahead of the crop) through the last. ---
+    const marks = band.tasks.flatMap((t) => t.at);
+    const from = Math.min(band.plantAbs, ...marks);
+    const to = Math.max(band.harvestAbs, ...marks);
+    const taskFor = new Map(band.tasks.map((t) => [t.kind, t]));
+
+    for (let abs = from; abs <= to; abs++) {
+      const { year, month } = splitAbs(abs);
+      const inGround = abs >= band.plantAbs && abs <= band.harvestAbs;
+
+      const gutter = document.createElement("div");
+      gutter.className = `fp-tl-month ${seasonOfMonth(month)}${month === 0 ? " year-start" : ""}`;
+      gutter.style.gridRow = String(row);
+      gutter.style.gridColumn = "1";
+      gutter.title = `${MONTH_SHORT[month]} Year ${year}`;
+      gutter.innerHTML = month === 0
+        ? `<span class="fp-tl-year">Y${year}</span><span class="fp-tl-mname">${MONTH_SHORT[month]}</span>`
+        : `<span class="fp-tl-mname">${MONTH_SHORT[month]}</span>`;
+      grid.appendChild(gutter);
+
+      for (const kind of columns) {
+        const task = taskFor.get(kind);
+        const here = !!task && task.at.includes(abs);
+        const cell = document.createElement("div");
+        cell.className = "fp-tl-cell" + (inGround ? " in-ground" : "");
+        cell.style.gridRow = String(row);
+        cell.style.gridColumn = String(colOf(kind));
+
+        // AVAILABLE months are drawn always, not on click (maintainer request)
+        // — so moving a task is one click on the month you want, and the whole
+        // select-then-place step disappears.
+        if (task && !here && task.on && task.scheduleType && task.legal.includes(abs)) {
+          const scheduleType = task.scheduleType;
+          const plantMonth = task.plantMonth;
+          cell.classList.add("legal");
+          cell.title = `Move ${TL_TASK_LABEL[kind]} to ${MONTH_SHORT[month]} Y${year}`;
+          const apply = (): void => {
+            try {
+              setScheduleOverride(plan, scheduleType, month, plantMonth);
+              msg.textContent = "";
+              editPlans();
+            } catch (err) {
+              msg.textContent = (err as Error).message;
+            }
+          };
+          cell.addEventListener("click", apply);
+          cell.addEventListener("dragover", (e) => {
+            if (draggingScheduleCell?.kind !== kind) return;
+            e.preventDefault();
+            cell.classList.add("drag-over");
+          });
+          cell.addEventListener("dragleave", () => cell.classList.remove("drag-over"));
+          cell.addEventListener("drop", (e) => {
+            e.preventDefault();
+            cell.classList.remove("drag-over");
+            if (draggingScheduleCell?.kind !== kind) return;
+            apply();
+          });
+        }
+        grid.appendChild(cell);
+      }
+
+      // Chips: this month's tasks, each in its own column.
+      for (const task of band.tasks) {
+        if (!task.at.includes(abs)) continue;
+        const chip = document.createElement("div");
+        const movable = task.legal.length > 0 && task.on && !!task.scheduleType;
+        chip.className = "fp-tl-chip" + (task.on ? "" : " off") + (movable ? " movable" : "");
+        chip.style.gridRow = String(row);
+        chip.style.gridColumn = String(colOf(task.kind));
+        chip.textContent = TL_TASK_ICON[task.kind] ?? "•";
+        const name = TL_TASK_LABEL[task.kind] ?? task.kind;
+        // OPTIONAL operations are switched on and off from their own chip
+        // (maintainer request) — the toggle strip that used to live on the
+        // crop header is gone.
+        if (task.toggle) {
+          const toggle = task.toggle;
+          chip.title = task.on
+            ? `${name} — ${MONTH_SHORT[month]} Y${year} · click to turn OFF${movable ? ", drag to move" : ""}`
+            : `${name} is off — click to turn it on`;
+          chip.addEventListener("click", () => {
+            plan[toggle] = !plan[toggle];
+            editPlans();
+          });
+        } else {
+          chip.title = `${name} — ${MONTH_SHORT[month]} Y${year}`
+            + (movable ? " · drag, or click an available month" : " · fixed timing");
+        }
+        if (movable) {
+          chip.draggable = true;
+          chip.addEventListener("dragstart", () => {
+            draggingScheduleCell = { planIdx: band.planIdx, kind: task.kind };
+            chip.classList.add("dragging");
+          });
+          chip.addEventListener("dragend", () => {
+            draggingScheduleCell = null;
+            chip.classList.remove("dragging");
+          });
+        }
+        grid.appendChild(chip);
+      }
+
+      monthRows.push({ abs, row });
+      row++;
     }
   }
 
-  // --- Defaults button: clear this step's month overrides (automatic timing). ---
+  // --- Today: a line across the whole grid. Lands ON its month where the
+  //     rotation covers it, and at the top edge of the next month drawn where
+  //     today falls in a fallow gap between blocks. ---
+  const exact = monthRows.find((r) => r.abs === timeline.todayAbs);
+  const marker = exact ?? monthRows.find((r) => r.abs > timeline.todayAbs);
+  if (marker) {
+    const line = document.createElement("div");
+    line.className = "fp-tl-today" + (exact ? "" : " gap");
+    line.style.gridRow = String(marker.row);
+    line.style.gridColumn = "1 / -1";
+    line.title = exact ? "Today" : "Today — the field is between crops";
+    grid.appendChild(line);
+    // ONE-TIME scroll to today when the panel opens on a field. Re-running it
+    // on every re-render yanked the view away whenever a task was clicked.
+    if (tlScrolledFieldId !== field.id) {
+      tlScrolledFieldId = field.id;
+      const target = line;
+      requestAnimationFrame(() => {
+        scroller.scrollTop = Math.max(0, target.offsetTop - scroller.clientHeight / 2);
+      });
+    }
+  }
+
+  // --- Add a crop (perennial stands don't rotate) ---
+  if (!perennialField) {
+    const add = document.createElement("button");
+    add.className = "fp-tl-add";
+    add.textContent = "＋ Add a crop";
+    add.disabled = plans.length >= 5;
+    add.title = plans.length >= 5 ? "A rotation holds at most 5 crops" : "Add another crop to the rotation";
+    add.addEventListener("click", () => {
+      if (plans.length >= 5) return;
+      // Default the new step to a DIFFERENT, non-perennial crop for an easy rotation.
+      const crops = (Object.keys(gameConfig.crops) as CropId[]).filter((c) => !gameConfig.crops[c].perennial);
+      const nextCrop = crops.find((c) => c !== plans[plans.length - 1]!.crop) ?? crops[0]!;
+      plans.push({ crop: nextCrop, bale: cropMakesBales(nextCrop) });
+      editPlans();
+    });
+    host.appendChild(add);
+  }
+
+  // --- Reset overrides across every step (shares a row with Queue Plow) ---
+  resetHost.innerHTML = "";
   const def = document.createElement("button");
   def.className = "fp-sched-defaults";
-  def.textContent = "↺ Reset to automatic timing";
-  def.title = `Clear your month overrides for ${gameConfig.crops[plan.crop].name} — each task goes back to running at its earliest natural time`;
-  def.disabled = !plan.schedule || Object.keys(plan.schedule).length === 0;
+  def.textContent = "↺ Auto timing";
+  def.title = "Clear every month override on this rotation — each task goes back to its earliest natural time";
+  def.disabled = !plans.some((p) => p.schedule && Object.keys(p.schedule).length > 0);
   def.addEventListener("click", () => {
-    plan.schedule = {};
+    for (const p of plans) p.schedule = {};
     msg.textContent = "";
     editPlans();
   });
-  host.appendChild(def);
-}
-
-/** One calendar cell for column `c` at month `m`. Consolidates the four cell
- * states (scheduled/legal/auto/off/plain) and their interactions. */
-function scheduleCell(c: ScheduleColumn, m: number, plan: FieldPlan, msg: HTMLElement): HTMLElement {
-  const cell = document.createElement("div");
-  const isActive = c.active.has(m);
-  const isLegal = c.legal.has(m);
-  const toggleOnOff = () => {
-    if (!c.toggleProp) return;
-    plan[c.toggleProp] = !plan[c.toggleProp];
-    editPlans();
-  };
-
-  // Optional task turned OFF: a dim hollow marker at its would-be month;
-  // click to re-enable. No available/draggable cells while off.
-  if (isActive && c.toggleProp && !c.on) {
-    cell.className = "fp-cal-cell off";
-    cell.title = `${c.label} is off — click to turn it on`;
-    cell.addEventListener("click", toggleOnOff);
-    return cell;
-  }
-
-  // Scheduled + draggable (an overridable task at its current month).
-  if (isActive && c.type) {
-    const type = c.type;
-    cell.className = "fp-cal-cell scheduled";
-    cell.draggable = true;
-    cell.title = c.toggleProp ? "Drag to another month, or click to turn off" : "Drag to another month";
-    cell.addEventListener("dragstart", () => {
-      draggingScheduleCell = { type };
-      cell.classList.add("dragging");
-    });
-    cell.addEventListener("dragend", () => {
-      draggingScheduleCell = null;
-      cell.classList.remove("dragging");
-    });
-    if (c.toggleProp) cell.addEventListener("click", toggleOnOff);
-    return cell;
-  }
-
-  // Fixed-timing tasks (mow/rake-bale/perennial fertilize) — mow follows the
-  // perennial's cutting windows, baling follows harvest, so there's no other
-  // month to drag them to. They render the SAME as any scheduled task now
-  // (2026-07-23 — the separate "Automatic" state was dropped); they simply
-  // have no Available cells to move to, and the optional ones stay toggleable.
-  if (isActive) {
-    cell.className = "fp-cal-cell scheduled";
-    if (c.toggleProp) {
-      cell.title = "Runs after harvest/mow — click to turn off";
-      cell.addEventListener("click", toggleOnOff);
-    } else {
-      cell.style.cursor = "default";
-      cell.title = "Runs after harvest/mow";
-    }
-    return cell;
-  }
-
-  // Available month for a draggable task (drop target + click-to-set).
-  if (isLegal && c.type && c.on) {
-    const type = c.type;
-    const pm = c.plantMonth;
-    const applyMove = () => {
-      try {
-        setScheduleOverride(plan, type, m, pm);
-        msg.textContent = "";
-        editPlans();
-      } catch (err) {
-        msg.textContent = (err as Error).message;
-      }
-    };
-    cell.className = "fp-cal-cell legal";
-    cell.title = "Click, or drop the scheduled month here, to move this task";
-    cell.addEventListener("click", applyMove);
-    cell.addEventListener("dragover", (e) => {
-      if (!draggingScheduleCell || draggingScheduleCell.type !== type) return;
-      e.preventDefault();
-      cell.classList.add("drag-over");
-    });
-    cell.addEventListener("dragleave", () => cell.classList.remove("drag-over"));
-    cell.addEventListener("drop", (e) => {
-      e.preventDefault();
-      cell.classList.remove("drag-over");
-      if (!draggingScheduleCell || draggingScheduleCell.type !== type) return;
-      applyMove();
-    });
-    return cell;
-  }
-
-  cell.className = "fp-cal-cell"; // plain background track
-  return cell;
+  resetHost.appendChild(def);
 }
 
 /** Field Finances tab: per-field multi-year profit & loss, mirroring the

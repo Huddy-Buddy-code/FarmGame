@@ -71,10 +71,19 @@ describe("composite variants resolve, and stay OUT of the size registry", () => 
     expect(variant).not.toBe(plain);
   });
 
-  it("falls back to undefined for a size with no variant art", () => {
-    // Medium/Small have no grain-header render yet — they must return nothing
-    // so the caller drops back to the plain sprite rather than borrowing Large's.
-    expect(machineVariantImageUrl("harvester", "medium", "grainheader")).toBeUndefined();
+  it("the Medium and Small combines have both header variants (2026-08-12)", () => {
+    for (const size of ["medium", "small"] as const) {
+      const plain = machineImageUrl("harvester", size);
+      const grain = machineVariantImageUrl("harvester", size, "grainheader");
+      const corn = machineVariantImageUrl("harvester", size, "cornheader");
+      expect(plain).toBeTruthy();
+      expect(grain).toBeTruthy();
+      expect(corn).toBeTruthy();
+      // Two distinct files (own URL each), but the corn head is a genuinely
+      // different picture — unlike Large, where GrainHeader is the only
+      // header variant that exists.
+      expect(corn).not.toBe(grain);
+    }
   });
 
   it("hay-spike variants still resolve for both tractor sizes", () => {

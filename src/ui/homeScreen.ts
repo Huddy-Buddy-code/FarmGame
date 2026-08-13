@@ -20,6 +20,7 @@ import {
   listFarms, loadGameFor, createFarm, switchFarm, deleteFarm, ensureActiveFarm,
 } from "../state/persistence";
 import { farmSummaryLine } from "../state/farmSummary";
+import { confirmDialog } from "./modal";
 import { loadCountyIndex, type CountyIndexEntry } from "../county/countyIndex";
 import { loadCounty, isBundled } from "../county/registry";
 import { NAIP_IMAGE_SERVER, CountyBuildError, type BuildStage } from "../county/builder";
@@ -105,8 +106,12 @@ export function runHomeScreen(opts: HomeScreenOptions): Promise<void> {
         delBtn.className = "farm-del";
         delBtn.textContent = "🗑";
         delBtn.title = `Delete ${meta.name}`;
-        delBtn.addEventListener("click", () => {
-          if (!confirm(`Delete "${meta.name}"? This can't be undone.`)) return;
+        delBtn.addEventListener("click", async () => {
+          if (!(await confirmDialog({
+            title: `Delete "${meta.name}"?`,
+            body: "This farm and its save are gone for good — this can't be undone.",
+            okLabel: "Delete", danger: true,
+          }))) return;
           deleteFarm(meta.id);
           if (isActive) {
             // The module-level save in main.ts was loaded for THIS farm —

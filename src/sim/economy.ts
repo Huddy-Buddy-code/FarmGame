@@ -8,8 +8,9 @@
  * internals; the call shape (sell some tons, get paid) stays.
  */
 
-import { gameConfig } from "../config/gameConfig";
-import type { CropId, BaleProduct } from "../config/gameConfig";
+import { gameConfig, SILAGE_PRODUCTS } from "../config/gameConfig";
+import type { CropId, BaleProduct, SilageProduct } from "../config/gameConfig";
+import type { BaleTint } from "../ui/icons";
 import type { SaveState, Field, Agent, Implement, Building } from "../state/saveState";
 import { areaAcres } from "../geo/geometry";
 import { agentPrice, implementPrice, appendCompletedTask, queueSellRun } from "./tasks";
@@ -72,7 +73,7 @@ export interface BaleStock {
   bales: number;
   pricePerBale: number;
   value: number;
-  color: "hay" | "alfalfa";
+  color: BaleTint;
 }
 
 /** Every bale sitting in every field, summed per product (2026-07-14) — the
@@ -127,6 +128,44 @@ export function sellBalesOfProduct(save: SaveState, product: BaleProduct, now: S
 // --- Auto-sell (maintainer request, 2026-07-21) ----------------------------
 
 let autoSellSeq = 0;
+
+/**
+ * Sell bunker-stored silage (2026-07-31, Phase 2). Flat per-ton price — silage
+ * is deliberately outside the seasonal market curve for now: it's a feed
+ * product that mostly moves on contract, and the maintainer's Phase 2 brief
+ * was to keep the bunker simple.
+ */
+export function sellSilage(save: SaveState, product: SilageProduct, tons: number, now?: SimTime): SaleResult {
+  const have = save.silage?.[product] ?? 0;
+  const sold = Math.min(Math.max(0, tons), have);
+  if (sold <= 1e-9) return { tons: 0, revenue: 0 };
+  const cfg = gameConfig.silageProducts[product];
+  const revenue = Math.round(sold * cfg.pricePerTon);
+  save.silage![product] = have - sold;
+  save.money += revenue;
+  recordCash(save, "cropRevenue", cfg.name, revenue);
+  appendCompletedTask(save, {
+    id: `sale-silage-${++autoSellSeq}`,
+    type: "sellGrain",
+    label: cfg.name,
+    tons: sold,
+    revenue,
+    completedAt: now ?? 0,
+  });
+  return { tons: sold, revenue };
+}
+
+/** Every silage product with tons in the bunkers, for the Inventory tab. */
+export function silageInventory(save: SaveState): { product: SilageProduct; name: string; emoji: string; tons: number; pricePerTon: number; value: number }[] {
+  const out: { product: SilageProduct; name: string; emoji: string; tons: number; pricePerTon: number; value: number }[] = [];
+  for (const p of SILAGE_PRODUCTS) {
+    const tons = save.silage?.[p] ?? 0;
+    if (tons <= 1e-9) continue;
+    const cfg = gameConfig.silageProducts[p];
+    out.push({ product: p, name: cfg.name, emoji: cfg.emoji, tons, pricePerTon: cfg.pricePerTon, value: Math.round(tons * cfg.pricePerTon) });
+  }
+  return out;
+}
 
 /** Sell EVERYTHING of `product` currently in inventory at the current month's
  * price and log it to the Completed feed — grain from the bin, bale products

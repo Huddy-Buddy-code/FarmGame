@@ -232,7 +232,11 @@ export const TASK_HEADLANDS: Partial<Record<TaskType, HeadlandConfig>> = {
   mulch: { laps: 3, order: "first" },
   rake: { laps: 3, order: "first" },
   bale: { laps: 3, order: "first" },
+  // The wrapper follows the bale line the baler already laid down, so it drives
+  // the same shape of route.
+  wrap: { laps: 3, order: "first" },
   harvest: { laps: 3, order: "first" },
+  chop: { laps: 3, order: "first" }, // the silage counterpart of a harvest pass
 };
 
 /** Trace up to `laps` ring CENTERLINES, one implement-width apart, the first

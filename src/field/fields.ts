@@ -11,7 +11,7 @@
  * deducted from the save-state so the money system has a reason to exist.
  */
 
-import type { Map as MlMap, GeoJSONSource } from "maplibre-gl";
+import type { Map as MlMap, GeoJSONSource, LayerSpecification } from "maplibre-gl";
 import type { Feature, FeatureCollection } from "geojson";
 
 import { toLngLat } from "../geo/coords";
@@ -127,10 +127,16 @@ export function renderField(map: MlMap, overlay: OverlayEngine, field: Field, no
   // reallocates a multi-megabyte canvas every time. Only rebuild when the
   // covered ground actually changed (new field / redrawn boundary).
   const existing = overlay.get(field.id);
+  // Keep every field's texture BELOW the shared outline/label layers, however
+  // late this field is drawn (see the comment on `Surface`'s constructor —
+  // this is the "only Field 1 has a label" fix). "field-outlines" is added
+  // once, on the very first field ever rendered; guard its existence since
+  // THAT first call has nothing to sit below yet.
+  const beforeId = map.getLayer("field-outlines") ? "field-outlines" : undefined;
   const surface =
     existing && existing.bounds.every((v, i) => v === bounds[i])
       ? existing
-      : overlay.createSurface(field.id, bounds);
+      : overlay.createSurface(field.id, bounds, undefined, beforeId);
   if (surface === existing) {
     surface.ctx.clearRect(0, 0, surface.canvas.width, surface.canvas.height);
   }
@@ -168,7 +174,14 @@ function drawOutline(map: MlMap, field: Field, color: string): void {
   outlineFeatures.set(field.id, {
     type: "Feature",
     id: field.id,
-    properties: { id: field.id, color },
+    // `name`/`acres` feed the label layer below off this same source, so a
+    // field's outline and its label can never disagree about where it is.
+    properties: {
+      id: field.id,
+      color,
+      name: fieldDisplayName(field),
+      acres: `${areaAcres(field.boundary).toFixed(0)} ac`,
+    },
     geometry: {
       type: "Polygon",
       coordinates: [[...smoothed, smoothed[0]!].map((m) => toLngLat(m))],
@@ -202,6 +215,64 @@ function drawOutline(map: MlMap, field: Field, color: string): void {
       "line-blur": ["interpolate", ["linear"], ["zoom"], 12, 1, 16, 2, 19, 5],
     },
   });
+
+  map.addLayer(fieldLabelLayer(sourceId));
+}
+
+/**
+ * The field-name label layer, as a standalone spec so `tests/mapLayers.test.ts`
+ * can validate it — a symbol layer with a bad expression renders NOTHING and
+ * logs nothing, which is unfalsifiable by eye in a project with no Browser
+ * Preview.
+ *
+ * Needs the style's `glyphs` URL (main.ts); only "Noto Sans Bold" is vendored
+ * (public/fonts), and naming any other stack silently renders nothing.
+ *
+ * ⚠️ BOTH overlap flags are ON, and that is the whole point (bug, 2026-07-30:
+ * "I only see 1 field label"). MapLibre's `text-allow-overlap` DEFAULTS TO
+ * FALSE, so a label overlapping an already-placed one is culled — and players
+ * buy adjacent land, so neighbouring fields collide immediately and exactly
+ * one survived. `text-optional` does NOT control this (it only decides whether
+ * text may be dropped from an icon+text PAIR, so with no icon it was a no-op).
+ * These labels are few, and every one marks land the player owns and named:
+ * show them all, unmanaged, and let minzoom do the decluttering instead.
+ */
+export function fieldLabelLayer(sourceId: string): LayerSpecification {
+  return {
+    id: "field-labels",
+    type: "symbol",
+    source: sourceId,
+    // 11 so labels are already up at Story's default view (zoom 12) — 12.5
+    // meant the board opened with none at all.
+    minzoom: 11,
+    layout: {
+      // Name alone when far out; acreage joins it once there's room to read it.
+      "text-field": [
+        "step",
+        ["zoom"],
+        ["get", "name"],
+        13.5,
+        ["format", ["get", "name"], {}, "\n", {}, ["get", "acres"], { "font-scale": 0.78 }],
+      ],
+      "text-font": ["Noto Sans Bold"],
+      "text-size": ["interpolate", ["linear"], ["zoom"], 11, 10, 14, 13, 19, 18],
+      "text-line-height": 1.1,
+      "text-allow-overlap": true,
+      "text-ignore-placement": true,
+    },
+    paint: {
+      "text-color": "#faf3e3",
+      "text-halo-color": "rgba(34, 26, 16, 0.9)",
+      "text-halo-width": 1.6,
+      "text-halo-blur": 0.4,
+    },
+  };
+}
+
+/** A field's on-map name — mirrors main.ts's `fieldLabel` (name, else a
+ * prettified id) so the map label and every panel agree on what it's called. */
+function fieldDisplayName(field: Field): string {
+  return field.name || field.id.replace("-", " ").replace(/^\w/, (c) => c.toUpperCase());
 }
 
 /** Deterministic 32-bit seed from a string id (FNV-1a), for stable textures.

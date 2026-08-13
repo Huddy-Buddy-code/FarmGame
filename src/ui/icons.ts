@@ -221,10 +221,17 @@ export function grainHeaderIconSvg(size = 22): string {
 /** Bale color tints (2026-07-13): the same round-bale shape, different wrap
  * color per product — light brown for hay/corn stover, darker green for
  * alfalfa. `color` keys match `gameConfig.baleProducts[*].color`. */
-const BALE_TINTS: Record<"hay" | "alfalfa", { fill: string; stroke: string; band: string; core: string }> = {
+/** The palettes a bale can be drawn in — `BaleProduct.color` picks one. */
+export type BaleTint = "hay" | "alfalfa" | "wrapped";
+
+const BALE_TINTS: Record<BaleTint, { fill: string; stroke: string; band: string; core: string }> = {
   hay: { fill: "#d9c187", stroke: "#9c8348", band: "#b39a5c", core: "#c7ad72" },
   // Alfalfa bales read as a deep, dark forage green (maintainer request, 2026-07-14).
   alfalfa: { fill: "#4a6234", stroke: "#2f4121", band: "#3b4f2a", core: "#425a2f" },
+  // BALEAGE (2026-07-31): the white stretch film every wrapped bale wears — the
+  // "marshmallows in the field" look, and unmistakable next to hay or alfalfa
+  // at a glance, which is the whole job of a bale tint.
+  wrapped: { fill: "#eef0ee", stroke: "#a9b0ab", band: "#d7dbd7", core: "#e2e6e2" },
 };
 
 /** A round bale seen end-on: wound cylinder, tinted by product (`color`). */
@@ -238,7 +245,7 @@ const BALE_TINTS: Record<"hay" | "alfalfa", { fill: string; stroke: string; band
  * Drawn end-on-ish: a rectangular block with two twine bands across it and a
  * hint of the cut-stem end face, so it reads as a bale rather than a crate.
  */
-export function squareBaleIconSvg(size = 14, color: "hay" | "alfalfa" = "hay"): string {
+export function squareBaleIconSvg(size = 14, color: BaleTint = "hay"): string {
   const t = BALE_TINTS[color];
   return svg(size, `
     <rect x="3" y="9" width="26" height="15" rx="1.6" fill="${t.fill}" stroke="${t.stroke}" stroke-width="1.4"/>
@@ -249,7 +256,7 @@ export function squareBaleIconSvg(size = 14, color: "hay" | "alfalfa" = "hay"): 
   `);
 }
 
-export function baleIconSvg(size = 14, color: "hay" | "alfalfa" = "hay"): string {
+export function baleIconSvg(size = 14, color: BaleTint = "hay"): string {
   const t = BALE_TINTS[color];
   return svg(size, `
     <ellipse cx="16" cy="17" rx="12" ry="10.5" fill="${t.fill}" stroke="${t.stroke}" stroke-width="1.4"/>
@@ -329,6 +336,52 @@ export function baleTrailerIconSvg(size = 22): string {
   `);
 }
 
+/**
+ * Self-propelled forage harvester (2026-07-31): squat body on four wheels, a
+ * glass cab up front, and the giveaway — the SPOUT, arcing up and back over
+ * its shoulder to throw chopped material into a wagon running alongside. Faces
+ * WEST like every other machine.
+ */
+export function forageHarvesterIconSvg(size = 22): string {
+  return svg(size, `
+    ${wheel(9, 23.5, 5.2)}
+    ${wheel(23, 24.5, 4.2)}
+    <path d="M2.5 22 V14.6 q0-1.4 1.5-1.4 H21 q2 0 2.6 1.8 l1.4 4.4 V22 Z" fill="${BODY}" stroke="${BODY_D}" stroke-width="0.8"/>
+    <rect x="3" y="16.4" width="21" height="1.2" fill="${BODY_D}" opacity="0.5"/>
+    <path d="M3.4 9.6 h5.4 q1.2 0 1.2 1.2 v2.4 H3.4 Z" fill="${BODY}" stroke="${BODY_D}" stroke-width="0.7"/>
+    <path d="M4.1 10.3 h4 v2.2 h-4 Z" fill="${GLASS}" stroke="${BODY_D}" stroke-width="0.4"/>
+    <path d="M1 19.4 h2.2 v3.4 H1 Z" fill="${STEEL_D}"/>
+    <g stroke="${STEEL}" stroke-width="2.2" fill="none" stroke-linecap="round">
+      <path d="M12.6 12.6 q2.6 -6.2 9.4 -5.4"/>
+    </g>
+    <g stroke="${STEEL_D}" stroke-width="0.7" fill="none">
+      <path d="M12.6 12.6 q2.6 -6.2 9.4 -5.4"/>
+    </g>
+    <path d="M21.4 5.4 l4.6 1.4 -1.4 3.2 -3.6 -2.2 Z" fill="${STEEL}" stroke="${STEEL_D}" stroke-width="0.6" stroke-linejoin="round"/>
+    <rect x="11.4" y="11.8" width="2.6" height="2" rx="0.5" fill="${STEEL_D}"/>
+  `);
+}
+
+/** Forage wagon (2026-07-31): a tall, straight-sided silage box on tandem
+ * wheels — deliberately bulkier than the grain trailer's tapered hopper,
+ * because that bulk is exactly what the player is buying. */
+export function forageWagonIconSvg(size = 22): string {
+  return svg(size, `
+    <rect x="2.5" y="9.6" width="25" height="11.4" rx="1" fill="#7a8a52" stroke="#5b6a3c" stroke-width="0.9"/>
+    <rect x="2.5" y="9.6" width="25" height="2" fill="#5b6a3c" opacity="0.5"/>
+    <g stroke="#5b6a3c" stroke-width="0.6">
+      <line x1="9" y1="11.8" x2="9" y2="21"/>
+      <line x1="15" y1="11.8" x2="15" y2="21"/>
+      <line x1="21" y1="11.8" x2="21" y2="21"/>
+    </g>
+    <path d="M3.4 9.6 q6 -2.6 12 -2.2 q6 0.4 11.2 2.2 Z" fill="#d0c48a" stroke="#a89a63" stroke-width="0.6"/>
+    <rect x="0.8" y="18.4" width="2.6" height="1.5" rx="0.5" fill="${STEEL_D}"/>
+    <rect x="2.5" y="20.6" width="25" height="1.4" rx="0.5" fill="${STEEL_D}"/>
+    ${wheel(9.5, 24, 3.1)}
+    ${wheel(19.5, 24, 3.1)}
+  `);
+}
+
 /** Machines (power units), by agent kind. */
 export const MACHINE_ICON: Record<string, (size?: number) => string> = {
   tractor: tractorIconSvg,
@@ -336,6 +389,7 @@ export const MACHINE_ICON: Record<string, (size?: number) => string> = {
   // The Self-Propelled Windrower (2026-07-24) has no sprite art yet, and it IS
   // a mower, so it borrows the mower glyph until one is drawn.
   windrower: mowerIconSvg,
+  forageHarvester: forageHarvesterIconSvg,
 };
 
 /** Implements, by implement kind. */
@@ -360,4 +414,10 @@ export const IMPLEMENT_ICON_SVG: Record<string, (size?: number) => string> = {
   // drawing (it was the combine's assumed implement in the Work Queue).
   cornHeader: planterIconSvg,
   grainHeader: grainHeaderIconSvg,
+  // Silage Phases 2-3 (2026-07-31). The wagon has real art; the two chopper
+  // heads borrow honest stand-ins, same as the combine headers do — a row-crop
+  // head IS a bank of row units, and a pickup head IS a windrow gatherer.
+  forageWagon: forageWagonIconSvg,
+  rowCropHead: planterIconSvg,
+  pickupHead: rakeIconSvg,
 };

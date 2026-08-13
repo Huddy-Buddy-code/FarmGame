@@ -1,0 +1,13 @@
+Noto Sans
+Copyright 2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)
+
+Licensed under the SIL Open Font License, Version 1.1.
+Full license text: https://openfontlicense.org/
+
+The .pbf files in this directory are pre-rendered SDF glyph ranges of Noto Sans,
+vendored so the game's map labels work with no live third-party font request at
+play time. They were downloaded by `tools/fetch-glyphs.mjs` from
+https://demotiles.maplibre.org/font (MapLibre's public demo glyph server).
+
+The SIL OFL permits redistribution of the font (and derived/rendered forms such
+as these glyph ranges) provided this notice is retained.

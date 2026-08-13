@@ -2246,6 +2246,594 @@ same reason. **701/701 passing, typecheck clean** — no new tests: `stampReveal
 is canvas-2D code inside main.ts and the suite runs in plain Node.
 ⚠️ Needs eyes: work one field at 1× and another at max speed, compare.
 
+## 2026-07-30 — polish pass: map labels, GPU bales, in-game modals
+
+Three items the maintainer picked off a codebase polish audit.
+
+- **Glyphs + field labels.** The style declared no `glyphs` URL, so NO layer
+  could render text at all — that's why the county label had to be an HTML
+  marker. `tools/fetch-glyphs.mjs` vendors SDF ranges into `public/fonts/`
+  (Noto Sans Bold, range 0-255, 79 KB, OFL — LICENSE.txt alongside);
+  committed, so there's still no live third-party call in the play path.
+  `field-labels` is a symbol layer riding the EXISTING `field-outlines`
+  source (name + acres now on the feature), so outline and label can't
+  disagree about where a field is. minzoom 12.5, `text-optional` so crowded
+  neighbours drop rather than overlap. Rename + buy-time naming now call
+  `renderField` — the label reads `field.name`, which those paths used to set
+  without repainting. `tests/glyphs.test.ts` is the repo-integrity gate (the
+  committed binary IS the artifact; a bad regeneration makes labels vanish
+  silently).
+- **Bales → GPU symbol layer** (`src/field/baleLayer.ts`). Was one
+  `maplibregl.Marker` per bale — a DOM div of inline SVG, capped at 600 PER
+  FIELD, every one of them reprojected and re-`transform`ed on every pan/zoom
+  frame. Now one GeoJSON source + one symbol layer, one `addImage()` icon per
+  bale product (existing SVG rasterized at 2x), `icon-image: ["get",
+  "product"]`. `icon-allow-overlap` + `icon-ignore-placement` both on: bales
+  genuinely overlap, we want all of them, and skipping collision is most of
+  the win. The per-field subsample ceiling is GONE — every bale really draws
+  now; `MAX_BALE_FEATURES` (25k) is only a pathological-save guard.
+  `baleIconFor` moved here as the single product→shape/tint source.
+- **In-game modals** (`src/ui/modal.ts`). All 14 `confirm`/`prompt` calls
+  replaced with promise-based dialogs in the game's own panel styling —
+  including the blocking problem: `confirm()` froze the sim loop for as long
+  as the box was open. Escape cancels, Enter accepts (except on Cancel),
+  backdrop-click cancels, focus trapped and restored, `prefers-reduced-motion`
+  honored. `promptDialog` keeps `window.prompt`'s null-vs-empty-string
+  contract so callers' null checks still hold. Opening a second dialog
+  resolves the first as cancelled. NEW devDep `happy-dom` — the modal now
+  gatekeeps buying land, Browser Preview is off, so tests are the only eyes
+  on it (`tests/modal.test.ts`, 13 tests; the Enter-on-Cancel guard was
+  revert-checked failing).
+
+**BUGFIX same day — "I only see 1 field label."** `text-allow-overlap`
+DEFAULTS TO FALSE, so a label overlapping an already-placed one is culled, and
+players buy adjacent land — neighbouring fields collided and exactly one
+survived. The `text-optional: true` I set does NOT control that (it only
+decides whether text may drop from an icon+text PAIR, so with no icon it was a
+no-op). minzoom 12.5 vs Story's defaultZoom 12 compounded it: the board opened
+with zero labels. Fixed: both overlap flags on, minzoom 11, acreage joins the
+name only past z13.5 to cut clutter. Layer specs moved into exported functions
+(`fieldLabelLayer`, `baleSymbolLayer`) and `tests/mapLayers.test.ts` now runs
+the real `@maplibre/maplibre-gl-style-spec` validator over them plus asserts
+the properties that decide visibility — the spec was VALID here, so validation
+alone wouldn't have caught it; the property assertions are the real net. New
+devDep `@maplibre/maplibre-gl-style-spec`. See the new CLAUDE.md section "Map
+layers fail silently — validate them".
+
+**733/733 passing (31 new), typecheck + build clean** (JS +4 KB net).
+Maintainer visual checklist: (1) field names + acreage appear over fields
+from zoom ~12.5 in, legible on light and dark ground, not crowded; (2) rename
+a field — the map label follows; (3) bale a field and pan hard — should be
+noticeably smoother than before, and NO bale missing from a big field;
+(4) round vs square bale icons still distinguishable; (5) sell/buy/rename
+dialogs look in-world, and Escape/Enter/backdrop-click all behave; (6) the
+game keeps ticking behind an open dialog (this is intended — it no longer
+blocks). Still open from the audit, NOT done: `#version-tag` in index.html
+hardcodes "BETA 1.0" on a v1.1 build; field-canvas memory has no viewport
+eviction; the NAIP tile cache has no LRU/size cap; no global keyboard
+shortcuts outside the modal; no media queries.
+
+## 2026-07-30 — placeable structure assets
+
+Maintainer: "instead of just tags, lets use real placeable assets." Buildings
+rendered as an emoji in a cream box — a MAP PIN, not a building.
+
+- **Art.** `src/ui/structureIcons.ts` — hand-drawn SVG elevations in the
+  `icons.ts` house style for all 7 kinds (corrugated grain bin with conical
+  roof + ladder, gambrel hay barn, stacked bale yard on gravel, open-bay
+  machine shed, implement shed with a tool rack, signposted farm yard, truck
+  scale + scale house). Silos draw taller/wider per tier. All on a shared
+  64-unit viewBox, bottom-aligned (`xMidYMax`), no baked background.
+- **PNG override.** `src/ui/structureImages.ts` mirrors `machineImages.ts`:
+  drop `<Kind>[_<Size>].png` into `src/assets/Structures/` and it wins over
+  the SVG, no code change. No `sideleft` tag — buildings have no heading and
+  are never mirrored. Naming table + art direction in that folder's README;
+  workflow added to CLAUDE.md.
+- **Ground-anchored sizing.** Markers anchor at the BASE, and each sprite is
+  drawn at its real footprint width (`structureWidthM` — 5.5-11 m per silo
+  tier, 24 m machine shed, 18 m hay barn) CLAMPED to 26-190 px. Real farm
+  buildings are tiny at play zooms (a 10 m bin ≈ 6 px at z16), so pure
+  ground-anchoring is unusable — the clamp keeps them findable zoomed out and
+  lets them settle onto their true footprint zoomed in. Implementation is one
+  CSS custom property (`--px-per-m` on <html>, refreshed per move frame) plus
+  a per-sprite `--w-m`: ONE style write per frame regardless of building
+  count. Footprints live with the renderer, not gameConfig — visual/world
+  data, same call as `OVERLAY_METERS_PER_PIXEL`.
+
+**760/760 passing (27 new: mapLayers 11, structures 16), typecheck + build
+clean.** Maintainer visual checklist: (1) field labels now on EVERY field, at
+the default zoom; (2) buildings look like buildings, standing on the ground,
+and grow toward real size as you zoom in without vanishing when you zoom out;
+(3) silo tiers visibly differ; (4) hover glow + click-to-popup still work.
+
+## 2026-07-31 — SILAGE PHASE 1: baleage (wrapped bales)
+
+First slice of the silage design (maintainer picked Phase 1 of a 3-phase
+plan). Deliberately reuses the ENTIRE mow→rake→bale→haul pipeline rather than
+adding a parallel one — a wrapper is a fourth step, not a new chain.
+
+- **Two products**: `hayBaleage`, `alfalfaBaleage` — round grass/alfalfa only
+  (straw has nothing to ferment; squares need a tube wrapper, a different
+  machine). White-plastic bale tint, so they read at a glance on the map.
+- **The trade, priced in DRY MATTER** (full derivation in `baleProducts`): a
+  baleage bale is 1.0 t at ~50% moisture = 0.50 t DM against dry hay's 0.75 t
+  at 15% = 0.64 t DM, so an acre makes MORE, lighter-feed bales. Gross/acre
+  lands within a few % of dry hay, and wrapping costs ~$18/ac in film — so
+  selling straight off the field, dry hay still wins by a nose. Baleage wins
+  the moment bales have to SIT: 0.2%/mo vs the Bale Area's 2.5%/mo. The
+  wrapper and the Bale Barn are now competing answers to the same problem,
+  which is the decision the feature exists to create.
+- **Two machines**: `baleWrapper` ($30k, a second `wrap` pass) and
+  `combiBaler` ($215k, bales AND seals in one pass — it can never miss the
+  window, which is what the price buys).
+- **The window** (maintainer rule): bales can only be wrapped in the SAME
+  CALENDAR MONTH they were baled. `Field.baledAt` is the clock; enforced at
+  QUEUE time, not just completion, so a player can't buy plastic and a pass
+  and get hay back. One rule instead of a moisture model.
+- **Spoilage is now per-PRODUCT, not per-building** (`baleSpoilRateFor`) —
+  wrapped bales ignore their store entirely.
+- Plan toggle `wrap` (Schedule tab, perennials, shown only when Bale is on),
+  manual button in the field panel, shop rows under Hay & Silage Tools.
+
+⚠️ **The interaction that nearly broke it**: bales are collectable the instant
+they hit the ground, so the auto-haul would carry a field's bales off as plain
+hay before the wrapper ever ran — and once they're in a store there's no
+wrapping them. `wrapPending` now holds the haul, and deliberately goes false
+the moment the window shuts so a field whose wrap never happened isn't
+stranded. Covered by 7 tests in `wrapTask.test.ts`.
+
+Two bugs found by the new tests, both invisible to typecheck: the wrapper's
+`widthFt` is 0 (like a baler), so it fell through to the generic swath branch
+and got a coverage path of width ZERO that could never finish; and
+`isStartable` fell through to `status === "ready"` for `wrap`, but baling
+settles a field to "mulched"/"growing" BEFORE the wrap runs, so every wrap task
+sat queued forever. Both now follow the baler/haul rules instead.
+
+**802/802 passing (42 new), typecheck + build clean.** Maintainer visual
+checklist: (1) buy a Bale Wrapper, bale a grass/alfalfa field, confirm the
+"🎁 Wrap into Baleage" button appears and the bales turn WHITE; (2) let a month
+turn without wrapping — the button should be gone for good; (3) a Combi Baler
+should produce white bales with no second pass; (4) auto-managed field with
+Bale+Wrap on should wrap before hauling; (5) stored baleage should barely
+shrink over a winter in a Bale Area while hay next to it visibly does.
+
+NOT in Phase 1 (per the plan): forage harvester, forage wagons, silage bunker,
+corn-silage harvest mode. Maintainer answers on those, for whoever picks up
+Phase 2: silage IS sold now and feeds cattle later; the chopper must be unable
+to work without a trailer; add a line of higher-capacity forage trailers; treat
+the bunker like a silo (no cover/feed-out mechanic yet).
+
+## 2026-07-31 — SILAGE PHASES 2 & 3: chopper, wagons, bunker, corn silage
+
+The bulk route, and the corn harvest-mode fork. Maintainer answers that shaped
+it: silage is SOLD now (cattle later); the chopper must be unable to work
+without a trailer; a forage-trailer line with larger capacity; bunker kept
+simple, "more like a silo", no cover/feed-out.
+
+- **Forage harvester** — new agent kind (`forageHarvester`), its own machine
+  class like the combine and windrower, with crop-dependent HEADS mirroring
+  `harvestHeaderKind`: `rowCropHead` for standing corn, `pickupHead` for a
+  wilted windrow. Hand-drawn SVG with the giveaway spout arcing over its
+  shoulder. $420k–850k — the priciest machines in the game.
+- **THE CHOPPER CANNOT WORK WITHOUT A WAGON.** Implemented as a real physical
+  constraint rather than a flag: `capacityTons` is a 1.5–2.5 t BUFFER (a
+  chopper has no tank, only a spout), so it fills in seconds and the existing
+  full-hopper stop does the rest. Also gated at queue time and at pickup, with
+  its own `blockedWork` line. Revert-checked: with a 500 t tank the field
+  finishes with no wagon at all, and 3 tests fail.
+- **Forage wagons** — 18/32/48 t, above the grain trailers' 10/25/38 t of corn
+  at every tier (asserted in a test, since that ordering IS the request).
+- **ONE relay, not two.** `unloadHarvester` now carries `cargoKind:
+  "grain" | "silage"`; the four things that actually differ (trailer kind,
+  capacity, destination, deposit) are isolated in small helpers and the loop
+  asks those. Absent `cargoKind` means grain, so every existing save's tasks
+  keep working. Duplicating that loop — the one that produced the 2026-07-25
+  deadlock — would have been the bigger risk.
+- **Silage bunker** — `BuildingKind`, tons, tiered like a silo (1.2k/2.5k/5k t
+  at ~$25/t of capacity). Pooled farm-wide, takes any product, no assignment,
+  NO spoilage. A test asserts the absence of a spoil knob so a future
+  cover/feed-out slice has to come back here deliberately.
+- **Phase 3 — corn silage as a harvest MODE**, not a new crop: 20 t/ac as-fed
+  at $55/t grosses ~$1,100 against grain's ~$990, but chopping costs $130/ac
+  against $40, so the two land within a whisker and the real decision is what
+  the farm is equipped for. Chopping clears the crop with NO residue (the
+  whole plant went), so there's nothing to bale or mulch. Offered as a second
+  button beside Queue Harvest, and as a Schedule-tab toggle. Auto-manage falls
+  back to the combine when gear is missing — auto-manage never traps.
+- Haylage does the same for the perennials: chop the windrow instead of
+  baling it (still needs the rake — a pickup head lifts a windrow, it doesn't
+  gather one). 3.2 t/ac grass / 2.9 t/ac alfalfa, priced to land beside hay
+  and baleage per acre so all three routes compete.
+
+Two bugs the tests caught, both invisible to typecheck (same class as Phase
+1's): the chopper's swath fell through to the generic implement branch and got
+ZERO from a pickup head's `widthFt: 0`; and `isStartable` had no `chop` case,
+so it fell to `status === "ready"` and a mown perennial could never be chopped.
+
+**837/837 passing (35 new), typecheck + build clean.** Maintainer visual
+checklist: (1) buy chopper + row-crop head + wagon + bunker, chop a corn
+field — bunker fills, no grain banked; (2) sell the wagon mid-job, confirm the
+chopper stops and the Work Queue explains why; (3) mow grass, rake, then "Chop
+for Haylage"; (4) with no bunker, wagons should divert to a Sell Point rather
+than stall; (5) Inventory shows a Silage Bunkers section with a fill bar and a
+per-product Sell button.
+
+Still deliberately absent: bunker cover/seal and feed-out spoilage; cattle
+(silage is sold only); early-chop (corn silage is real-world cut ~a month
+before grain maturity — here it still waits for "ready").
+
+## 2026-07-31 — Crop Rotation reworked into a single TIMELINE
+
+Maintainer: the per-crop calendars "don't work well… it would be best if a
+single calendar could be worked on, just expanding as more crops are added.
+It's especially tricky with double crop years."
+
+The old view drew one 12-month grid per rotation STEP, flipped through with
+crop chips. That model fought the data: a rotation is a CHAIN with no year
+boundaries, so an overwintering crop (Winter Wheat, Sep→Jun) didn't fit inside
+one calendar year, and a double crop put two steps in a year you could only
+ever look at one of at a time.
+
+- **`src/sim/rotationTimeline.ts`** — pure projection onto an ABSOLUTE month
+  axis (0 = Jan of campaign year 1). No DOM, no clock reads beyond the `now`
+  it's handed, so the arithmetic is unit-testable even though the layout isn't.
+- **The whole trick is `nextOccurrence(fromAbs, monthOfYear)`** — the first
+  such month AT OR AFTER a point. Chain each step's plant month off the
+  previous step's harvest and both hard cases fall out with NO special casing:
+  wheat harvests abs 17 (Jun Y2), beans planting in June get delta 0 → abs 17,
+  the same month — that IS the double crop. Loop back to wheat from Oct beans:
+  delta 11 → abs 32, a visibly fallow winter. An overwintering band just spans
+  the year line. Revert-checked: making it "strictly after" fails 4 tests
+  including the double crop.
+- **Anchored to reality at the head**: a crop already in the ground starts its
+  band at the month it was actually planted (`field.plantedAt`), so the current
+  step is fact and only what follows is projection. "Today" is one vertical
+  line at `absMonthOf(now)`, and the view opens scrolled so today sits just
+  inside the left edge.
+- **PLOW uses `prevOccurrence`** — it prepares ground AHEAD of its crop, so it
+  belongs in the fallow gap before the band. Placing it with `nextOccurrence`
+  would have flung it ~9 months past harvest (its legal window wraps to
+  January); there's a test pinning it before `plantAbs`.
+- **Perennials don't chain** — a stand never clears, so it renders as one long
+  band with repeating cuttings, and a perennial mid-sequence ENDS the
+  projection rather than inventing a start month for whatever follows it.
+- **Optional ops moved out of the grid** into toggle pills beside each crop
+  name. Whether an operation happens and WHEN it happens are different
+  questions; mixing them into one cell was most of why the old view was hard
+  to read. The month cells are now purely about timing.
+- Moving a task still goes through the untouched `setScheduleOverride` —
+  dropping a chip on an absolute month just sets `abs % 12`. **`sim/schedule.ts`
+  is completely unchanged**: this was a rendering/projection change, not a sim
+  one. Click-to-select-then-place was added alongside drag (discoverable, and
+  works on touch).
+
+Removed with it: `ScheduleColumn`, `scheduleCell`, the `fp-vcal-*`/`fp-vmonth`
+/`fp-cal-cell` CSS, and the next-year wrap divider that existed only to
+apologize for the fixed Mar→Feb grid.
+
+**LAYOUT took three passes the same day**, each on maintainer feedback, and
+the reasons are worth keeping because they're all about the panel's shape
+(~430 px wide, tall):
+
+1. *Months across the top, crop per row.* Permanent side-scrolling, ~5 months
+   visible. Rejected on sight.
+2. *Months down, crop per COLUMN.* Right reading direction, but each crop got
+   one narrow column to hold every task — so two tasks in the same month had
+   nowhere to go, and headers were cramped.
+3. **Final: TASKS across the top; the vertical axis IS the rotation.** Each
+   step is a BLOCK of its own months, stacked in the order they happen, with a
+   full-width crop header. Tasks are a fixed, small column set that fits the
+   width; stacking crops downward is the one direction the panel has room to
+   grow. Track cells tint green while the crop is in the ground, so each block
+   shows its own growing season without a separate bar.
+
+Today is a line across the whole grid, on its month — and **dashed at the top
+edge of the next drawn month when today falls in a fallow gap** between blocks,
+so it reads as "somewhere before here" rather than lying about a month.
+
+**Also: one band per step by default.** `maxBands` defaulted to 8, so a
+one-crop field drew "Corn / Corn +1 / Corn +2 / Corn +3" (maintainer: "default
+to 1 crop until more are added"). The rotation loops; saying so four times
+isn't more true and cost four rows on a narrow panel.
+
+**871/871 passing (33 new), typecheck + build clean.** Every `fp-tl-*` class
+was cross-checked as both used and styled (no orphans either way). Maintainer
+visual checklist: (1) a one-crop field shows ONE block; (2) Winter Wheat →
+Soybeans(Jun) should put the wheat block's last month and the beans block's
+first month on the same June — the double crop; (3) the red today line lands on
+the current month, dashed if the field is between crops; (4) click a chip →
+its legal months appear in ITS column → click one to move it; (5) toggle pills
+on each crop header turn optional ops on/off; (6) task header and month gutter
+stay put while scrolling.
+
+## 2026-07-31 — Schedule tab: the calendar IS the editor
+
+Follow-up space-clearing pass on the rotation timeline (maintainer: "I'm
+trying to clear some more space for the calendar"). Seven changes, and the
+theme is that everything the calendar already showed has stopped being said
+twice somewhere else:
+
+- **Available months are drawn ALL the time** as dotted cells, not revealed on
+  click. That single change let the whole click-to-select step disappear —
+  moving a task is now one click on the month you want. `tlSelected` is gone.
+- **Optional ops toggle from their own chip** in the calendar; the toggle-pill
+  strip on each crop header is gone. An off task still draws (hollow) at its
+  would-be month, so turning it back on is a click where you'd expect.
+- **The crop list above the calendar is gone.** Crop choice, add and remove
+  moved onto the block headers; "＋ Add a crop" sits under the grid. The
+  rotation editor keeps only its name + copy/paste.
+- **No more view jump.** Auto-scroll-to-today was re-running on every
+  re-render, so every click yanked the view. It's now a one-time courtesy per
+  field (`tlScrolledFieldId`).
+- **Reset + Plow share one row** (`#fp-schedule-footer`); the plow's
+  explanatory sentence moved into its tooltip.
+- **Field status pill removed** — the Work Queue already reports what a field
+  is doing and the calendar shows where it is in its cycle.
+- **Panel 320px → 384px.**
+
+Dead weight removed with it: `tlSelected`, `TL_TOGGLES`, `scheduleViewStepIdx`,
+the whole crop-row renderer (127 lines), and the orphaned `.crop-chips` /
+`.crop-row` / `.crop-chip` / `.chip-add` / `.plan-crop` / `.plan-del` /
+`.plan-hint` / `.badge` CSS. Cross-checked both directions afterwards: every
+`fp-tl-*` class is used in the renderer AND styled, with no orphans either way.
+
+**871/871 passing, typecheck + build clean.** Maintainer visual checklist:
+(1) dotted available months visible without clicking anything; (2) clicking a
+dotted month moves that task, and the view does NOT jump; (3) clicking a
+scheduled optional chip turns it off, clicking the hollow one turns it back on;
+(4) crop dropdown + ✕ on each block header, ＋ Add a crop below the grid;
+(5) Reset and Plow side by side; (6) no status pill, wider panel.
+
+## 2026-08-12 — NAIP host toggle (USDA APFO outage)
+
+Maintainer report: brand-new county wouldn't load imagery, dev corner showed
+"NAIP: cache 0 new, 519 failed". Diagnosed from the browser console error
+(`net::ERR_CONNECTION_CLOSED`) plus curl/WebFetch from three independent
+networks — USDA APFO (`gis.apfo.usda.gov`) was refusing every TLS handshake,
+not just `exportImage` calls, so this was a server-side outage, not a request-
+format or CORS bug. Confirmed `https://imagery.nationalmap.gov/.../USGSNAIPPlus/ImageServer`
+(USGS National Map) serves the same public-domain NAIP dataset on separate
+infrastructure and responds with real imagery right now.
+
+Added a player-visible Settings-tab toggle (`NAIP_PROVIDERS` in tileCache.ts:
+`usda-apfo` default, `usgs-naip` alternate) instead of picking one or building
+silent failover, per maintainer preference. Mechanics:
+
+- Tiles are now addressed `naip://tile/{provider}/{z}/{x}/{y}` (was
+  `naip://tile/{z}/{x}/{y}`) — the provider rides in the URL itself so
+  switching calls `source.setTiles([...])` with a URL that actually changed,
+  which is what makes MapLibre drop its cached tiles and reload; a same-URL
+  toggle wouldn't have refetched anything.
+- IndexedDB cache key is now `{provider}/{z}/{x}/{y}` — two providers at the
+  same tile coordinate are different bytes (different mosaic/year/
+  compression) and must never collide. Regression test covers this directly.
+- `configureNaipCache()` no longer takes a single `imageServer`; it resolves
+  the server per-request from the provider in the tile ref via
+  `naipProviderImageServer()`.
+- Choice persists in localStorage (`farm.naipProvider`), same pattern as
+  `autoSkipEnabled`.
+- `runPrefetch`'s silent `catch {}` also gained a console.error on the first
+  failed tile per run — the count alone gave no way to diagnose *why*, which
+  is what made this bug take three separate connectivity tests to pin down.
+
+**874/874 passing** (3 new: provider-registry sanity plus cross-provider
+cache-key isolation in both tileCache.test.ts and naipPrefetch.test.ts),
+typecheck + build clean. Verified live in Browser Preview later the same
+session (see the 2026-08-12 follow-up entry below) — the toggle swaps
+imagery in place with no reload.
+
+## 2026-08-12 — viewport-follow prefetch + the resolution WAS ours to fix
+
+Follow-up to the NAIP host toggle above. Maintainer reported the USGS
+fallback looked lower-res than USDA APFO and couldn't keep up while
+scrolling into unexplored parts of the county. Two separate fixes:
+
+**Resolution — root cause was `TILE_MAXZOOM = 17`, not the USGS host.**
+Queried the USGS ImageServer's own catalog for a real source raster over
+Story County: `resolution_value: 0.3, resolution_units: METER`, `Year: 2023`,
+`vendor: USDA-FSA-APFO` — the *same* program APFO's mosaic draws from, not a
+worse copy. z17 tiles are ~1.19 m/px; a Laplacian-variance check proved the
+server was holding back real detail past that ceiling — exporting the same
+ground footprint at z18 pixel density had ~30x more high-frequency content
+(921 vs 31) than bicubic-upscaling the z17 tile to match, i.e. genuinely more
+resolvable detail was being thrown away, not just missing interpolation. A
+background research agent independently reached the same conclusion chasing
+other mirrors ("the resolution gap looks self-inflicted, not a dataset
+limitation") before this was diagnosed — good convergent signal.
+`TILE_MAXZOOM` → 18 (~0.6 m/px; stopped short of 19's true 0.3 m match
+because it would re-quadruple near-asset tile counts on top of z18's already
+~4x jump). `ASSET_ZOOMS` changed from a hardcoded `[14, 15, 16, TILE_MAXZOOM]`
+to `Array.from({length: TILE_MAXZOOM - 13}, (_, i) => 14 + i)` — the
+hardcoded version would have silently skipped z17 the moment TILE_MAXZOOM
+stopped being 17; a test now locks the contiguity property in directly.
+Investigated NAIP's other `renderingRule` options while in there
+(NaturalColor/FalseColorComposite/NDVI_Color, from the ImageServer's own
+`rasterFunctionInfos`) — real, but band-composite views for vegetation
+analysis, not resolution tiers; not useful for this game's basemap.
+
+**Scrolling — the boot-time plan only ever warmed known assets.**
+`countyPrefetchPlan` pre-caches high-res only within `ASSET_RADIUS_M` of
+home/fields/buildings; anywhere else in the county always live-rendered, so
+a slower/degraded fallback host visibly couldn't keep up while panning.
+Added `viewportPrefetchPlan` (naipPrefetch.ts) — a third, much smaller plan
+(`VIEWPORT_PLAN_CAP = 600`) covering a buffered ring (`VIEWPORT_BUFFER_FRAC
+= 0.6`) around wherever the camera currently is, gated to `z >=
+VIEWPORT_MIN_ZOOM` (14 — below that the county-wide boot prefetch already
+has it warm) so it only fires where it matters. Wired to `map.on("moveend",
+...)` in main.ts, debounced 400ms, deduped against the last-queued
+provider+zoom+bbox key so continuous panning doesn't requeue on every frame.
+Runs through the same serialized `prefetchChain` as the boot-time plan
+rather than a separate concurrent one, so it warms ahead of you without
+competing with what's actually rendering live.
+
+**Verified live in Browser Preview** (re-enabled this session, see above):
+switched USDA APFO → USGS mid-game with no reload; zoomed into the
+farmstead and could read crop-art lettering in the fields (only legible at
+genuinely fine resolution — a real-world sanity check the z18 bump wasn't
+placebo); panned to an unexplored part of the county (a school/park complex
+far from any asset) and watched the dev corner report "NAIP: caching
+25/35…" then resolve to "cache ✓ (0 new, 12 warm)" — the live tile loads
+and the viewport prefetch shared the cache with no wasted refetching;
+repeated the pan and it kept firing, not a one-shot.
+
+**879/879 passing** (5 new: ASSET_ZOOMS contiguity regression, 4
+viewportPrefetchPlan cases), typecheck + build clean.
+
+## 2026-08-12 — stuck-task escape hatch: Restart / Cancel on active jobs
+
+Maintainer report: "sometimes the game gets stuck on a task and I can't
+figure out how to reset it. Reloading doesn't work." Reload can't help
+because the SAVE STATE is what's wedged (a stale cached coverage path, a
+relay locked onto a destination that's no longer valid, a phase that never
+resolves) — it's exactly what gets reloaded back in. No prior tool touched
+an ACTIVE task at all: `cancelTask` explicitly refuses anything past
+"queued", and `sellAgent` refuses to sell a mid-job machine rather than
+force through it. Two new sim/tasks.ts functions fill that gap:
+
+- **`restartActiveTask`** — wipes the task's cached runtime (coverage path +
+  distance, bale-tie tracking, staging gate, rendezvous point) and every
+  phase/locked-destination field (`unloadPhase`, `haulPhase`, `trailerPhase`,
+  `unloadDest`, `haulDest`, `trailerDest`, `sellPhase`, the timers) back to
+  `undefined`, IN PLACE — same task, same agent, no refund needed because
+  nothing was dropped. Every one of those fields already had a documented
+  "undefined ⇒ start fresh" fallthrough in the tick loop (confirmed by
+  reading the actual branch chains, e.g. unloadPhase's), so clearing them is
+  safe, not a guess. Side effect worth knowing: `doneAcres` resets to ~0 too,
+  since the tick loop DERIVES it from distance-along-the-cached-path rather
+  than accumulating it — deliberate, since keeping either the path or the
+  distance would risk reproducing whatever corrupted them in the first place.
+- **`forceCancelActiveTask`** — drops the task outright and frees every
+  agent on it (matched by `agent.taskId === task.id`, not by enumerating
+  each task type's field names, so a bale relay's trailer helper is freed
+  right alongside the main agent). No refund — this is an emergency exit,
+  not `cancelTask`. Cascades to any `unloadHarvester` relay whose
+  `harvesterAgentId` pointed at the just-freed agent, since a relay left
+  chasing a machine that's now idle would only end up stuck itself.
+
+Wired into the Work Queue: every ACTIVE row (including the three "system"
+types — unload/haul/sell — previously marked not-cancelable since they're
+supposed to self-regenerate, but are exactly the phase-machine-heavy ones
+most likely to actually wedge) now shows "↻ Restart" / "⛔ Cancel". Cancel
+confirms first (`confirmDialog`) since it's destructive and unrefunded;
+Restart doesn't, since it's meant to be the fast first thing to try.
+
+**Verified live in Browser Preview**: restarted an active plow mid-job —
+progress bar dropped from 23% back to 0%, same tractor kept driving it, no
+stall. Canceled it — task vanished from Active, and the freed tractor
+immediately auto-picked up the next QUEUED plow job on its own (toast:
+"Tractor - Medium is heading out — plowing Field 1") — the exact "machine
+free to move to other tasks" behavior asked for, not just freed-and-idle.
+
+**887/887 passing** (8 new in tests/taskRecovery.test.ts — both functions'
+happy path, queued/unknown-id rejection, and the relay cascade/phase-clear
+cases, the latter driven through a real combine+cart+silo setup rather than
+hand-built task objects), typecheck + build clean.
+
+## 2026-08-12 — Machine sprites: Forage Harvester, combine headers, remaining silage equipment
+
+Filled in the art gaps left by the silage feature. New `src/assets/Equipment/`
+sprites: `ForageHarvester_sideleft.png` (cropped/repositioned twice on
+maintainer feedback — first to cut the spout/boom arc down to a stub so the
+body reads at the same scale as Tractor/Combine, then given ~15% more
+headroom back above the cab), `Combine_Medium/Small_GrainHeader.png` +
+`_CornHeader.png` (previously only Large had header variants — the plain
+`_sideleft` now defaults to the grain-header art, since the store/inventory
+list only ever renders that file, never the variant registry), `CombiBaler_
+sideleft.png`, `ForageWagon_sideleft.png`, `GrainTrailer_sideleft.png`.
+`tests/machineImages.test.ts` updated for the new Medium/Small header
+variants. Full-res originals archived to `art-source/Equipment/`.
+
+## 2026-08-12 — Work Queue: icon-only Restart/Cancel, gated behind selection
+
+Two rounds of maintainer feedback on the stuck-task Restart/Cancel buttons
+(above): first "they take up a lot of space" → condensed to icon-only (↻/⛔)
+pinned to the active-task card's bottom-left corner; then "only show those
+buttons when the user selects a task, highlight the selected task" → added a
+generic `selectedTaskId` + `wireRowSelection()` in main.ts (deliberately
+reusable for future per-task UI, per the maintainer's own framing) with a
+gold ring on the selected row. Clicking a button doesn't also toggle
+selection (`closest("button")` guard). Verified live in Browser Preview both
+rounds.
+
+## 2026-08-12 — Corn silage moved off Corn entirely, onto its own crop (Corn (Forage))
+
+Maintainer report: "I'm unable to get the Forage Harvester going." Turned
+out to be two separate problems, not one:
+
+1. **Timing** — chopping was gated to the exact same `"ready"` status as a
+   full grain harvest, so there was no early-cut advantage at all (real
+   silage corn is cut wetter and weeks earlier than grain corn).
+2. **A real crash** — `estimateTaskHours` had a special case for
+   `"harvest"`'s crop-dependent header width but none for `"chop"`'s (same
+   shape, `chopHeadKind`), so it fell through to `IMPLEMENT_CONFIG[undefined]
+   .medium` and threw `Cannot read properties of undefined (reading
+   'medium')` — but ONLY while a chop task was still QUEUED (no agent yet);
+   once active it took a different, correct code path, which is exactly why
+   this went unnoticed through 887 green tests. Reproduced live by
+   cancel+requeue with a temporary stack-trace log; fixed with
+   `queuedChopWidthFt` mirroring the already-correct active-task width
+   logic. Two regression tests lock this in (fail against the pre-fix code).
+
+First pass at the timing fix added an in-season "silage window" toggle
+directly on Corn (`silageChopReady`, opened the chop option a month before
+`"ready"`). Maintainer then asked for a cleaner break: a separate crop
+entirely, chosen at planting instead of toggled mid-season. Reworked into:
+
+- **`forage` (display: "Corn (Forage)", 🌽 — same icon as grain Corn)** — a
+  new `CropId`, `growMonths: 3` (a month short of Corn's 4), `producesGrain:
+  false`. Same `cornSilage` product/economics as the old toggle, so
+  storage/market code needed zero changes.
+- **`isChopOnlyCrop()`** (sim/farming.ts) is the one new gate everything
+  else checks: `enqueueTask`'s harvest/chop validation, `canChopField`, the
+  field-panel buttons (exactly one per crop at `"ready"` now — Mow, Chop, or
+  Harvest, never two side by side), the auto-manage `"ready"` case (no
+  longer misroutes an unequipped Forage field to a phantom combine harvest),
+  and the rotation timeline (Forage's harvest-time band now displays as
+  "Chop (Silage)", same underlying schedulable step).
+- Corn itself lost `silageProduct`/`silageTonsPerAcre` — grain-only again.
+- Perennial haylage (grass/alfalfa) is UNCHANGED — chop-vs-bale there is
+  still a real per-cutting choice (`plan.silage`), unlike Forage's
+  planting-time choice, so `canChopField` keeps two different paths.
+- `silageChopReady` and the old side-by-side Harvest/Chop fork were deleted
+  outright, not left as dead code.
+
+Rewrote `tests/silage.test.ts` around the new crop (default test field is
+now `crop: "forage"`), updated `tests/crops.test.ts`'s crop-invariant test
+for the new "chop-only annual, no bales" category, added
+`tests/rotationTimeline.test.ts` coverage for the harvest→silage relabeling.
+Not yet verified live this round (maintainer paused Browser Preview use
+mid-session) — typecheck + 892/892 tests is what's backing this one.
+
+## 2026-08-12 — Field labels only on Field 1 (layer z-order, not the overlap flag)
+
+Looked like a repeat of the 2026-07-30 "only 1 field label" bug, but
+`text-allow-overlap`/`text-ignore-placement` were already correctly set — a
+screenshot (3 fields, 1 label) plus "I just saw the other labels for a
+glimpse, they appear to be behind the field textures" pointed at something
+else: **layer stacking order**, not label collision.
+
+Each field's procedural texture is its own MapLibre raster layer (`Surface`
+in `src/map/overlay.ts`), added via a bare `map.addLayer()` with no position
+argument — which stacks on TOP of every layer already on the map. The
+shared `field-outlines`/`field-labels` layers are created ONCE, during the
+first field ever rendered. So the first field's texture (added a moment
+before those shared layers, inside the same `renderField` call) ends up
+underneath them — but every field added afterward gets its texture layer
+appended on top of the already-existing label layer, burying its own label
+under itself. The outline stroke partially escaped visibility (readable as
+"a boundary line is there") only because it straddles the transparent
+padding around the field polygon's edge; the label, dead center on solid
+texture, had no such escape.
+
+Fixed by threading an optional `beforeId` through `OverlayEngine.
+createSurface()` → `Surface`'s constructor → `map.addLayer(spec, beforeId)`.
+`renderField` now always inserts a field's texture just below
+`field-outlines` (falling back to top position only for the very first
+field, which has nothing to sit under yet). Confirmed fixed by the
+maintainer after reload. Typecheck + 892/892 tests; no new automated
+coverage for this one — it's real MapLibre compositing behavior, not
+something the current unit tests exercise.
+
 ## Known gaps / unverified
 
 - **Field panel Schedule calendar drag-and-drop is logic-tested only** — no
@@ -2257,9 +2845,11 @@ is canvas-2D code inside main.ts and the suite runs in plain Node.
 - Rotation planner unplayed in real sessions (unit-tested only).
 - Drag-reorder in Work Queue unmanually verified.
 - Routing uses public OSRM demo (not self-hosted).
-- **Browser Preview is OFF** (maintainer directive). New unseen: rotation planner UI,
-  cellular-decomposition visuals (transits crossing notches), updated bale markers,
-  machine icon flip, headland-lap frames + drive paths — logic tested, UX needs eyes.
+- **Browser Preview was OFF 2026-07-11 → 2026-08-12** (maintainer directive,
+  re-enabled 2026-08-12 — see CLAUDE.md). Still unverified visually from that
+  window: rotation planner UI, cellular-decomposition visuals (transits
+  crossing notches), updated bale markers, machine icon flip, headland-lap
+  frames + drive paths — logic tested, UX needs eyes now that preview is back.
 
 ## How to run
 

@@ -16,7 +16,7 @@
 import type { Meters } from "../geo/coords";
 import type { SimTime } from "../sim/clock";
 import { gameConfig } from "../config/gameConfig";
-import type { CropId, EquipmentSize, BaleProduct } from "../config/gameConfig";
+import type { CropId, EquipmentSize, BaleProduct, SilageProduct } from "../config/gameConfig";
 
 /** Field lifecycle (brief §10). */
 export type FieldStatus =
@@ -68,6 +68,20 @@ export interface FieldPlan {
   /** Rake + bale the residue after harvest (forage crops only) instead of plowing
    * it under. */
   bale?: boolean;
+  /** WRAP the bales into baleage (2026-07-31). Only meaningful with `bale` on
+   * and a forage crop; auto-manage queues the wrap pass straight after baling
+   * so it lands inside the same-month window. Ignored with no wrapper owned. */
+  wrap?: boolean;
+  /**
+   * CHOP this crop for silage instead of combining/baling it (2026-07-31,
+   * Phases 2–3) — the harvest-MODE fork.
+   *
+   * On corn it replaces the combine pass entirely: the whole plant goes into a
+   * bunker as corn silage and there is no grain and no residue. On a perennial
+   * it replaces rake+bale after the cut, making haylage instead of hay. Ignored
+   * on a crop with no `silageProduct`, or with no forage harvester owned.
+   */
+  silage?: boolean;
   /** Field Schedule tab (maintainer request, 2026-07-21): player-chosen month
    * (0-11) overriding when auto-manage queues this step, for tasks that have
    * more than one legal month. plow/plant/weed/fertilize: a full override —
@@ -184,6 +198,17 @@ export interface Field {
    * marker tint. Set when a bale run completes (corn→cornStover, grass→hay,
    * alfalfa→alfalfaHay). Undefined = corn-stover default (legacy saves). */
   baleProduct?: BaleProduct;
+  /**
+   * When this field's current bales were dropped (2026-07-31) — the clock on
+   * the WRAPPING WINDOW. Baleage has to be sealed while the forage is still
+   * fresh, so a wrap pass only converts bales baled in the SAME CALENDAR MONTH
+   * (maintainer rule): miss the month and they've dried, and they stay plain
+   * hay for good. See `canWrapBales` (sim/farming.ts).
+   *
+   * Undefined on legacy saves and on bales made by a combi baler (already
+   * wrapped, nothing to time).
+   */
+  baledAt?: SimTime;
   /** Perennial forage crops only (grass/alfalfa): how many of this year's
    * cuttings have been mowed, and which campaign year that count belongs to
    * (reset to 0 when the year turns). Drives the fixed-monthly-window "ready"
@@ -214,12 +239,19 @@ export interface Field {
  * costs arrive with the storage mechanic (brief §5 lever 1). */
 export type GrainBin = Record<CropId, number>;
 
+/** Bunker-stored chopped silage, TONS per product (2026-07-31, Phase 2).
+ * Capped by the farm's Silage Bunkers, the way `GrainBin` is capped by silos. */
+export type SilageStore = Record<SilageProduct, number>;
+
 /** Placeable farm structures (maintainer request, 2026-07-12). A single point,
  * not a polygon like `Field` — see `sim/buildings.ts`.
  * `sellPoint` (2026-07-17): a bale hauler's fallback destination when no Bale
  * Storage exists or all of it's full — no capacity, no product assignment,
  * just cashes out whatever's dropped there at the flat bale price. */
-export type BuildingKind = "silo" | "baleBarn" | "baleArea" | "tractorBarn" | "implementBarn" | "farmYard" | "sellPoint";
+export type BuildingKind = "silo" | "baleBarn" | "baleArea" | "tractorBarn" | "implementBarn" | "farmYard" | "sellPoint"
+  // Silage Phase 2 (2026-07-31): bulk chopped-forage storage, tons. Sized in
+  // tiers like a silo, and — for now — as simple as one (no seal/feed-out).
+  | "silageBunker";
 
 export interface Building {
   id: string;
@@ -262,7 +294,10 @@ export interface Agent {
   /** "windrower" (2026-07-24) is the Self-Propelled Windrower: a machine that
    * mows hay on its own, with no tractor and no implement. Older saves never
    * contain one, so no migration is needed — it can only arrive by purchase. */
-  kind: "player" | "worker" | "tractor" | "harvester" | "windrower" | "truck";
+  kind: "player" | "worker" | "tractor" | "harvester" | "windrower" | "truck"
+    // Self-propelled forage harvester — the chopper (2026-07-31, silage
+    // Phase 2). Its own machine class, like the combine and the windrower.
+    | "forageHarvester";
   /** Display name for the queue panel / map label ("Tractor", "Combine"). */
   name: string;
   pos: Meters;
@@ -300,7 +335,12 @@ export interface Implement {
   kind:
     | "plow" | "planter" | "sprayer" | "rake" | "bailer" | "squareBaler" | "grainTrailer"
     | "mower" | "mulcher" | "haySpikes" | "baleTrailer"
-    | "cornHeader" | "grainHeader";
+    | "cornHeader" | "grainHeader"
+    // Silage Phase 1 (2026-07-31). Keep in sync with `ImplementKind`
+    // (sim/tasks.ts) — this union is the persisted mirror of it.
+    | "baleWrapper" | "combiBaler"
+    // Silage Phases 2-3: the chopper's two heads and its wagon.
+    | "forageWagon" | "rowCropHead" | "pickupHead";
   size: EquipmentSize;
   /** Id of the machine this is hitched to, or undefined if parked in the yard. */
   attachedTo?: string;
@@ -315,6 +355,10 @@ export interface Implement {
    * for spikes; into storage, for a trailer). */
   cargoBales?: number;
   cargoBaleProduct?: BaleProduct;
+  /** Forage Wagon-only (2026-07-31): which silage the loaded `cargoTons` are.
+   * Shares `cargoTons` with the Grain Trailer — a load is a load — but needs
+   * its own product field because silage isn't keyed by CropId. */
+  cargoSilage?: SilageProduct;
 }
 
 /** Fieldwork the player has ordered. Tasks queue up and agents (tractor for
@@ -323,7 +367,7 @@ export interface Implement {
  * gated by plow/plant/harvest, they just need a standing crop in the field.
  * `unloadHarvester` is system-generated (never player-queued) — a tractor+
  * Grain Trailer hauling a full combine's hopper to a silo. */
-export type TaskType = "plow" | "plant" | "harvest" | "mow" | "mulch" | "weed" | "fertilize" | "rake" | "bale" | "unloadHarvester" | "haulBales" | "sell";
+export type TaskType = "plow" | "plant" | "harvest" | "chop" | "mow" | "mulch" | "weed" | "fertilize" | "rake" | "bale" | "wrap" | "unloadHarvester" | "haulBales" | "sell";
 
 export interface FarmTask {
   id: string;
@@ -343,8 +387,20 @@ export interface FarmTask {
   status: "queued" | "active";
   /** Agent working this task, once one picks it up. */
   agentId?: string;
-  /** unloadHarvester-only: which combine this trip services. */
+  /** unloadHarvester-only: which combine (or chopper) this trip services. */
   harvesterAgentId?: string;
+  /**
+   * unloadHarvester-only (2026-07-31): what this relay is carrying.
+   *
+   * The SAME relay task serves both harvest chains — the phases (onloading →
+   * staging → toStore → dumping) are identical whether it's grain going to a
+   * silo or silage going to a bunker, and forking them would have meant
+   * duplicating the trickiest loop in the sim. Absent = grain, so every task
+   * in an existing save keeps working untouched.
+   */
+  cargoKind?: "grain" | "silage";
+  /** unloadHarvester-only, silage runs: which silage the load is. */
+  silageProduct?: SilageProduct;
   /** unloadHarvester-only: which leg of the trip the tractor+trailer is on.
    * "staging" = parked at the field's access gate, waiting for the combine to
    * actually STOP for unloading (full hopper / finished field) before driving
@@ -483,6 +539,9 @@ export interface SaveState {
   parcels: Parcel[];
   fields: Field[];
   grain: GrainBin;
+  /** Chopped silage in the farm's bunkers, tons per product (2026-07-31).
+   * Optional so saves made before silage still load. */
+  silage?: SilageStore;
   /** Placed buildings (silos, barns, farm yard). */
   buildings: Building[];
   agents: Agent[];
@@ -547,6 +606,7 @@ export function newGame(): SaveState {
     fields: [],
     // Every crop key present from day one; loads backfill new keys in main.ts.
     grain: Object.fromEntries((Object.keys(gameConfig.crops) as CropId[]).map((c) => [c, 0])) as GrainBin,
+    silage: { cornSilage: 0, haylage: 0, alfalfaHaylage: 0 },
     buildings: [],
     agents: [],
     implements: [],

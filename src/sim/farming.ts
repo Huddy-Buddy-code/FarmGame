@@ -18,7 +18,7 @@
  */
 
 import { gameConfig } from "../config/gameConfig";
-import type { CropId, BaleProduct } from "../config/gameConfig";
+import type { CropId, BaleProduct, SilageProduct } from "../config/gameConfig";
 import type { SimTime } from "./clock";
 import { minutesPerMonth, dateOf, MONTHS_PER_YEAR } from "./calendar";
 import type { SaveState, Field, FieldStatus } from "../state/saveState";
@@ -56,6 +56,150 @@ const SQUARE_OF: Partial<Record<BaleProduct, BaleProduct>> = {
   alfalfaHay: "alfalfaHaySquare",
   straw: "strawSquare",
 };
+
+/**
+ * The WRAPPED (baleage) twin of each product (2026-07-31, silage Phase 1).
+ *
+ * Deliberately only the two ROUND forage products. Straw is dry residue with
+ * nothing to ferment — wrapping it just makes an expensive wet bale — and corn
+ * stover is legacy. Squares are excluded because wrapping one needs a tube
+ * wrapper, a different machine from the round-bale wrapper this ships; a
+ * square-baled field simply can't make baleage, which is a real constraint and
+ * keeps the baler choice meaningful.
+ *
+ * A product missing from this table is one that can never be wrapped.
+ */
+const BALEAGE_OF: Partial<Record<BaleProduct, BaleProduct>> = {
+  hay: "hayBaleage",
+  alfalfaHay: "alfalfaBaleage",
+};
+
+/** The baleage this product becomes when wrapped, or undefined if it can't be
+ * (straw, stover, and every square bale). */
+export function baleageProductFor(product: BaleProduct): BaleProduct | undefined {
+  return BALEAGE_OF[product];
+}
+
+/** Is this product already sealed in plastic? Wrapped bales barely spoil — see
+ * `forage.wrappedSpoilPctPerMonth` and `tickBaleSpoilage`. */
+export function isWrappedProduct(product: BaleProduct): boolean {
+  return gameConfig.baleProducts[product].wrapped === true;
+}
+
+/**
+ * Can this field's bales still be wrapped into baleage?
+ *
+ * THE SAME-MONTH RULE (maintainer decision, 2026-07-31): baleage has to be
+ * sealed while the forage is fresh, so a wrap pass only works on bales dropped
+ * in the SAME CALENDAR MONTH. Let the month turn and they've dried out — they
+ * stay hay for good, and no wrapper will ever take them. It's the whole timing
+ * mechanic of the feature, deliberately kept to one rule rather than a moisture
+ * model, and it's what a combi baler exists to make impossible to lose.
+ *
+ * Bales with no `baledAt` (legacy saves) are treated as too old to wrap: the
+ * conservative answer, and it can't retroactively upgrade an old save's hay.
+ */
+export function canWrapBales(field: Field, now: SimTime): boolean {
+  if (!field.baleLocations?.length) return false;
+  const product = field.baleProduct;
+  if (!product || !baleageProductFor(product)) return false;
+  if (field.baledAt === undefined) return false;
+  const baled = dateOf(field.baledAt);
+  const today = dateOf(now);
+  return baled.year === today.year && baled.month === today.month;
+}
+
+// ---------------------------------------------------------------------------
+// CHOPPED SILAGE (2026-07-31, Phases 2–3)
+// ---------------------------------------------------------------------------
+
+/** The silage this field would chop into, or undefined if the crop has no
+ * silage route (soybeans, canola, the small grains). */
+export function silageProductForField(field: Field): SilageProduct | undefined {
+  const crop = field.crop ?? field.lastCrop;
+  return crop ? gameConfig.crops[crop].silageProduct : undefined;
+}
+
+/** Can this crop be chopped at all? */
+export function cropMakesSilage(crop?: CropId): boolean {
+  return !!crop && gameConfig.crops[crop].silageProduct !== undefined;
+}
+
+/**
+ * An annual crop with no combine route at all — its whole plant only ever
+ * leaves as chopped silage (Forage, 2026-08-12). The crop choice IS the
+ * timing/route choice, made once at planting via `growMonths` and
+ * `producesGrain: false` — there's no in-season toggle to check, unlike a
+ * perennial's bale-vs-chop cutting (`FieldPlan.silage`, still a real
+ * per-cutting choice — see `canChopField`).
+ */
+export function isChopOnlyCrop(crop?: CropId): boolean {
+  return !!crop && !isPerennial(crop) && gameConfig.crops[crop].producesGrain === false;
+}
+
+/**
+ * AS-FED tons of silage per acre for this field, productivity included.
+ *
+ * Deliberately NOT derived from `trueYieldTonsPerAcre`: that number is the
+ * GRAIN yield, and silage is the whole plant at ~35–40% moisture, so the two
+ * aren't convertible by any constant a player could reason about. The config
+ * carries the silage figure directly (`CropConfig.silageTonsPerAcre`) and the
+ * same productivity multiplier scales it, so fertilizer and rotation still pay
+ * off exactly as they do on grain.
+ */
+export function silageTonsPerAcreFor(field: Field, now: SimTime): number {
+  const crop = field.crop ?? field.lastCrop;
+  const base = crop ? gameConfig.crops[crop].silageTonsPerAcre : undefined;
+  if (!base) return 0;
+  // A perennial reads the snapshot taken at mow time (the cutting taper), the
+  // same way baling does; an annual has none and uses the live value.
+  const boost = field.lastCutProductivity ?? productivityMultiplier(field, now);
+  return base * boost;
+}
+
+/**
+ * Chopping-complete effect. Which crop it was decides how much this resembles
+ * a harvest or a bale run:
+ *
+ *  - ANNUAL (corn): the whole plant leaves the field. The crop is cleared like
+ *    a harvest, and — unlike one — there is NO residue behind it, so the field
+ *    goes straight to stubble with nothing to rake, bale or mulch.
+ *  - PERENNIAL (grass/alfalfa): the cut material is chopped instead of raked
+ *    and baled, so the stand simply regrows, exactly as it does after baling.
+ */
+export function applyChopDone(field: Field): void {
+  field.lastCutProductivity = undefined; // consumed by this chop
+  field.forageReady = undefined;
+  field.windrowed = undefined;
+  if (isPerennial(field.crop)) {
+    field.status = "growing";
+    return;
+  }
+  field.lastCrop = field.crop;
+  field.crop = undefined;
+  field.plantedAt = undefined;
+  field.trueYieldTonsPerAcre = undefined;
+  field.harvestedAcres = undefined;
+  field.fertilized = undefined;
+  field.weeded = undefined;
+  field.weedy = undefined;
+  // Nothing left on the ground: the chopper took stalk and all. No residue
+  // means no mulch bonus is owed and no bale run is possible.
+  field.residueBaled = true;
+  field.status = "stubble";
+}
+
+/** Wrapping-complete effect: every bale lying in the field becomes baleage.
+ * The COUNT is untouched — wrapping seals the bales that are already there, it
+ * doesn't make new ones (only a baler decides how many come off an acre). */
+export function applyWrapDone(field: Field): void {
+  const product = field.baleProduct;
+  const wrapped = product ? baleageProductFor(product) : undefined;
+  if (!wrapped) return;
+  field.baleProduct = wrapped;
+  // The window is spent: these are sealed now, so nothing can re-wrap them.
+  field.baledAt = undefined;
+}
 
 /** Weight of one bale of `product`, tons. Square bales are heavier than round
  * ones, which is the whole reason fewer of them come off an acre — so anything
@@ -251,12 +395,20 @@ export function applyHarvestDone(field: Field): void {
  * clean/mulched. The bales themselves were dropped one at a time by the baler as
  * it worked (see `tasks.ts`) into `field.baleLocations`, and stay there until
  * sold — so this only settles the field status/flags. */
-export function applyBaleDone(field: Field, square = false): void {
+export function applyBaleDone(field: Field, square = false, now?: SimTime, wrapping = false): void {
   // Record what the bales are (drives sale price + marker tint) while the crop
   // is still readable — for perennials it stays set, for corn it's already
   // cleared so this resolves to corn stover. `square` comes from the baler that
   // actually did the work (2026-07-24).
-  field.baleProduct = baleProductForField(field, square);
+  const round = baleProductForField(field, square);
+  // A COMBI baler seals as it rolls (2026-07-31), so its bales land as baleage
+  // with no separate pass and no window to miss. On anything it can't wrap
+  // (straw, squares) it just behaves like the round baler it also is.
+  const wrapped = wrapping ? baleageProductFor(round) : undefined;
+  field.baleProduct = wrapped ?? round;
+  // Start the wrapping window — but only on bales that could still use it.
+  // Already-wrapped bales have nothing to time (see `canWrapBales`).
+  field.baledAt = wrapped ? undefined : now;
   field.forageReady = undefined;
   field.windrowed = undefined;
   field.lastCutProductivity = undefined; // consumed by this bale run

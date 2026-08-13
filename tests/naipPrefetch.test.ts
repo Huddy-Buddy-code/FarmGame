@@ -1,9 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   lngLatTo3857, tilesForLngLatBbox, tilesNearPoints, countyPrefetchPlan, runPrefetch,
-  COUNTY_ZOOMS, ASSET_ZOOMS, ASSET_RADIUS_M, MAX_PLAN_TILES,
+  viewportPrefetchPlan, COUNTY_ZOOMS, ASSET_ZOOMS, ASSET_RADIUS_M, MAX_PLAN_TILES,
+  VIEWPORT_MIN_ZOOM, VIEWPORT_PLAN_CAP,
 } from "../src/map/naipPrefetch";
-import { configureNaipCache, memoryTileStore, tileKey } from "../src/map/tileCache";
+import { configureNaipCache, memoryTileStore, tileKey, TILE_MAXZOOM } from "../src/map/tileCache";
 
 // Story County-ish extents.
 const storyBbox: [number, number, number, number] = [-93.7, 41.86, -93.23, 42.21];
@@ -55,6 +56,16 @@ describe("prefetch tile enumeration", () => {
     // No duplicates in the output.
     expect(new Set(duo.map(tileKey)).size).toBe(duo.length);
   });
+
+  it("ASSET_ZOOMS is contiguous 14..TILE_MAXZOOM — no gap if TILE_MAXZOOM changes", () => {
+    // Regression: a hardcoded [14, 15, 16, TILE_MAXZOOM] silently skipped z17
+    // once TILE_MAXZOOM moved from 17 to 18 (2026-08-12) — nothing would have
+    // caught that but this test.
+    expect(ASSET_ZOOMS).toEqual(
+      Array.from({ length: TILE_MAXZOOM - 13 }, (_, i) => 14 + i),
+    );
+    expect(ASSET_ZOOMS[ASSET_ZOOMS.length - 1]).toBe(TILE_MAXZOOM);
+  });
 });
 
 describe("countyPrefetchPlan", () => {
@@ -83,7 +94,7 @@ describe("countyPrefetchPlan", () => {
 describe("runPrefetch", () => {
   it("fetches every planned tile once; a re-run is all warm hits", async () => {
     const { fetchFn, calls } = countingFetch();
-    configureNaipCache({ imageServer: "https://x/Img", fetchFn, store: memoryTileStore() });
+    configureNaipCache({ fetchFn, store: memoryTileStore() });
     const tiles = tilesForLngLatBbox(storyBbox, 11);
     const first = await runPrefetch(tiles, { concurrency: 3 });
     expect(first.fetched).toBe(tiles.length);
@@ -98,7 +109,7 @@ describe("runPrefetch", () => {
 
   it("counts failures instead of throwing (a miss stays a live fetch later)", async () => {
     const { fetchFn } = countingFetch(false);
-    configureNaipCache({ imageServer: "https://x/Img", fetchFn, store: memoryTileStore() });
+    configureNaipCache({ fetchFn, store: memoryTileStore() });
     const tiles = tilesForLngLatBbox(storyBbox, 10);
     const res = await runPrefetch(tiles);
     expect(res.failed).toBe(tiles.length);
@@ -107,11 +118,49 @@ describe("runPrefetch", () => {
 
   it("reports progress up to the total", async () => {
     const { fetchFn } = countingFetch();
-    configureNaipCache({ imageServer: "https://x/Img", fetchFn, store: memoryTileStore() });
+    configureNaipCache({ fetchFn, store: memoryTileStore() });
     const tiles = tilesForLngLatBbox(storyBbox, 11);
     const seen: number[] = [];
     await runPrefetch(tiles, { concurrency: 2, onProgress: (done) => seen.push(done) });
     expect(seen).toHaveLength(tiles.length);
     expect(seen[seen.length - 1]).toBe(tiles.length);
+  });
+
+  it("a re-run under a different provider re-fetches instead of false-hitting the other provider's cache", async () => {
+    const { fetchFn, calls } = countingFetch();
+    configureNaipCache({ fetchFn, store: memoryTileStore() });
+    const tiles = tilesForLngLatBbox(storyBbox, 12);
+    const first = await runPrefetch(tiles, { provider: "usda-apfo" });
+    expect(first.fetched).toBe(tiles.length);
+    const second = await runPrefetch(tiles, { provider: "usgs-naip" });
+    expect(second.fetched).toBe(tiles.length); // NOT cached — different provider, different bytes
+    expect(second.cached).toBe(0);
+    expect(calls).toHaveLength(tiles.length * 2);
+  });
+});
+
+describe("viewportPrefetchPlan", () => {
+  const smallView: [number, number, number, number] = [-93.63, 42.02, -93.61, 42.04]; // ~2km around Ames
+
+  it("no-ops below VIEWPORT_MIN_ZOOM — county-wide prefetch already covers those zooms", () => {
+    expect(viewportPrefetchPlan(smallView, VIEWPORT_MIN_ZOOM - 1)).toEqual([]);
+  });
+
+  it("covers MORE than the bare viewport — buffered so cache stays ahead of a continuing pan", () => {
+    const bare = tilesForLngLatBbox(smallView, VIEWPORT_MIN_ZOOM);
+    const buffered = viewportPrefetchPlan(smallView, VIEWPORT_MIN_ZOOM);
+    for (const t of bare) expect(buffered.map(tileKey)).toContain(tileKey(t));
+    expect(buffered.length).toBeGreaterThan(bare.length);
+  });
+
+  it("clamps a fractional/over-max zoom to an integer at most TILE_MAXZOOM", () => {
+    const overzoomed = viewportPrefetchPlan(smallView, TILE_MAXZOOM + 5.7);
+    const atCeiling = viewportPrefetchPlan(smallView, TILE_MAXZOOM);
+    expect(overzoomed).toEqual(atCeiling);
+  });
+
+  it("caps at VIEWPORT_PLAN_CAP even for a wide viewport", () => {
+    const wide: [number, number, number, number] = [-93.9, 41.8, -93.0, 42.3];
+    expect(viewportPrefetchPlan(wide, TILE_MAXZOOM).length).toBeLessThanOrEqual(VIEWPORT_PLAN_CAP);
   });
 });

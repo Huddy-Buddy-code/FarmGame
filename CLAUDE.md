@@ -4,18 +4,25 @@
 > `PROJECT_BRIEF.md`; session history lives in `STATUS.md`. Read all three at
 > the start of a session.
 
-## Verification: no Browser Preview
+## Verification: Browser Preview is back on (2026-08-12)
 
-Do not use the Browser Preview tool (`preview_start`, `computer`, `read_page`,
-`get_page_text`, `javascript_tool`, etc.) in this project — maintainer
-directive, 2026-07-11, after it repeatedly hung mid-session (NAIP tile fetch
+Browser Preview (`preview_start`, `computer`, `read_page`, `get_page_text`,
+`javascript_tool`, etc.) was banned from 2026-07-11 through 2026-08-12 —
+maintainer directive, after it repeatedly hung mid-session (NAIP tile fetch
 stuck in the sandbox) and burned time/cost on screenshot round-trips before
-that.
+that. Maintainer re-enabled it 2026-08-12.
 
-- Verify changes with `npm run typecheck` and `npm test` only.
-- If a change is genuinely UI/visual and needs eyes on it, say so explicitly
-  and ask the maintainer to check it themselves in their own browser — don't
-  reach for the preview tool as a substitute.
+- Prefer `npm run typecheck` and `npm test` first — they're cheap and catch
+  most regressions — but use Browser Preview to actually verify UI/visual
+  changes (layout, map rendering, calendar interactions) instead of asking
+  the maintainer to eyeball every change themselves.
+- **Known hang risk:** the previous ban was caused by NAIP tile fetches
+  hanging the preview sandbox. If a preview session stalls on a map/imagery
+  load again (not just a slow network tile — an actual non-responding hang),
+  stop, tell the maintainer what triggered it, and fall back to
+  typecheck+test verification for that change rather than burning time
+  retrying. Don't silently re-ban the tool yourself — that's the
+  maintainer's call.
 
 ## Editing this repo
 
@@ -57,3 +64,36 @@ Never put a 1024 px PNG in `src/assets/Equipment/`, and never leave a raw export
 (`ChatGPT Image ….png`) there — every PNG in that directory is globbed into the
 build, and an unparseable name silently registers as a junk sprite entry. Raw
 exports belong in `_drafts/` (gitignored) or `art-source/` under a real name.
+
+## Structure sprites (2026-07-30)
+
+Same pipeline for BUILDINGS, in `src/assets/Structures/` — see that
+directory's `README.md` for the naming table and art direction. Differences
+from the machine sprites:
+
+- **Naming is `<Kind>[_<Size>].png`**, no `sideleft` tag. Buildings have no
+  heading and are never mirrored. Only `Silo` takes a size.
+- **Front/side ELEVATION, base flush to the bottom edge.** Markers anchor at
+  the bottom, so whitespace under the building makes it hover.
+- **Image width = the real footprint width** (`structureWidthM` in
+  `src/field/buildingRender.ts`), which is what keeps a grain bin and a
+  machine shed proportioned against each other on the ground.
+- **No baked drop shadow** — the CSS adds one; a baked one double-darkens.
+
+Art is optional: with no PNG present each kind falls back to the hand-drawn
+SVG in `src/ui/structureIcons.ts`, so the map always renders something.
+
+## Map layers fail silently — validate them
+
+A MapLibre symbol layer with a bad expression, a missing glyph stack, or a
+collision default you didn't intend renders **nothing** and logs **nothing**.
+With Browser Preview off, no other check catches it: the "I only see 1 field
+label" bug (2026-07-30) shipped past a clean typecheck and 733 green tests,
+because `text-allow-overlap` defaults to FALSE and adjacent fields culled each
+other.
+
+So: keep every layer's spec in an exported function (`fieldLabelLayer`,
+`baleSymbolLayer`) and add it to `tests/mapLayers.test.ts`, which runs the real
+`@maplibre/maplibre-gl-style-spec` validator over it and asserts the properties
+that decide whether anything appears. Adding a layer inline in a
+`map.addLayer({...})` call skips that net.

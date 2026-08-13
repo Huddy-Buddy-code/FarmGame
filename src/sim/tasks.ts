@@ -24,14 +24,16 @@ import { gameConfig, SIZE_RANK, FEET_TO_METERS, tonsPerBushel } from "../config/
 // Re-exported: it lives in the config (a pure lookup) so `sim/buildings.ts` can
 // use it without importing this module, which would be a cycle.
 export { tonsPerBushel };
-import type { CropId, EquipmentSize, BaleProduct } from "../config/gameConfig";
+import type { CropId, EquipmentSize, BaleProduct, SilageProduct } from "../config/gameConfig";
 import type { SimTime } from "./clock";
 import type { SaveState, Field, FieldStatus, FarmTask, Agent, Implement, TaskType, FieldPlan, CompletedTask } from "../state/saveState";
 import { dateOf } from "./calendar";
 import { areaAcres, pointInPolygon } from "../geo/geometry";
 import type { Meters } from "../geo/coords";
 import {
-  inPlantingWindow, canPlow, applyPlow, applyPlant, applyHarvestDone, applyBaleDone,
+  inPlantingWindow, canPlow, applyPlow, applyPlant, applyHarvestDone, applyBaleDone, applyWrapDone,
+  canWrapBales, baleageProductFor, isWrappedProduct,
+  applyChopDone, silageProductForField, silageTonsPerAcreFor, cropMakesSilage, isChopOnlyCrop,
   applyMowDone, hasStandingCrop, inWeedingWindow, canFertilizeNow,
   isPerennial, balesPerAcreForField, canSeedPerennial, productivityMultiplier, baleProductForField, baleTonsOf,
 } from "./farming";
@@ -40,6 +42,7 @@ import type { CoveragePath } from "./coverage";
 import {
   nearestFarmYard, nearestSiloForCrop, siloCapacityForCrop,
   nearestBaleStorageFor, haulBalesInto, nearestSellPointFor,
+  silageRoomTons, nearestBunker, storeSilage,
 } from "./buildings";
 import type { Building } from "../state/saveState";
 import { planRoute } from "./roadNet";
@@ -56,11 +59,13 @@ export const TASK_AGENT_KIND: Record<TaskType, Agent["kind"]> = {
   plow: "tractor",
   plant: "tractor",
   harvest: "harvester",
+  chop: "forageHarvester", // the silage counterpart of harvest
   // Perennial forage "harvest" — tractor + Mower, no combine. A Self-Propelled
   // Windrower can take it too (2026-07-24); this table holds the PRIMARY kind,
   // and `agentCanDoTask` is the real gate.
   mow: "tractor",
   mulch: "tractor", // optional post-harvest residue pass — tractor + Mulcher
+  wrap: "tractor", // seals dropped round bales into baleage — tractor + Wrapper
   weed: "tractor",
   fertilize: "tractor",
   rake: "tractor",
@@ -82,7 +87,7 @@ export function initTaskIds(save: SaveState): void {
 
 /** Buyable power units. The Self-Propelled Windrower (2026-07-24) is one:
  * unlike a Mower it is not pulled by anything, it IS the machine. */
-export type EquipmentKind = "tractor" | "harvester" | "windrower";
+export type EquipmentKind = "tractor" | "harvester" | "windrower" | "forageHarvester";
 
 /**
  * Can this machine take this kind of task?
@@ -94,7 +99,26 @@ export type EquipmentKind = "tractor" | "harvester" | "windrower";
  */
 export function agentCanDoTask(agent: Agent, type: TaskType): boolean {
   if (agent.kind === "windrower") return type === "mow";
+  // A chopper does exactly one job (2026-07-31) — it can't plow, cut or
+  // combine anything. Stated here rather than relying on the table so it can
+  // never pick up a `mow` just because a tractor could.
+  if (agent.kind === "forageHarvester") return type === "chop";
   return TASK_AGENT_KIND[type] === agent.kind;
+}
+
+/**
+ * Which head a chopper needs for `crop` (2026-07-31) — the same crop-dependent
+ * shape as `harvestHeaderKind`, and absent from `TASK_IMPLEMENT` for the same
+ * reason.
+ *
+ * Corn (and Forage, its chop-only twin — 2026-08-12) is chopped STANDING,
+ * whole plant, through row units. Grass and alfalfa are mowed and wilted
+ * first, so the chopper picks the windrow up off the ground instead — which
+ * is why haylage still needs the mower, and why a farm that only chops corn
+ * or forage never buys a pickup head.
+ */
+export function chopHeadKind(crop: CropId): ImplementKind {
+  return crop === "corn" || crop === "forage" ? "rowCropHead" : "pickupHead";
 }
 
 /** A windrower carries no implement — it IS the mower — so the implement
@@ -116,6 +140,13 @@ function freeWindrower(save: SaveState): Agent | undefined {
 export type ImplementKind =
   | "plow" | "planter" | "sprayer" | "rake" | "bailer" | "squareBaler" | "grainTrailer"
   | "mower" | "mulcher" | "haySpikes" | "baleTrailer"
+  // Silage Phase 1 (2026-07-31): a wrapper seals dropped round bales into
+  // baleage in a second pass; a combi baler rolls AND seals in one.
+  | "baleWrapper" | "combiBaler"
+  // Silage Phases 2-3: the forage wagon is the chopper's cart (it hitches to a
+  // TRACTOR); the two heads hitch to the CHOPPER, like combine headers, and
+  // which one a job needs depends on the crop — see `chopHeadKind`.
+  | "forageWagon" | "rowCropHead" | "pickupHead"
   // Combine headers (2026-07-24). Unlike every other implement these hitch to a
   // HARVESTER, not a tractor, and which one a job needs depends on the CROP —
   // see `harvestHeaderKind`.
@@ -137,22 +168,54 @@ export function harvestHeaderKind(crop: CropId): ImplementKind {
   return crop === "corn" ? "cornHeader" : "grainHeader";
 }
 
-const EQUIPMENT_NAME: Record<EquipmentKind, string> = { tractor: "Tractor", harvester: "Combine", windrower: "Windrower" };
+const EQUIPMENT_NAME: Record<EquipmentKind, string> = {
+  tractor: "Tractor", harvester: "Combine", windrower: "Windrower", forageHarvester: "Forage Harvester",
+};
 const IMPLEMENT_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake", bailer: "Round Baler",
   grainTrailer: "Grain Trailer", mower: "Mower", mulcher: "Mulcher", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
   cornHeader: "Corn Header", grainHeader: "Grain Header", squareBaler: "Square Baler",
+  baleWrapper: "Bale Wrapper", combiBaler: "Combi Baler",
+  forageWagon: "Forage Wagon", rowCropHead: "Row-Crop Head", pickupHead: "Pickup Head",
 };
+
+/**
+ * Is this field's crop still waiting to be wrapped into baleage?
+ *
+ * True while a wrap task is queued/underway, and also for the gap between the
+ * baler dropping bales and the wrap being queued — otherwise the eager
+ * auto-haul (bales are collectable the moment they land) would carry them off
+ * as hay before the wrapper ever got to them.
+ *
+ * Goes false the instant the same-month window shuts, so a field whose wrap
+ * never happened releases its bales to the haulers instead of stranding them.
+ */
+export function wrapPending(save: SaveState, field: Field, now: SimTime): boolean {
+  if (tasksFor(save, field.id, "wrap").length > 0) return true;
+  if (!activePlan(field).wrap) return false;
+  if (!save.implements.some((i) => i.kind === "baleWrapper")) return false;
+  // `canWrapBales` carries the same-month rule and the product check.
+  // `now` is threaded in rather than read off `save.clock` — that field is a
+  // creation-time placeholder that nothing ever updates, so trusting it would
+  // silently evaluate the whole window against month zero.
+  return canWrapBales(field, now);
+}
 
 /** Both baler kinds. Shape is the KIND now (2026-07-24), not a size tier —
  * which is what lets a Round and a Square baler both be Medium. A bale task
  * takes either, so every "does this rig have a baler" question goes through
  * here rather than naming one. */
-const BALER_KINDS = ["bailer", "squareBaler"] as const;
+const BALER_KINDS = ["bailer", "squareBaler", "combiBaler"] as const;
+const BALER_KIND_SET: ReadonlySet<ImplementKind> = new Set<ImplementKind>(BALER_KINDS);
 
-/** The baler hitched to `agentId`, of either shape. */
+/** Is this implement a baler of any shape (round, square, or combi)? */
+export function isBalerKind(kind: ImplementKind): boolean {
+  return BALER_KIND_SET.has(kind);
+}
+
+/** The baler hitched to `agentId`, of any shape. */
 function attachedBaler(save: SaveState, agentId: string): Implement | undefined {
-  return save.implements.find((i) => i.attachedTo === agentId && (i.kind === "bailer" || i.kind === "squareBaler"));
+  return save.implements.find((i) => i.attachedTo === agentId && isBalerKind(i.kind));
 }
 
 /** Which baler this rig would bale with: the one already hitched, else the best
@@ -173,7 +236,7 @@ const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Med
  * Finance tab's cashflow table). */
 const FIELD_EXPENSE_ITEM: Partial<Record<TaskType, string>> = {
   plow: "Plowing", plant: "Planting", mow: "Mowing", mulch: "Mulching", weed: "Weeding", fertilize: "Fertilizing",
-  rake: "Raking", bale: "Baling", harvest: "Harvesting",
+  rake: "Raking", bale: "Baling", harvest: "Harvesting", wrap: "Wrapping", chop: "Chopping",
 };
 
 /** Which implement kind a task type needs (undefined = none, e.g. harvest).
@@ -182,7 +245,7 @@ const FIELD_EXPENSE_ITEM: Partial<Record<TaskType, string>> = {
  * Queue panel's per-task implement icon (main.ts). */
 export const TASK_IMPLEMENT: Partial<Record<TaskType, ImplementKind>> = {
   plow: "plow", plant: "planter", mow: "mower", mulch: "mulcher", weed: "sprayer", fertilize: "sprayer",
-  rake: "rake", unloadHarvester: "grainTrailer", haulBales: "haySpikes",
+  rake: "rake", unloadHarvester: "grainTrailer", haulBales: "haySpikes", wrap: "baleWrapper",
   // `bale` deliberately has NO fixed entry (2026-07-24): either baler kind can
   // do it, so it's resolved per rig by `balerKindFor` — same treatment as a
   // sell run's product-dependent trailer.
@@ -278,6 +341,11 @@ const IMPLEMENT_CONFIG: Record<ImplementKind, Record<EquipmentSize, { price: num
   rake: gameConfig.equipment.rake,
   bailer: gameConfig.equipment.bailer,
   squareBaler: gameConfig.equipment.squareBaler,
+  baleWrapper: gameConfig.equipment.baleWrapper,
+  combiBaler: gameConfig.equipment.combiBaler,
+  forageWagon: gameConfig.equipment.forageWagon,
+  rowCropHead: gameConfig.equipment.rowCropHead,
+  pickupHead: gameConfig.equipment.pickupHead,
   grainTrailer: gameConfig.equipment.grainTrailer,
   mower: gameConfig.equipment.mower,
   mulcher: gameConfig.equipment.mulcher,
@@ -298,6 +366,49 @@ export function implementPrice(kind: ImplementKind, size: EquipmentSize): number
 function headerKindForTask(save: SaveState, task: FarmTask): ImplementKind | undefined {
   const crop = task.crop ?? save.fields.find((f) => f.id === task.fieldId)?.crop;
   return crop ? harvestHeaderKind(crop) : undefined;
+}
+
+/** The chopper head a chop task needs, from the crop in its field. A perennial
+ * has already been mowed by the time the chopper arrives, so `crop` is still
+ * set on the stand; an annual reads `lastCrop` once cleared. */
+function chopHeadKindForTask(save: SaveState, task: FarmTask): ImplementKind | undefined {
+  const field = save.fields.find((f) => f.id === task.fieldId);
+  const crop = task.crop ?? field?.crop ?? field?.lastCrop;
+  return crop ? chopHeadKind(crop) : undefined;
+}
+
+/**
+ * Should (and can) this field be chopped for silage right now? Requires the
+ * farm to actually be equipped (a chopper, a wagon, the right head) — missing
+ * gear falls back to the grain/hay route rather than stranding the field, the
+ * same "auto-manage never traps" rule the baler already follows.
+ *
+ * TWO different reasons a field can be chop-eligible (2026-08-12):
+ *  - PERENNIAL (grass/alfalfa): chop-vs-bale is a real in-season choice each
+ *    cutting, so the plan's `silage` toggle still decides it.
+ *  - ANNUAL (Forage): the choice was already made at PLANTING — it's a
+ *    separate crop from Corn with no combine route at all
+ *    (`isChopOnlyCrop`) — so it always chops once equipped, no toggle. A
+ *    grain annual (corn, soy, …) has no chop route to opt into any more.
+ */
+export function canChopField(save: SaveState, field: Field): boolean {
+  const crop = field.crop ?? field.lastCrop;
+  if (!cropMakesSilage(crop)) return false;
+  if (isPerennial(crop)) {
+    if (!activePlan(field).silage) return false;
+  } else if (!isChopOnlyCrop(crop)) {
+    return false;
+  }
+  if (!save.agents.some((a) => a.kind === "forageHarvester")) return false;
+  if (!save.implements.some((i) => i.kind === "forageWagon")) return false;
+  return save.implements.some((i) => i.kind === chopHeadKind(crop!));
+}
+
+/** Does the farm own a forage wagon at all? The chopper's hard prerequisite —
+ * it has no tank, so with nothing to unload into it cannot work (maintainer
+ * requirement, 2026-07-31). */
+function farmHasForageWagon(save: SaveState): boolean {
+  return save.implements.some((i) => i.kind === "forageWagon");
 }
 
 /** Working width (meters) of an implement. */
@@ -747,7 +858,9 @@ export function taskCost(field: Field, type: TaskType, crop?: CropId): number {
   if (type === "fertilize") return Math.round(acres * gameConfig.crops[crop ?? field.crop!].fertilizeCostPerAcre);
   if (type === "rake") return Math.round(acres * gameConfig.forage.rakeCostPerAcre);
   if (type === "bale") return Math.round(acres * gameConfig.forage.baleCostPerAcre);
+  if (type === "wrap") return Math.round(acres * gameConfig.forage.wrapCostPerAcre);
   if (type === "harvest") return Math.round(acres * gameConfig.harvestCostPerAcre);
+  if (type === "chop") return Math.round(acres * gameConfig.forage.chopCostPerAcre);
   return 0; // unloadHarvester/haulBales: relays, charged via their own field work
 }
 
@@ -788,8 +901,13 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
       throw new Error(`${gameConfig.crops[crop].name} can't be planted this month`);
     }
   }
-  if (type === "harvest" && eff !== "ready") {
-    throw new Error(`${field.id} isn't ready to harvest yet`);
+  if (type === "harvest") {
+    if (eff !== "ready") throw new Error(`${field.id} isn't ready to harvest yet`);
+    // Forage (2026-08-12): a chop-only crop has no combine route at all —
+    // the whole plant only ever leaves as silage. See `isChopOnlyCrop`.
+    if (isChopOnlyCrop(field.crop)) {
+      throw new Error(`${gameConfig.crops[field.crop!].name} can't be combined — chop it for silage instead`);
+    }
   }
   if (type === "mow") {
     if (!isPerennial(field.crop)) throw new Error(`${field.id} has no perennial forage to mow`);
@@ -829,6 +947,43 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
       throw new Error(`Rake ${field.id} first — the baler follows the rake`);
     }
   }
+  if (type === "chop") {
+    const crop = field.crop ?? field.lastCrop;
+    if (!cropMakesSilage(crop)) {
+      throw new Error(`${crop ? gameConfig.crops[crop].name : field.id} can't be chopped for silage`);
+    }
+    if (isPerennial(field.crop)) {
+      // A perennial is chopped off the windrow, so it follows the mow exactly
+      // as a bale run does — the chopper wears a pickup head, not a mower.
+      if (field.status !== "harvested" || !field.forageReady) {
+        throw new Error(`Mow ${field.id} first — the chopper picks the windrow up`);
+      }
+    } else if (effectiveStatus(save, field) !== "ready") {
+      throw new Error(`${field.id} isn't ready to chop yet`);
+    }
+    if (!save.implements.some((i) => i.kind === "forageWagon")) {
+      throw new Error(`A Forage Wagon is needed — a chopper has no tank and can't work without one`);
+    }
+  }
+  if (type === "wrap") {
+    // The same-month window (see `canWrapBales`) is checked HERE, at queue
+    // time, rather than only on completion — a wrap that could never convert
+    // anything must not be startable at all, or the player pays for plastic and
+    // a pass and gets hay back.
+    if (!field.baleLocations?.length) {
+      throw new Error(`${field.id} has no bales to wrap`);
+    }
+    const product = field.baleProduct;
+    if (product && isWrappedProduct(product)) {
+      throw new Error(`${field.id}'s bales are already wrapped`);
+    }
+    if (product && !baleageProductFor(product)) {
+      throw new Error(`${gameConfig.baleProducts[product].name} can't be wrapped — only round grass or alfalfa bales make baleage`);
+    }
+    if (!canWrapBales(field, now)) {
+      throw new Error(`${field.id}'s bales are too old to wrap — baleage has to be sealed the same month it's baled`);
+    }
+  }
   const cost = taskCost(field, type, crop);
   if (cost > save.money) {
     throw new InsufficientFundsError(cost, save.money);
@@ -853,8 +1008,10 @@ export function enqueueTask(save: SaveState, field: Field, type: TaskType, now: 
   return task;
 }
 
-/** Cancel a still-QUEUED task, refunding what was paid. Active tasks (an agent
- * is on-site working) can't be canceled in v1. */
+/** Cancel a still-QUEUED task, refunding what was paid. For an ACTIVE task
+ * (an agent is already on-site/underway) see `forceCancelActiveTask` below —
+ * a different tool for a different job: this is a normal "changed my mind"
+ * cancel, that one's an emergency unstick with no refund. */
 export function cancelTask(save: SaveState, taskId: string): FarmTask {
   const idx = save.tasks.findIndex((t) => t.id === taskId);
   if (idx === -1) throw new Error(`Task ${taskId} not found`);
@@ -867,6 +1024,89 @@ export function cancelTask(save: SaveState, taskId: string): FarmTask {
   save.money += task.costPaid;
   recordCash(save, "fieldExpenses", FIELD_EXPENSE_ITEM[task.type] ?? "Other", task.costPaid);
   recordFieldCash(save, task.fieldId, "expenses", FIELD_EXPENSE_ITEM[task.type] ?? "Other", task.costPaid);
+  return task;
+}
+
+/** Detach every agent working `task` (its own `agentId` plus, for a bale
+ * relay, `trailerAgentId`) and drop whatever route it was driving — shared
+ * by both force-cancel and restart below. Matched by `taskId` rather than by
+ * name because that's how the sim itself links an agent to its job. */
+function freeTaskAgents(save: SaveState, task: FarmTask): void {
+  for (const a of save.agents) {
+    if (a.taskId === task.id) {
+      a.taskId = undefined;
+      a.state = "idle";
+      clearAgentRoute(a.id);
+    }
+  }
+}
+
+/**
+ * Force-cancel an ACTIVE task — the escape hatch for a task visibly wedged
+ * by a bug (bad pathing, a relay stuck on a phase that never resolves) that
+ * reloading the page doesn't clear, since save state is exactly what's
+ * broken. Removes the task outright and frees every agent on it so they're
+ * immediately available for other work. No refund: real time (and for a
+ * plow/plant task, real money already spent on it) may already be sunk into
+ * it, and this is an emergency exit, not a normal `cancelTask`.
+ *
+ * Also cascades to any unloadHarvester relay that was servicing THIS task's
+ * agent (a harvest/chop task's combine/chopper) — a relay left chasing a
+ * machine that's just gone idle would only end up stuck itself, defeating
+ * the point.
+ */
+export function forceCancelActiveTask(save: SaveState, taskId: string): FarmTask {
+  const task = save.tasks.find((t) => t.id === taskId);
+  if (!task) throw new Error(`Task ${taskId} not found`);
+  if (task.status !== "active") throw new Error(`${task.type} isn't active — use Cancel instead`);
+  save.tasks.splice(save.tasks.indexOf(task), 1);
+  freeTaskAgents(save, task);
+  clearTaskRuntime(task.id);
+  for (const relay of save.tasks.filter((t) => t.type === "unloadHarvester" && t.harvesterAgentId === task.agentId)) {
+    save.tasks.splice(save.tasks.indexOf(relay), 1);
+    freeTaskAgents(save, relay);
+    clearTaskRuntime(relay.id);
+  }
+  return task;
+}
+
+/**
+ * Restart an ACTIVE task IN PLACE — for when it's visibly wedged (agent
+ * parked, no progress, a relay stuck "waiting" on something that never
+ * resolves) but you'd rather it just pick back up than lose the job and its
+ * spot in line. Wipes every piece of cached/decided runtime state (coverage
+ * path + distance, relay phase, bale-tie tracking, staging gate, rendezvous
+ * point, locked haul/unload destination) so the task's own tick logic
+ * re-derives all of it from current reality next tick, instead of whatever
+ * it was wedged on — every phase field here has a documented "undefined ⇒
+ * start fresh" fallthrough in the tick loop (see e.g. the unloadPhase chain).
+ *
+ * This is NOT a partial-progress-preserving retry: clearing the cached
+ * coverage path resets `doneAcres` too (the tick loop derives it from
+ * distance along that path, not an independent counter) — ground already
+ * covered stays visually painted, but the task re-walks from the start.
+ * Deliberate: if the corrupted path/distance IS the bug, keeping either one
+ * would just reproduce the same stuck state.
+ */
+export function restartActiveTask(save: SaveState, taskId: string): FarmTask {
+  const task = save.tasks.find((t) => t.id === taskId);
+  if (!task) throw new Error(`Task ${taskId} not found`);
+  if (task.status !== "active") throw new Error(`${task.type} isn't active — nothing to restart`);
+  clearTaskRuntime(taskId);
+  task.doneAcres = 0;
+  task.unloadPhase = undefined;
+  task.phaseTimer = undefined;
+  task.waitingForSilo = undefined;
+  task.unloadDest = undefined;
+  task.haulPhase = undefined;
+  task.trailerPhase = undefined;
+  task.trailerTimer = undefined;
+  task.waitingForStorage = undefined;
+  task.haulDest = undefined;
+  task.trailerDest = undefined;
+  task.sellPhase = undefined;
+  if (task.agentId) clearAgentRoute(task.agentId);
+  if (task.trailerAgentId) clearAgentRoute(task.trailerAgentId);
   return task;
 }
 
@@ -897,6 +1137,20 @@ export function reorderTask(save: SaveState, taskId: string, beforeTaskId: strin
  * assigned yet — estimate off a nominal (currently owned, or medium default)
  * implement width, ignoring headland turns.
  */
+/** Working width (ft) for a QUEUED chop task, before any agent/head is
+ * attached yet. Mirrors `taskSwathMeters`'s chop branch (the owned head's
+ * width, falling back to the windrow it'll pick up, then a nominal rake) but
+ * reads the farm's owned implement rather than one hitched to an agent —
+ * a queued task has no agent to hitch one to yet. */
+function queuedChopWidthFt(save: SaveState, field: Field, task: FarmTask): number {
+  const crop = task.crop ?? field.crop ?? field.lastCrop;
+  const headKind = crop ? chopHeadKind(crop) : undefined;
+  const head = headKind ? save.implements.find((i) => i.kind === headKind) : undefined;
+  if (head) return IMPLEMENT_CONFIG[headKind!][head.size].widthFt;
+  if (field.windrowWidthM) return field.windrowWidthM / FEET_TO_METERS;
+  return IMPLEMENT_CONFIG.rake.medium.widthFt;
+}
+
 export function estimateTaskHours(save: SaveState, task: FarmTask): number {
   // Not an acres-based job — point-to-point hauling, no coverage path/width.
   // The UI shows its own phase text instead of an acres/hours estimate.
@@ -932,11 +1186,13 @@ export function estimateTaskHours(save: SaveState, task: FarmTask): number {
     ? (field.windrowWidthM ?? IMPLEMENT_CONFIG.rake.medium.widthFt * FEET_TO_METERS) / FEET_TO_METERS
     : task.type === "harvest"
       ? gameConfig.equipment.harvester[nominalHarvesterSize].widthFt
-      : windrowerTakesIt
-        ? gameConfig.equipment.windrower.widthFt
-        : (save.implements.find((i) => i.kind === kind)?.size
-            ? IMPLEMENT_CONFIG[kind!][save.implements.find((i) => i.kind === kind)!.size].widthFt
-            : IMPLEMENT_CONFIG[kind!].medium.widthFt);
+      : task.type === "chop"
+        ? queuedChopWidthFt(save, field, task)
+        : windrowerTakesIt
+          ? gameConfig.equipment.windrower.widthFt
+          : (save.implements.find((i) => i.kind === kind)?.size
+              ? IMPLEMENT_CONFIG[kind!][save.implements.find((i) => i.kind === kind)!.size].widthFt
+              : IMPLEMENT_CONFIG[kind!].medium.widthFt);
   const widthM = widthFt * FEET_TO_METERS;
   const rateAcresPerHr = (speedMPerHr * widthM) / ACRE_M2;
   return rateAcresPerHr > 0 ? remainingAcres / rateAcresPerHr : 0;
@@ -1021,6 +1277,22 @@ function isStartable(task: FarmTask, field: Field): boolean {
   // field STATUS doesn't matter (bales sit on a mulched/re-plowed field the
   // same way). If they're all gone (sold, or already hauled), it's moot.
   if (task.type === "haulBales") return (field.baleLocations?.length ?? 0) > 0;
+  // Wrap: same rule, and for the same reason. Baling settles a field to
+  // "mulched" (or back to "growing" on a perennial) BEFORE the wrapper runs,
+  // so gating on status would leave every wrap task queued forever — which is
+  // exactly what falling through to the harvest default below did.
+  if (task.type === "wrap") return (field.baleLocations?.length ?? 0) > 0;
+  // CHOP has two shapes, matching what it replaces (2026-07-31):
+  //   - an ANNUAL (corn) is chopped standing, so it waits for "ready" exactly
+  //     like the combine pass it stands in for;
+  //   - a PERENNIAL is chopped off the windrow, so it waits for the mow and
+  //     the rake, exactly like the bale run it stands in for.
+  if (task.type === "chop") {
+    if (isPerennial(field.crop)) {
+      return field.status === "harvested" && (!!field.windrowed || !!field.forageReady);
+    }
+    return field.status === "ready";
+  }
   return field.status === "ready"; // harvest
 }
 
@@ -1036,9 +1308,11 @@ function taskFieldSpeedKmh(type: TaskType, agent?: Agent): number {
   if (agent?.kind === "windrower") return gameConfig.work.windrowerSpeedKmh;
   if (type === "rake") return gameConfig.forage.rakeSpeedKmh;
   if (type === "bale") return gameConfig.forage.baleSpeedKmh;
+  if (type === "wrap") return gameConfig.forage.wrapSpeedKmh;
   // The heavy passes got their own speeds 2026-07-24 — the shared default is
   // tuned for planting and spraying and was roughly double a real combine.
   if (type === "harvest") return gameConfig.work.harvestSpeedKmh;
+  if (type === "chop") return gameConfig.forage.chopSpeedKmh;
   if (type === "plow") return gameConfig.work.plowSpeedKmh;
   return gameConfig.work.fieldSpeedKmh;
 }
@@ -1094,7 +1368,25 @@ function taskSwathMeters(save: SaveState, task: FarmTask, agent: Agent): number 
   // swallows a windrow, so the ground it clears per pass is whatever laid that
   // windrow down — the rake, or the combine header on straw (which skips the
   // rake). The field carries the answer; see `Field.windrowWidthM`.
-  if (task.type === "bale") {
+  //
+  // A WRAPPER (2026-07-31) is the same case for the same reason: it works the
+  // bale line the baler just laid, and its own `widthFt` is 0. Leaving it to
+  // fall through to the generic branch below gave a swath of ZERO — a
+  // degenerate coverage path the task could never finish driving.
+  // A CHOPPER's width is its HEAD's, exactly like a combine's — except a
+  // pickup head has none of its own (it follows the windrow the mower left),
+  // so that case falls through to the windrow rule below.
+  if (task.type === "chop") {
+    const crop = task.crop ?? save.fields.find((f) => f.id === task.fieldId)?.crop
+      ?? save.fields.find((f) => f.id === task.fieldId)?.lastCrop;
+    const head = crop ? attachedImplement(save, agent.id, chopHeadKind(crop)) : undefined;
+    const w = head ? implementWidthM(head) : 0;
+    if (w > 0) return w;
+    const field = save.fields.find((f) => f.id === task.fieldId);
+    if (field?.windrowWidthM) return field.windrowWidthM;
+    return IMPLEMENT_CONFIG.rake.medium.widthFt * FEET_TO_METERS;
+  }
+  if (task.type === "bale" || task.type === "wrap") {
     const field = save.fields.find((f) => f.id === task.fieldId);
     if (field?.windrowWidthM) return field.windrowWidthM;
     // Nothing recorded (a legacy save, or a field hand-set up in a test) —
@@ -1480,6 +1772,50 @@ function ensureUnloadTask(save: SaveState, harvester: Agent, fieldId: string, cr
 }
 
 /**
+ * The silage twin of `ensureUnloadTask` (2026-07-31): make sure a chopper with
+ * material aboard has a forage wagon coming, and crew it if anything's free.
+ *
+ * Simpler than the grain version on purpose. A chopper's buffer is two tons,
+ * so it is ALWAYS effectively full while it works — the "has it got enough to
+ * be worth a trip" reasoning the grain path does is meaningless here. What
+ * matters is that a wagon exists and is on its way, because without one the
+ * machine is stopped.
+ */
+function ensureSilageHaul(
+  save: SaveState,
+  chopper: Agent,
+  fieldId: string,
+  product: SilageProduct,
+  events?: TaskEvent[],
+): void {
+  const trips = save.tasks.filter((t) => t.type === "unloadHarvester" && t.harvesterAgentId === chopper.id);
+  let task = trips.find((t) => !t.agentId);
+  // Same crew rules as the grain cart: the first trip always exists so a wagon
+  // bought later has something to pick up; extra trips only spawn when there's
+  // actually a free rig, so the queue never fills with uncrewed ghosts.
+  const canGrow =
+    trips.length === 0 ||
+    (trips.length < gameConfig.hauling.maxCrewSize && hasFreeCartTractor(save, "forageWagon"));
+  if (!task && canGrow) {
+    task = {
+      id: `task-${++taskSeq}`,
+      type: "unloadHarvester",
+      fieldId,
+      totalAcres: 1,
+      doneAcres: 0,
+      status: "queued",
+      costPaid: 0,
+      harvesterAgentId: chopper.id,
+      unloadPhase: "toHarvester",
+      cargoKind: "silage",
+      silageProduct: product,
+    };
+    save.tasks.push(task);
+  }
+  if (task && events) assignGrainCart(save, task, events);
+}
+
+/**
  * Could another bale hauler usefully be put on this field? Bales on the ground,
  * and room in the crew for one more (`gameConfig.hauling.maxCrewSize`).
  *
@@ -1506,10 +1842,17 @@ export function fieldHasLooseBales(save: SaveState, fieldId: string): boolean {
  * Hay-Spikes tractor picks it up via the generic assignment loop (and pulls in
  * a Bale-Trailer helper there if one's idle). Returns the task, or undefined if
  * there was nothing to haul / one's already going. */
-export function queueHaulBales(save: SaveState, fieldId: string): FarmTask | undefined {
+export function queueHaulBales(save: SaveState, fieldId: string, now: SimTime): FarmTask | undefined {
   const field = save.fields.find((f) => f.id === fieldId);
   const bales = field?.baleLocations?.length ?? 0;
   if (!field || bales <= 0) return undefined;
+  // WRAP BEFORE YOU HAUL (2026-07-31). Bales are collectable the instant they
+  // hit the ground, so without this the haulers would carry a field's bales off
+  // to storage as plain hay while the wrap that was going to turn them into
+  // baleage still hadn't run — and once they're in a store there is no wrapping
+  // them. Hold the haul until the field's bales are sealed (or the window has
+  // closed and there's nothing left to wait for).
+  if (wrapPending(save, field, now)) return undefined;
   // A CREW of haulers on one field (maintainer request, 2026-07-23), spawned as
   // parallel tasks so each keeps its own independent collect/haul brain rather
   // than one task juggling several machines. Three gates, all of which have to
@@ -1687,6 +2030,77 @@ function finishHaul(save: SaveState, task: FarmTask, agent: Agent, events: TaskE
  * offload for cash (maintainer request, 2026-07-20 — so a cart doesn't stall at
  * a full silo mid-harvest). `undefined` when neither is available (cart waits,
  * ⚠️). Mirrors `chooseBaleDest`. */
+// ---------------------------------------------------------------------------
+// RELAY POLYMORPHISM (2026-07-31, silage Phase 2)
+//
+// `unloadHarvester` serves BOTH harvest chains. The phases — onloading →
+// staging → toSilo → dumping — are identical whether a cart is taking grain
+// from a combine to a silo or a wagon is taking chopped forage from a chopper
+// to a bunker, and forking them would have meant duplicating the trickiest
+// loop in the sim (the one that already produced the 2026-07-25 deadlock).
+//
+// So the four things that genuinely differ are isolated here, and the loop
+// itself asks these rather than naming grain. `task.cargoKind` is absent on
+// every task in an existing save, and absent means grain.
+// ---------------------------------------------------------------------------
+
+/** Is this relay trip hauling chopped silage rather than grain? */
+export function isSilageRun(task: FarmTask): boolean {
+  return task.cargoKind === "silage";
+}
+
+/** Which trailer this trip needs. */
+export function relayTrailerKind(task: FarmTask): ImplementKind {
+  return isSilageRun(task) ? "forageWagon" : "grainTrailer";
+}
+
+/** How much that trailer can carry on this trip, TONS. Grain converts through
+ * the crop's test weight (a trailer is a fixed VOLUME); a forage wagon is
+ * rated in tons outright. */
+function relayCapacityTons(trailer: Implement, task: FarmTask): number {
+  if (isSilageRun(task)) return gameConfig.equipment.forageWagon[trailer.size].capacityTons;
+  return grainTrailerCapacityTons(trailer.size, task.crop);
+}
+
+/** Where a loaded trailer should head: its store if there's room, else a Sell
+ * Point, else nowhere (the caller waits, and the UI reports it). */
+function chooseRelayDest(save: SaveState, task: FarmTask, from: Meters): { pos: Meters; sell: boolean } | undefined {
+  if (isSilageRun(task)) {
+    if (silageRoomTons(save) > 1e-9) {
+      const bunker = nearestBunker(save, from);
+      if (bunker) return { pos: bunker.pos, sell: false };
+    }
+    const sellPt = nearestSellPointFor(save, from);
+    if (sellPt) return { pos: sellPt.pos, sell: true };
+    return undefined;
+  }
+  const crop = task.crop ?? "corn";
+  return chooseGrainDest(save, crop, from);
+}
+
+/** Tip a load into storage. Returns the tons ACCEPTED — a partial accept means
+ * the store filled mid-dump and the rest needs rerouting. */
+function depositRelayLoad(save: SaveState, task: FarmTask, trailer: Implement, tons: number): number {
+  if (isSilageRun(task)) {
+    return storeSilage(save, task.silageProduct ?? "cornSilage", tons);
+  }
+  const crop = trailer.cargoCrop!;
+  const room = Math.max(0, siloCapacityForCrop(save, crop) - save.grain[crop]);
+  const amount = Math.min(room, tons);
+  save.grain[crop] += amount;
+  return amount;
+}
+
+/** Sell a load on the spot at a Sell Point — the fallback when storage is
+ * full or missing. */
+function sellRelayLoad(save: SaveState, task: FarmTask, trailer: Implement, tons: number, now: SimTime): void {
+  if (isSilageRun(task)) {
+    sellHauledSilage(save, task.silageProduct ?? "cornSilage", tons, now);
+    return;
+  }
+  sellHauledGrain(save, trailer.cargoCrop!, tons, now);
+}
+
 function chooseGrainDest(save: SaveState, crop: CropId, from: Meters): { pos: Meters; sell: boolean } | undefined {
   const room = siloCapacityForCrop(save, crop) - save.grain[crop];
   if (room > 1e-9) {
@@ -1703,6 +2117,24 @@ function chooseGrainDest(save: SaveState, crop: CropId, from: Meters): { pos: Me
  * as selling from a silo; recorded so it shows in the Completed list + cashflow.
  * (Per-field revenue is already booked at harvest time — no field attribution
  * happens here.) */
+/** The silage counterpart: tip a wagon-load at a Sell Point for cash when the
+ * bunkers are full or the farm has none (2026-07-31). Flat per-ton price. */
+function sellHauledSilage(save: SaveState, product: SilageProduct, tons: number, now: SimTime): void {
+  if (tons <= 1e-9) return;
+  const cfg = gameConfig.silageProducts[product];
+  const revenue = Math.round(tons * cfg.pricePerTon);
+  save.money += revenue;
+  recordCash(save, "cropRevenue", cfg.name, revenue);
+  appendCompletedTask(save, {
+    id: `sale-${++taskSeq}`,
+    type: "sellGrain",
+    label: cfg.name,
+    tons,
+    revenue,
+    completedAt: now,
+  });
+}
+
 function sellHauledGrain(save: SaveState, crop: CropId, tons: number, now: SimTime): void {
   if (tons <= 1e-9) return;
   const unit = grainUnitPrice(crop, monthOf(now));
@@ -1929,9 +2361,9 @@ function activeCartTaskFor(save: SaveState, harvesterId: string): FarmTask | und
 
 /** Is there an idle tractor that could take a Grain Trailer right now? Gates
  * growing a cart crew — see `ensureUnloadTask`. */
-function hasFreeCartTractor(save: SaveState): boolean {
+function hasFreeCartTractor(save: SaveState, kind: ImplementKind = "grainTrailer"): boolean {
   return save.agents.some(
-    (a) => isFreeTractor(a) && (!!attachedImplement(save, a.id, "grainTrailer") || !!availableImplementFor(save, a, "grainTrailer")),
+    (a) => isFreeTractor(a) && (!!attachedImplement(save, a.id, kind) || !!availableImplementFor(save, a, kind)),
   );
 }
 
@@ -1939,17 +2371,19 @@ function assignGrainCart(save: SaveState, task: FarmTask, events: TaskEvent[]): 
   if (task.status !== "queued") return;
   const harvester = save.agents.find((a) => a.id === task.harvesterAgentId);
   if (!harvester || (harvester.grainOnboard ?? 0) <= 1e-9) return;
+  // Grain cart or forage wagon, depending on what this relay is hauling.
+  const trailerKind = relayTrailerKind(task);
   const cart = save.agents.find(
     (a) =>
       a.kind === "tractor" &&
       a.state === "idle" &&
       !a.taskId &&
       !!a.size &&
-      (!!attachedImplement(save, a.id, "grainTrailer") || !!availableImplementFor(save, a, "grainTrailer")),
+      (!!attachedImplement(save, a.id, trailerKind) || !!availableImplementFor(save, a, trailerKind)),
   );
   if (!cart) return;
-  if (!attachedImplement(save, cart.id, "grainTrailer")) {
-    const trailer = availableImplementFor(save, cart, "grainTrailer");
+  if (!attachedImplement(save, cart.id, trailerKind)) {
+    const trailer = availableImplementFor(save, cart, trailerKind);
     if (!trailer) return;
     for (const i of save.implements) if (i.attachedTo === cart.id) i.attachedTo = undefined;
     trailer.attachedTo = cart.id;
@@ -2054,6 +2488,15 @@ function tickAgent(
           // Crop-dependent like a sell run's trailer, so it isn't in
           // TASK_IMPLEMENT and gets checked here instead.
           (t.type !== "harvest" || !headerKindForTask(save, t) || tractorCanUse(save, agent, headerKindForTask(save, t)!)) &&
+          // A chopper needs the right HEAD for the crop (row-crop for standing
+          // corn, pickup for a wilted windrow) — crop-dependent like a
+          // combine's, so checked here rather than via TASK_IMPLEMENT.
+          (t.type !== "chop" || !chopHeadKindForTask(save, t) || tractorCanUse(save, agent, chopHeadKindForTask(save, t)!)) &&
+          // ...AND a forage wagon must exist to take the material away
+          // (maintainer requirement: the chopper cannot work without a
+          // trailer). Checked at PICKUP so the machine never drives out to a
+          // field it would only stall in; `blockedWork` explains the wait.
+          (t.type !== "chop" || farmHasForageWagon(save)) &&
           // Biggest implement available, pulled by the smallest tractor that
           // can manage it (2026-07-23). A tractor that isn't the preferred rig
           // for this job stands down and lets the right one take it; the loop
@@ -2255,7 +2698,7 @@ function tickAgent(
     // actually exist.
     if (task.type === "unloadHarvester") {
       const harvester = save.agents.find((a) => a.id === task.harvesterAgentId);
-      const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "grainTrailer");
+      const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === relayTrailerKind(task));
       if (!harvester || !trailer) {
         // Combine sold (shouldn't happen — see sellAgent's onboard-grain
         // guard) or trailer detached mid-job — don't strand the tractor.
@@ -2274,7 +2717,7 @@ function tickAgent(
         // grain crosses at a rate — which is both how it works on a real farm
         // and, with bushel-sized tanks, the difference between a combine that
         // cuts continuously and one that idles at the end of every tank.
-        const cap = grainTrailerCapacityTons(trailer.size, task.crop);
+        const cap = relayCapacityTons(trailer, task);
         const room = Math.max(0, cap - (trailer.cargoTons ?? 0));
         const available = harvester.grainOnboard ?? 0;
         if (room <= 1e-9 || available <= 1e-9) {
@@ -2302,15 +2745,20 @@ function tickAgent(
         const moved = Math.min(Math.min(room, available), used * rate);
         harvester.grainOnboard = available - moved;
         trailer.cargoTons = (trailer.cargoTons ?? 0) + moved;
-        trailer.cargoCrop = task.crop; // captured at task creation — see ensureUnloadTask
+        // Both captured at task creation — see ensureUnloadTask. A silage run
+        // stamps the product instead of the crop, since silage isn't keyed by
+        // CropId.
+        if (isSilageRun(task)) trailer.cargoSilage = task.silageProduct;
+        else trailer.cargoCrop = task.crop;
         continue;
       }
 
       if (task.unloadPhase === "toSilo") {
-        const crop = trailer.cargoCrop;
-        // Prefer a silo with room; if the crop's silos are full/absent, divert
-        // to a Sell Point rather than stalling (maintainer request, 2026-07-20).
-        const dest = crop ? chooseGrainDest(save, crop, agent.pos) : undefined;
+        // Prefer the store with room (silo for grain, bunker for silage); if
+        // it's full or absent, divert to a Sell Point rather than stalling
+        // (maintainer request, 2026-07-20).
+        const hasCargoId = isSilageRun(task) ? !!trailer.cargoSilage : !!trailer.cargoCrop;
+        const dest = hasCargoId ? chooseRelayDest(save, task, agent.pos) : undefined;
         if (!dest) {
           // No silo room AND no Sell Point — sit tight (⚠️ surfaced in the UI).
           task.waitingForSilo = true;
@@ -2340,19 +2788,17 @@ function tickAgent(
           task.phaseTimer = left;
           continue;
         }
-        const crop = trailer.cargoCrop!;
         if (task.unloadDest === "sell") {
           // Diverted to a Sell Point — offload the whole load for cash.
-          sellHauledGrain(save, crop, trailer.cargoTons ?? 0, now);
+          sellRelayLoad(save, task, trailer, trailer.cargoTons ?? 0, now);
           trailer.cargoTons = 0;
           trailer.cargoCrop = undefined;
+          trailer.cargoSilage = undefined;
           task.waitingForSilo = false;
           finishUnload(save, task, agent, events);
           continue;
         }
-        const room = Math.max(0, siloCapacityForCrop(save, crop) - save.grain[crop]);
-        const amount = Math.min(room, trailer.cargoTons ?? 0);
-        save.grain[crop] += amount;
+        const amount = depositRelayLoad(save, task, trailer, trailer.cargoTons ?? 0);
         trailer.cargoTons = (trailer.cargoTons ?? 0) - amount;
         if ((trailer.cargoTons ?? 0) > 1e-9) {
           // Silo filled up mid-dump — reroute the rest (another silo, or a Sell
@@ -2865,6 +3311,9 @@ function tickAgent(
       // Shape follows the baler KIND (2026-07-24) — square bales are heavier,
       // fewer per acre and worth more each.
       const square = baler?.kind === "squareBaler";
+      // A combi baler seals each bale as it rolls it (2026-07-31), so the field
+      // ends up holding baleage with no separate wrap pass.
+      const wrapping = baler?.kind === "combiBaler";
       const baleTons = baleTonsOf(baleProductForField(field, square));
       // Even-divide the field's forage into whole bales so the count stays
       // round(acres × balesPerAcre × productivity) — float-robust, and
@@ -2924,8 +3373,9 @@ function tickAgent(
         // 2026-07-24) — a hauler no longer waits for the baler to finish the
         // whole field, which on a big one meant the entire crop lying out while
         // an idle hay-spikes rig had nothing to do. No-ops if a haul is already
-        // covering the field or there's nothing free to send.
-        queueHaulBales(save, field.id);
+        // covering the field or there's nothing free to send — or if the field
+        // is destined for the wrapper (see `wrapPending`).
+        queueHaulBales(save, field.id, now);
         continue;
       }
 
@@ -2964,7 +3414,7 @@ function tickAgent(
         task.doneAcres = task.totalAcres;
         baler.cargoTons = 0;
         const baledCount = field.baleLocations?.length ?? totalBales;
-        completeTask(task, field, now, rand, square);
+        completeTask(task, field, now, rand, square, wrapping);
         recordCompletion(save, task, field, agent, now, { tons: baledCount * baleTons, bales: baledCount });
         // Field Finances (2026-07-22): revenue is booked HERE, at bale time —
         // bales x the base config price. Simpler and consistent vs. tracing the
@@ -2980,11 +3430,16 @@ function tickAgent(
         agent.taskId = undefined;
         clearAgentRoute(agent.id);
         agent.state = "idle";
-        // A finished bale run leaves loose bales on the field — auto-dispatch a
-        // Haul Bales job to move them to storage (maintainer request,
-        // 2026-07-17). Also player-triggerable from the field panel;
-        // queueHaulBales no-ops if a haul's already covering the field.
-        queueHaulBales(save, field.id);
+        // A finished bale run leaves loose bales on the field. If the plan says
+        // wrap them, queue that FIRST — it has to land inside the same-month
+        // window, and the bales must not leave the field before it runs.
+        // Otherwise auto-dispatch the haul to storage (maintainer request,
+        // 2026-07-17); queueHaulBales no-ops if one's already covering the field.
+        if (wrapPending(save, field, now)) {
+          tryEnqueue(save, field, "wrap", now);
+        } else {
+          queueHaulBales(save, field.id, now);
+        }
       }
       continue;
     }
@@ -3022,11 +3477,26 @@ function tickAgent(
     const effectiveYield = field.trueYieldTonsPerAcre !== undefined
       ? field.trueYieldTonsPerAcre * productivityMultiplier(field, now)
       : undefined;
+    // Chopped silage per acre — the whole plant, so it has nothing to do with
+    // the GRAIN yield above and comes from its own config figure.
+    const chopYield = task.type === "chop" ? silageTonsPerAcreFor(field, now) : 0;
     let target = path.total;
     if (task.type === "harvest" && effectiveYield) {
       const capacity = harvesterCapacityTons(agent.size ?? "medium", field.crop ?? "corn");
       const room = Math.max(0, capacity - (agent.grainOnboard ?? 0));
       const roomAcres = room / effectiveYield;
+      const fullAt = acresDoneAt(path, dist, task.totalAcres) + roomAcres;
+      target = Math.min(path.total, distanceAtAcres(path, fullAt, task.totalAcres));
+    }
+    // THE CHOPPER CANNOT WORK WITHOUT A WAGON (maintainer requirement).
+    // Mechanically it's the combine's full-hopper stop, but the buffer is a
+    // couple of tons — a chopper has no tank, only a spout — so it fills in
+    // seconds and the machine simply stops until a wagon is taking material.
+    // That makes wagon logistics the whole constraint of a silage harvest.
+    if (task.type === "chop" && chopYield > 0) {
+      const capacity = gameConfig.equipment.forageHarvester[agent.size ?? "medium"].capacityTons;
+      const room = Math.max(0, capacity - (agent.grainOnboard ?? 0));
+      const roomAcres = room / chopYield;
       const fullAt = acresDoneAt(path, dist, task.totalAcres) + roomAcres;
       target = Math.min(path.total, distanceAtAcres(path, fullAt, task.totalAcres));
     }
@@ -3064,6 +3534,17 @@ function tickAgent(
       // pre-check above) — this catches the case where a tick banks the
       // FIRST grain of the job (pre-check ran before this tick had any).
       if (agent.grainOnboard > 1e-9) ensureUnloadTask(save, agent, field.id, field.crop, events);
+    }
+
+    // Chopped material goes into the same tiny onboard buffer the wagon then
+    // drains — the relay is shared, so the bookkeeping is too.
+    if (task.type === "chop" && chopYield > 0) {
+      const product = silageProductForField(field);
+      agent.grainOnboard = (agent.grainOnboard ?? 0) + (task.doneAcres - prevAcres) * chopYield;
+      agent.lastFieldId = field.id;
+      if (product && agent.grainOnboard > 1e-9) {
+        ensureSilageHaul(save, agent, field.id, product, events);
+      }
     }
 
     if (dist >= path.total - 1e-6) {
@@ -3110,11 +3591,14 @@ function tickAgent(
       if (task.type === "harvest" && agent.lastCrop && (agent.grainOnboard ?? 0) > 1e-9) {
         ensureUnloadTask(save, agent, agent.lastFieldId ?? field.id, agent.lastCrop, events);
       }
+      // The bales are sealed now, so the haul that `wrapPending` was holding
+      // back can finally go — and it'll carry baleage rather than hay.
+      if (task.type === "wrap") queueHaulBales(save, field.id, now);
     }
   }
 }
 
-function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => number, square = false): void {
+function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => number, square = false, wrapping = false): void {
   switch (task.type) {
     case "plow":
       applyPlow(field);
@@ -3172,7 +3656,18 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
       // worked; this just settles the field to mulched. `square` says which
       // baler did it (2026-07-24) — that's what fixes the product, and so the
       // price and the tonnage, for everything downstream.
-      applyBaleDone(field, square);
+      applyBaleDone(field, square, now, wrapping);
+      break;
+    case "wrap":
+      // Seals every bale lying in the field into baleage. The count doesn't
+      // change — wrapping doesn't make bales, it preserves the ones there.
+      applyWrapDone(field);
+      break;
+    case "chop":
+      // Silage banked into the chopper's buffer as it drove and left on a
+      // wagon; this settles the field. On corn that means cleared with NO
+      // residue (the whole plant went); on a perennial the stand regrows.
+      applyChopDone(field);
       break;
     case "weed":
       // Clears the weed flush; no new one comes until the next crop goes in.
@@ -3436,14 +3931,16 @@ export function blockedWork(save: SaveState): BlockedWork[] {
     // resolve them per task instead.
     const kind = task.type === "harvest"
       ? headerKindForTask(save, task)
-      : task.type === "bale"
-        ? (BALER_KINDS.find((k) => save.implements.some((i) => i.kind === k)) ?? "bailer")
-        : TASK_IMPLEMENT[task.type];
+      : task.type === "chop"
+        ? chopHeadKindForTask(save, task)
+        : task.type === "bale"
+          ? (BALER_KINDS.find((k) => save.implements.some((i) => i.kind === k)) ?? "bailer")
+          : TASK_IMPLEMENT[task.type];
     const needed = TASK_AGENT_KIND[task.type];
     // `agentCanDoTask`, not a bare kind comparison: a cut counts as covered by
     // a windrower as well as by a tractor (2026-07-24).
     if (!save.agents.some((a) => agentCanDoTask(a, task.type))) {
-      const what = needed === "harvester" ? "combine" : needed;
+      const what = needed === "harvester" ? "combine" : needed === "forageHarvester" ? "forage harvester" : needed;
       out.push({
         fieldId: task.fieldId, type: task.type,
         reason: task.type === "mow" ? "No tractor or windrower owned" : `No ${what} owned`,
@@ -3458,14 +3955,23 @@ export function blockedWork(save: SaveState): BlockedWork[] {
       out.push({ fieldId: task.fieldId, type: task.type, reason: `No ${IMPLEMENT_NAME[kind]} owned` });
       continue;
     }
+    // A chopper has no tank: with nothing to unload into it cannot turn a
+    // wheel, so this is a stop, not a slowdown, and worth saying plainly.
+    if (task.type === "chop" && !farmHasForageWagon(save)) {
+      out.push({
+        fieldId: task.fieldId, type: task.type,
+        reason: "No Forage Wagon owned — a chopper can't work without one",
+      });
+      continue;
+    }
     // Owned, but nothing that can carry it — a large-only implement on a
     // small-only fleet is just as stuck as not owning one. Headers ride on the
     // COMBINE, so they're checked against combines rather than tractors.
-    const carrier = task.type === "harvest" ? "harvester" : "tractor";
+    const carrier = task.type === "harvest" ? "harvester" : task.type === "chop" ? "forageHarvester" : "tractor";
     if (kind && !save.agents.some((a) => a.kind === carrier && a.size && save.implements.some((i) => i.kind === kind && canPull(a.size!, i.size)))) {
       out.push({
         fieldId: task.fieldId, type: task.type,
-        reason: `No ${carrier === "harvester" ? "combine" : "tractor"} big enough for the ${IMPLEMENT_NAME[kind]}`,
+        reason: `No ${carrier === "harvester" ? "combine" : carrier === "forageHarvester" ? "forage harvester" : "tractor"} big enough for the ${IMPLEMENT_NAME[kind]}`,
       });
     }
   }
@@ -3622,6 +4128,15 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       }
       break;
     case "harvested":
+      // HAYLAGE (Phase 2): a cut perennial can be chopped off the windrow
+      // instead of raked and baled. It still needs the rake — a pickup head
+      // lifts a windrow, it doesn't gather one — so the rake goes in first and
+      // the chopper follows, exactly where the baler would have.
+      if (isPerennial(field.crop) && field.forageReady && canChopField(save, field)) {
+        if (needsRakeBeforeBaling(field)) tryEnqueue(save, field, "rake", now);
+        tryEnqueue(save, field, "chop", now);
+        break;
+      }
       if (forageDue(save, field) && plan.bale) {
         // The forage loop: rake then bale (queued together — the baler waits in
         // the queue until the rake has started). Once baled the field is
@@ -3663,7 +4178,14 @@ export function autoManageField(save: SaveState, field: Field, now: SimTime): vo
       // retrying every tick until the chosen month arrives, same pattern as
       // everything else here).
       if (monthMatches(now, plan.schedule?.harvest)) {
-        tryEnqueue(save, field, "harvest", now);
+        if (canChopField(save, field)) {
+          tryEnqueue(save, field, "chop", now);
+        } else if (!isChopOnlyCrop(field.crop)) {
+          // A chop-only crop (Forage) has no combine fallback — with no
+          // chopper/wagon/head yet, it just waits rather than misrouting to
+          // a "harvest" the crop was never going to produce grain for.
+          tryEnqueue(save, field, "harvest", now);
+        }
       }
       break;
   }

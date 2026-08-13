@@ -12,7 +12,7 @@
  */
 
 import { gameConfig, tonsPerBushel } from "../config/gameConfig";
-import type { CropId, EquipmentSize, BaleProduct } from "../config/gameConfig";
+import type { CropId, EquipmentSize, BaleProduct, SilageProduct } from "../config/gameConfig";
 import type { BuildingKind, Building, SaveState } from "../state/saveState";
 import type { Meters } from "../geo/coords";
 import { recordCash } from "./ledger";
@@ -37,7 +37,15 @@ export const BUILDING_NAME: Record<BuildingKind, string> = {
   implementBarn: "Implement Barn",
   farmYard: "Farm Yard",
   sellPoint: "Sell Point",
+  silageBunker: "Silage Bunker",
 };
+
+/** Buildings that come in Small/Medium/Large tiers, like equipment. Everything
+ * else is one fixed size — asked in three places (name, price, purchase), so
+ * it's stated once rather than repeating `kind === "silo" || …` at each. */
+export function buildingIsSized(kind: BuildingKind): boolean {
+  return kind === "silo" || kind === "silageBunker";
+}
 
 const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Medium", large: "Large" };
 
@@ -45,7 +53,7 @@ const SIZE_LABEL: Record<EquipmentSize, string> = { small: "Small", medium: "Med
  * request 2026-07-13 — "<Kind> - <Size>" everywhere); everything else is
  * unsized (`BUILDING_NAME[kind]`). */
 export function buildingDisplayName(kind: BuildingKind, size?: EquipmentSize): string {
-  if (kind === "silo") return `Silo - ${SIZE_LABEL[size ?? "small"]}`;
+  if (buildingIsSized(kind)) return `${BUILDING_NAME[kind]} - ${SIZE_LABEL[size ?? "small"]}`;
   return BUILDING_NAME[kind];
 }
 
@@ -53,6 +61,7 @@ export function buildingDisplayName(kind: BuildingKind, size?: EquipmentSize): s
  * kind is one fixed price and ignores `size`. */
 export function buildingPrice(kind: BuildingKind, size?: EquipmentSize): number {
   if (kind === "silo") return gameConfig.buildings.silo[size ?? "small"].price;
+  if (kind === "silageBunker") return gameConfig.buildings.silageBunker[size ?? "small"].price;
   return gameConfig.buildings[kind].price;
 }
 
@@ -78,7 +87,7 @@ export function buyBuildingAt(save: SaveState, kind: BuildingKind, pos: Meters, 
   }
   save.money -= price;
   recordCash(save, "landEquipment", "Buildings", -price);
-  const building: Building = { id: nextId("bld"), kind, pos, size: kind === "silo" ? (size ?? "small") : undefined };
+  const building: Building = { id: nextId("bld"), kind, pos, size: buildingIsSized(kind) ? (size ?? "small") : undefined };
   save.buildings.push(building);
   return building;
 }
@@ -194,9 +203,72 @@ export function haulBalesInto(building: Building, product: BaleProduct, n: numbe
   return added;
 }
 
+// ---------------------------------------------------------------------------
+// SILAGE BUNKERS (2026-07-31, Phase 2)
+//
+// Deliberately the SIMPLEST storage in the game (maintainer decision: "treat
+// it more like a silo for now"). Capacity in tons, pooled farm-wide across
+// every bunker, no per-product assignment and no spoilage — a bunker is
+// assumed sealed and packed. Cover/feed-out mechanics are a later slice.
+// ---------------------------------------------------------------------------
+
+/** Tons one bunker of this tier holds. */
+export function bunkerCapacityOf(size: EquipmentSize): number {
+  return gameConfig.buildings.silageBunker[size].capacityTons;
+}
+
+/** Total silage capacity across every bunker on the farm, tons. Unlike silos
+ * this is NOT per-product: a bunker takes whatever's tipped into it. */
+export function silageCapacityTons(save: SaveState): number {
+  return save.buildings
+    .filter((b) => b.kind === "silageBunker")
+    .reduce((sum, b) => sum + bunkerCapacityOf(b.size ?? "small"), 0);
+}
+
+/** Tons of silage currently stored, all products. */
+export function silageStoredTons(save: SaveState): number {
+  if (!save.silage) return 0;
+  return (Object.values(save.silage) as number[]).reduce((a, b) => a + b, 0);
+}
+
+/** Room left in the farm's bunkers, tons. */
+export function silageRoomTons(save: SaveState): number {
+  return Math.max(0, silageCapacityTons(save) - silageStoredTons(save));
+}
+
+/** Put silage into the bunkers, capped by room. Returns the tons ACCEPTED, so
+ * the caller can reroute (or hold) whatever wouldn't fit — same contract as
+ * `haulBalesInto`. */
+export function storeSilage(save: SaveState, product: SilageProduct, tons: number): number {
+  const accepted = Math.min(Math.max(0, tons), silageRoomTons(save));
+  if (accepted <= 0) return 0;
+  save.silage ??= { cornSilage: 0, haylage: 0, alfalfaHaylage: 0 };
+  save.silage[product] = (save.silage[product] ?? 0) + accepted;
+  return accepted;
+}
+
+/** The bunker nearest `from`, or undefined if the farm has none. */
+export function nearestBunker(save: SaveState, from: Meters): Building | undefined {
+  return nearestOfKind(save, "silageBunker", from);
+}
+
 /** Fraction of a bale store's contents lost per month to rot (2026-07-25). */
 export function baleSpoilRateOf(kind: "baleBarn" | "baleArea"): number {
   return gameConfig.buildings[kind].spoilPctPerMonth;
+}
+
+/**
+ * The monthly loss rate that actually applies to `product` sitting in `kind`.
+ *
+ * WRAPPED bales ignore the building entirely (2026-07-31): they're sealed in
+ * plastic, so a stack of baleage on an open pad keeps as well as one under a
+ * roof. That immunity IS the feature — it's what the wrapper, the film and the
+ * extra pass are bought for, and it's why the Bale Barn and the Bale Wrapper
+ * are deliberately competing answers to the same problem.
+ */
+export function baleSpoilRateFor(kind: "baleBarn" | "baleArea", product: BaleProduct): number {
+  if (gameConfig.baleProducts[product].wrapped) return gameConfig.forage.wrappedSpoilPctPerMonth;
+  return baleSpoilRateOf(kind);
 }
 
 /**
@@ -226,9 +298,13 @@ export function tickBaleSpoilage(save: SaveState, dtMinutes: number): void {
   const months = dtMinutes / minutesPerMonth();
   for (const b of save.buildings) {
     if (!isBaleStorage(b.kind)) continue;
-    const rate = baleSpoilRateOf(b.kind as "baleBarn" | "baleArea");
-    if (rate <= 0 || !b.storedBales) continue;
+    if (!b.storedBales) continue;
     for (const key of Object.keys(b.storedBales) as BaleProduct[]) {
+      // Per-PRODUCT, not per-building: wrapped bales keep almost indefinitely
+      // wherever they're stacked, so the rate has to be resolved inside the
+      // loop rather than once for the whole store.
+      const rate = baleSpoilRateFor(b.kind as "baleBarn" | "baleArea", key);
+      if (rate <= 0) continue;
       const n = b.storedBales[key] ?? 0;
       if (n <= 0) {
         if (b.spoilAccrued) delete b.spoilAccrued[key];

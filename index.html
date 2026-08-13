@@ -189,7 +189,7 @@
          2026-07-21) — the vertical calendar + the 4-column finance table both
          fit here, so no per-tab width toggle. */
       .fp-main {
-        padding: 14px 16px; overflow-y: auto; width: 320px; box-sizing: border-box;
+        padding: 14px 16px; overflow-y: auto; width: 384px; box-sizing: border-box;
       }
       .fp-tabpanel { min-width: 0; }
 
@@ -243,11 +243,6 @@
       #fieldpanel .close {
         position: absolute; top: 8px; right: 10px; border: none; background: none;
         font-size: 16px; padding: 2px 6px; color: #8a7658;
-      }
-      .badge {
-        display: inline-block; padding: 2px 10px; border-radius: 999px;
-        font-size: 12px; font-weight: 700; color: #fff; background: var(--gold);
-        text-transform: capitalize;
       }
       .cropbtns { display: flex; gap: 8px; margin: 10px 0 4px; }
       .cropbtns button { flex: 1; padding: 8px 4px; font-size: 13px; }
@@ -324,9 +319,7 @@
          Replaced the per-campaign-year dropdown rows. The chips ARE the
          sequence AND the calendar's step selector: click one to schedule it. */
       #fp-plans:not(:empty) { margin-top: 6px; }
-      .plan-hint { font-size: 11px; color: #8a7658; margin: 2px 0 6px; }
-
-      /* Rotation name + Copy/Paste, above the chips. */
+      /* Rotation name + Copy/Paste. */
       .rot-head { display: flex; align-items: center; gap: 4px; margin-top: 8px; }
       .rot-name {
         flex: 1; min-width: 0; font-size: 12px; font-weight: 600; padding: 4px 6px;
@@ -342,61 +335,14 @@
       .rot-btn:disabled { opacity: 0.35; cursor: default; }
 
       /* The sequence itself: chips left to right, wrapping at the panel width. */
-      /* The rotation reads top-to-bottom (maintainer request, 2026-07-24) with
-         the growing crop pinned first. Each row is SELF-CONTAINED as of the
-         follow-up pass: label, a big icon button that picks whose schedule the
-         calendar shows, that row's own crop dropdown, and its own remove. */
-      .crop-chips { display: flex; flex-direction: column; align-items: stretch; gap: 5px; }
-      .crop-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
-      /* "Current" / "Next" / "Then" — a fixed-width LEFT-aligned gutter, so the
-         icons line up in a column instead of stair-stepping. */
-      .crop-place {
-        flex: 0 0 58px; font-size: 10px; line-height: 1.1; color: #8a7658;
-        text-transform: uppercase; letter-spacing: 0.03em; text-align: left;
+      #fp-schedule-footer {
+        display: flex; gap: 6px; align-items: stretch; margin-top: 10px;
       }
-      .crop-place.now { color: var(--green-dark); font-weight: 700; }
-      /* The crop button is now an ICON only — the name is in the row's dropdown,
-         so repeating it here would only cost width in a narrow panel. Sized up
-         per request; square, so a bale badge doesn't stretch it. */
-      .crop-chip {
-        display: flex; align-items: center; justify-content: center; gap: 3px;
-        cursor: pointer; font-family: inherit; flex: 0 0 auto;
-        width: 46px; height: 40px; padding: 0;
-        border: 1.5px solid var(--wood); border-radius: 10px;
-        background: var(--cream-2); color: var(--wood);
+      #fp-schedule-reset, #fp-schedule-plow { flex: 1 1 0; min-width: 0; display: flex; }
+      #fp-schedule-plow button {
+        width: 100%; font-size: 11px; padding: 5px 6px; white-space: nowrap;
+        overflow: hidden; text-overflow: ellipsis;
       }
-      .crop-chip .cc-emoji { font-size: 24px; line-height: 1; }
-      .crop-chip svg { flex-shrink: 0; display: block; }
-      /* Being VIEWED in the calendar below. */
-      .crop-chip.selected { background: var(--gold); border-width: 2.5px; }
-      /* Actually running on the field right now — a dot, so it can coexist
-         with .selected instead of competing with it for the same styling. */
-      .crop-chip.current::after {
-        content: ""; width: 7px; height: 7px; border-radius: 50%;
-        background: var(--green-dark); flex-shrink: 0;
-      }
-      #fp-schedule-plow { margin-top: 10px; }
-      #fp-schedule-plow .small { margin-bottom: 6px; }
-      .chip-add {
-        align-self: flex-start; margin-left: 64px;
-        font-size: 13px; line-height: 1; padding: 6px 12px; cursor: pointer;
-        border: 1.5px dashed var(--wood); border-radius: 999px;
-        background: var(--cream); color: var(--wood); font-family: inherit;
-      }
-      .chip-add:disabled { opacity: 0.35; cursor: default; }
-
-      /* One crop dropdown PER ROW, and one remove button per row. */
-      .crop-row .plan-crop {
-        flex: 1 1 auto; min-width: 0; font-size: 12.5px; padding: 6px 6px;
-        border: 1.5px solid var(--wood); border-radius: 8px; background: var(--cream);
-        color: var(--wood); font-family: inherit;
-      }
-      .plan-del {
-        font-size: 13px; line-height: 1; padding: 7px 7px; cursor: pointer; flex-shrink: 0;
-        border: 1.5px solid var(--wood); border-radius: 8px; background: var(--cream-2); color: var(--red);
-      }
-      .plan-del:disabled { opacity: 0.3; cursor: default; }
-
       /* Shown when Auto-manage is off (the schedule only drives auto-manage). */
       .fp-sched-hint { font-size: 12px; color: #8a7658; margin: 10px 2px; line-height: 1.45; }
 
@@ -408,59 +354,138 @@
       .fp-cal-legend i { width: 16px; height: 12px; border-radius: 3px; flex-shrink: 0; }
       .fp-cal-legend i.lg-sched { background: var(--gold); border: 1.5px solid var(--wood-dark); box-sizing: border-box; }
       .fp-cal-legend i.lg-legal { background: var(--cream-2); border: 1.5px dashed var(--wood); box-sizing: border-box; }
+      .fp-cal-legend i.lg-today { background: var(--red); width: 3px; border-radius: 2px; }
 
-      /* Vertical layout (maintainer request, 2026-07-21): months down the rows
-         (season-tinted), tasks across the columns — narrower than the old
-         horizontal 13-column grid. grid-template-columns is set inline from JS
-         (task count varies: 6 for annuals, 5 for perennials). */
-      .fp-vcal-grid { display: grid; gap: 2px; align-items: stretch; }
-      .fp-vcal-grid .fp-vcal-corner { /* blank top-left cell */ }
-      .fp-vcal-grid .fp-vcal-head {
-        font-size: 14px; text-align: center; align-self: end; padding-bottom: 3px;
-        cursor: help; line-height: 1;
+      /* ---------- Rotation TIMELINE (maintainer rework, 2026-07-31) ----------
+         TASKS across the top axis, shared by every crop in the rotation. The
+         vertical axis is the rotation itself: each step is a BLOCK of its own
+         months, stacked in the order they happen, with today drawn across.
+
+         Why this shape: the field panel is ~430px wide and tall. Months across
+         the top meant permanent side-scrolling; a crop-per-column grid gave
+         each crop one narrow column to hold every task, so two tasks in the
+         same month collided. Tasks are a FIXED, small column set that fits the
+         width, and stacking crops downward is the one direction with room.
+
+         It is all ONE css grid (template set from JS: a 42px month gutter + one
+         column per task kind used). Block headers span every column; chips and
+         drop targets are placed at (month row, task column). */
+      .fp-tl-scroll {
+        overflow: auto; max-height: 360px;
+        border: 1.5px solid var(--cream-2); border-radius: 8px;
+        background: rgba(138, 90, 51, 0.05);
       }
-      /* Season-tinted month label, colors + icons matching the year bar. */
-      .fp-vmonth {
-        font-size: 10px; font-weight: 700; color: var(--wood-dark);
-        display: flex; align-items: center; gap: 2px; padding: 0 4px;
-        border-radius: 4px; min-height: 20px; white-space: nowrap; overflow: hidden;
+      .fp-tl-grid { display: grid; gap: 2px; padding: 4px; }
+
+      /* Sticky task header across the top; the corner pins both ways. */
+      .fp-tl-corner {
+        position: sticky; top: 0; left: 0; z-index: 7;
+        background: var(--cream); border-radius: 4px;
       }
-      .fp-vmonth .fp-vmonth-ico { width: 14px; text-align: center; flex-shrink: 0; }
-      .fp-vmonth.spring { background: #a8d178; }
-      .fp-vmonth.summer { background: #f5c95d; }
-      .fp-vmonth.fall   { background: #d98e4a; }
-      .fp-vmonth.winter { background: #bcd8e8; }
-      /* An overwintering crop (Winter Wheat: plant Sep, harvest Jun) wraps the
-         fixed Mar->Feb grid, so its later months sit ABOVE its plant row. Fade
-         + stripe those rows and divide them off, so the wrap reads as deliberate
-         rather than as a scheduling bug (2026-07-23). */
-      .fp-vmonth.next-year {
-        opacity: 0.62;
-        background-image: repeating-linear-gradient(
-          -45deg, rgba(255,255,255,0.45) 0 3px, transparent 3px 6px);
-      }
-      .fp-vcal-wrap {
-        font-size: 9px; font-weight: 700; letter-spacing: 0.02em; text-align: center;
-        color: #8a7658; padding: 2px 0 3px; margin: 1px 0 2px;
-        border-top: 1.5px dashed var(--wood); opacity: 0.85;
-      }
-      /* Every cell gets a faint track so the grid reads as a grid (a task's own
-         months then stand out against it). */
-      .fp-cal-cell {
-        min-height: 20px; border-radius: 4px; border: 1.5px solid transparent; box-sizing: border-box;
-        background: rgba(138, 90, 51, 0.07);
+      .fp-tl-thead {
+        position: sticky; top: 0; z-index: 6;
         display: flex; align-items: center; justify-content: center;
-        font-size: 10px; color: transparent;
+        font-size: 13px; line-height: 1; cursor: help;
+        min-height: 22px; border-radius: 4px 4px 0 0;
+        background: var(--cream); box-shadow: 0 2px 4px -2px rgba(60, 40, 15, 0.3);
       }
-      .fp-cal-cell.legal { background: var(--cream-2); border: 1.5px dashed var(--wood); cursor: pointer; }
-      .fp-cal-cell.legal:hover { background: #e8d4a8; }
-      .fp-cal-cell.scheduled {
-        background: var(--gold); border: 1.5px solid var(--wood-dark); cursor: grab;
-        color: var(--wood-dark); font-weight: 700;
+
+      /* One rotation step. The header spans the full width, so the blocks read
+         as stacked chapters of one continuous rotation. */
+      .fp-tl-bhead {
+        display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+        margin-top: 4px; padding: 3px 6px; border-radius: 6px;
+        background: var(--cream-2); border: 1.5px solid transparent; box-sizing: border-box;
       }
-      .fp-cal-cell.scheduled:active { cursor: grabbing; }
-      .fp-cal-cell.off { background: transparent; border: 1.5px dashed var(--wood); opacity: 0.5; color: var(--wood); cursor: pointer; }
-      .fp-cal-cell.drag-over { border: 1.5px solid var(--green-dark); background: var(--green); color: #fff; }
+      /* The step actually running right now. */
+      .fp-tl-bhead.current { border-color: var(--wood); background: #ecdcb6; }
+      .fp-tl-planted { color: var(--green-dark); font-size: 9px; flex-shrink: 0; }
+      /* The crop picker lives on the block header — the calendar IS the crop
+         editor now, so there's no separate list above it. */
+      .fp-tl-crop-sel {
+        flex: 1 1 auto; min-width: 0; font: inherit; font-size: 11px; font-weight: 700;
+        color: var(--wood-dark); background: var(--cream); cursor: pointer;
+        border: 1.5px solid var(--wood); border-radius: 6px; padding: 2px 4px;
+      }
+      .fp-tl-crop-del {
+        flex: 0 0 auto; font: inherit; font-size: 11px; line-height: 1; cursor: pointer;
+        padding: 3px 6px; border-radius: 6px; color: var(--red);
+        border: 1.5px solid var(--cream); background: transparent;
+      }
+      .fp-tl-crop-del:hover:not(:disabled) { border-color: var(--red); background: rgba(199, 81, 70, 0.1); }
+      .fp-tl-crop-del:disabled { opacity: 0.3; cursor: default; }
+      .fp-tl-add {
+        width: 100%; margin-top: 6px; font: inherit; font-size: 11px; padding: 5px; cursor: pointer;
+        border: 1.5px dashed var(--wood); border-radius: 6px;
+        background: var(--cream); color: var(--wood);
+      }
+      .fp-tl-add:disabled { opacity: 0.4; cursor: default; }
+
+      /* Month gutter, season-tinted to match the year bar. */
+      .fp-tl-month {
+        position: sticky; left: 0; z-index: 4;
+        grid-column: 1; font-size: 9px; font-weight: 700; color: var(--wood-dark);
+        display: flex; align-items: center; justify-content: center; gap: 3px;
+        min-height: 24px; border-radius: 4px; cursor: help; padding: 0 2px;
+        box-shadow: 2px 0 4px -2px rgba(60, 40, 15, 0.25);
+      }
+      .fp-tl-month.spring { background: #a8d178; }
+      .fp-tl-month.summer { background: #f5c95d; }
+      .fp-tl-month.fall   { background: #d98e4a; }
+      .fp-tl-month.winter { background: #bcd8e8; }
+      /* January carries the year, so a multi-year block never reads as one. */
+      .fp-tl-month.year-start { box-shadow: 2px 0 4px -2px rgba(60,40,15,0.25), inset 0 2px 0 var(--wood-dark); }
+      .fp-tl-year { font-size: 8px; opacity: 0.85; }
+      .fp-tl-mname { letter-spacing: -0.02em; }
+
+      /* Track cell. Tinted green while the crop is actually in the ground, so
+         each block shows its growing season without a separate bar. */
+      .fp-tl-cell { border-radius: 3px; background: rgba(138, 90, 51, 0.06); }
+      .fp-tl-cell.in-ground { background: rgba(109, 161, 68, 0.2); }
+      /* A month this task COULD run in. Shown all the time rather than on
+         click (maintainer request, 2026-07-31) — which is what let the whole
+         select-then-place step disappear: click the month you want. */
+      .fp-tl-cell.legal {
+        cursor: pointer; border: 1.5px dashed var(--wood); box-sizing: border-box;
+        background: var(--cream-2);
+      }
+      .fp-tl-cell.legal:hover { background: #e8d4a8; }
+      .fp-tl-cell.drag-over { border: 1.5px solid var(--green-dark); background: var(--green); }
+
+      /* A scheduled task, in its own column at its month. */
+      .fp-tl-chip {
+        z-index: 3; align-self: center; justify-self: center;
+        width: 22px; height: 22px; border-radius: 5px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 12px; line-height: 1;
+        background: var(--gold); border: 1.5px solid var(--wood-dark); box-sizing: border-box;
+      }
+      .fp-tl-chip.movable { cursor: grab; }
+      .fp-tl-chip.movable:active { cursor: grabbing; }
+      .fp-tl-chip.movable:hover { transform: scale(1.12); }
+      /* Optional operation switched off — click the chip to turn it back on. */
+      .fp-tl-chip.off { background: transparent; border-style: dashed; opacity: 0.45; cursor: pointer; }
+      .fp-tl-chip.off:hover { opacity: 0.8; }
+      .fp-tl-chip.dragging { opacity: 0.5; }
+
+      /* Today — a line across every column, on its own month. */
+      .fp-tl-today {
+        z-index: 5; align-self: center; height: 3px; pointer-events: none;
+        background: var(--red); border-radius: 2px;
+        box-shadow: 0 0 4px rgba(199, 81, 70, 0.6);
+      }
+      /* Today falling in a fallow gap between blocks: drawn at the top edge of
+         the next month the rotation actually covers, dashed so it reads as
+         "somewhere before here" rather than "on this month". */
+      .fp-tl-today.gap {
+        align-self: start; height: 0; margin-top: -2px;
+        background: transparent; box-shadow: none;
+        border-top: 3px dashed var(--red);
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .fp-tl-chip.movable:hover { transform: none; }
+      }
 
       .fp-sched-defaults {
         width: 100%; font-size: 11px; padding: 5px; margin-top: 8px; cursor: pointer;
@@ -789,6 +814,14 @@
         background: var(--cream); color: var(--red); border-color: var(--red);
       }
       .farm-row .farm-del:hover { background: rgba(199, 81, 70, 0.12); }
+      .settings-section { margin-top: 16px; padding-top: 12px; border-top: 1.5px dashed var(--wood); }
+      .settings-section h3 { margin: 0 0 2px; font-size: 14px; }
+      .naip-provider-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+      .naip-provider-pill {
+        padding: 6px 12px; border-radius: 999px; border: 1.5px solid var(--wood);
+        background: var(--cream); font-size: 12px; cursor: pointer; color: var(--ink);
+      }
+      .naip-provider-pill.active { border-color: var(--green-dark); background: #e3f0d8; font-weight: 700; }
 
       /* ---------- Fields tab (bottom-toolbar panel listing owned fields) ---------- */
       #fieldstab h2 { margin: 0 0 8px; font-size: 18px; }
@@ -1049,9 +1082,9 @@
         text-transform: uppercase; letter-spacing: 0.04em; margin: 10px 0 4px;
       }
       .queue-row {
-        display: flex; align-items: flex-start; gap: 7px;
+        position: relative; display: flex; align-items: flex-start; gap: 7px;
         background: var(--cream-2); border: 1.5px solid var(--wood);
-        border-radius: 9px; padding: 5px 8px; margin: 4px 0;
+        border-radius: 9px; padding: 5px 8px; margin: 4px 0; cursor: pointer;
       }
       .queue-row .icon { font-size: 30px; line-height: 1; display: inline-flex; align-items: center; flex-shrink: 0; }
       .qr-info { flex: 1; min-width: 0; }
@@ -1062,6 +1095,10 @@
       .amt-neg { color: var(--red); font-weight: 700; }
       .queue-row.active { border-color: var(--green-dark); }
       .queue-row.warn { border-color: var(--red); background: rgba(199, 81, 70, 0.08); }
+      /* Click-to-select (2026-08-12) — a gold ring so it reads distinctly from
+         .active's green border and .warn's red one, and stays visible when a
+         row is both active AND selected at once. */
+      .queue-row.selected { box-shadow: 0 0 0 2px var(--gold) inset; }
       .queue-row.queued { cursor: grab; }
       .queue-row.queued.dragging { opacity: 0.4; }
       .queue-row.queued.drag-over { border-color: var(--green-dark); border-style: dashed; }
@@ -1073,6 +1110,22 @@
         color: #8a7658; line-height: 1.4;
       }
       .qr-cancel:hover { color: var(--red); background: none; }
+      /* Restart/Cancel on an ACTIVE row (2026-08-12) — the stuck-task escape
+         hatch. Icon-only (2026-08-12 follow-up: labeled chips ate too much
+         width for something used rarely), tucked into the row's bottom-left
+         corner — the blank space under the machine icon whenever the info
+         column runs taller than the icon, which an active row's progress bar
+         + implement row usually does. Own classes, not a reuse of
+         .qr-cancel's bare "✕" styling, since that one's sized for the
+         QUEUED row's inline flow, not an absolutely-positioned overlay. */
+      .qr-active-controls { position: absolute; left: 6px; bottom: 6px; display: flex; gap: 4px; }
+      .qr-active-controls button {
+        width: 24px; height: 24px; padding: 0; display: flex; align-items: center; justify-content: center;
+        border: 1.5px solid var(--wood); background: var(--cream); border-radius: 6px;
+        font-size: 13px; line-height: 1; color: var(--ink); cursor: pointer;
+      }
+      .qr-restart:hover { border-color: var(--green-dark); color: var(--green-dark); }
+      .qr-force-cancel:hover { border-color: var(--red); color: var(--red); }
       .queue-empty { font-size: 13px; color: #8a7658; padding: 6px 2px; }
       .queue-tail { height: 10px; }
       .queue-tail.drag-over { border: 1.5px dashed var(--green-dark); border-radius: 8px; }
@@ -1186,16 +1239,23 @@
       }
       .access-row { margin-top: 0; }
 
-      /* Bales dropped in the field — decorative, must not eat field clicks. */
-      .bale-dot { line-height: 0; pointer-events: none; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35)); }
+      /* Buildings (silo/barns/yard) — real elevation artwork standing ON the
+         ground, not an emoji in a box (field/buildingRender.ts).
 
-      /* Buildings (silo/barns/yard) — a bigger, squarer dot than agents so
-         they read as fixed structures rather than moving machines. */
-      .building-dot {
-        font-size: 22px; line-height: 1; cursor: pointer;
-        background: var(--cream); border: 2px solid var(--wood);
-        border-radius: 8px; padding: 4px 5px; box-shadow: var(--shadow);
+         SIZING: `--px-per-m` is written to <html> once per map move frame;
+         `--w-m` is the structure's own real footprint width in meters. So the
+         sprite tracks its TRUE ground size, clamped to a range that keeps it
+         findable when zoomed out and sane when zoomed all the way in. One
+         style write per frame serves every building on the map. */
+      :root { --px-per-m: 0.05; }
+      .structure {
+        --w-m: 12;
+        width: clamp(26px, calc(var(--w-m) * var(--px-per-m) * 1px), 190px);
+        line-height: 0; cursor: pointer;
+        filter: drop-shadow(0 2px 3px rgba(30, 20, 10, 0.45));
       }
+      .structure svg, .structure img { width: 100%; height: auto; display: block; }
+      .structure:hover { filter: drop-shadow(0 0 4px var(--gold)) drop-shadow(0 2px 3px rgba(30, 20, 10, 0.5)); }
       /* County name floating north of the game-board edge (countyBoard.ts).
          Decorative — never eats map clicks; fades out past labelMaxZoom. */
       .county-label {
@@ -1209,6 +1269,51 @@
       .county-label-state {
         font-size: 16px; font-weight: 700; letter-spacing: 10px; color: var(--gold);
         line-height: 1.2; margin-top: 2px;
+      }
+
+      /* ---------- In-game modal (ui/modal.ts) ----------
+         Replaces window.confirm/prompt. z-index sits above the home screen
+         (150) so a "Delete farm?" from the main menu is still reachable. */
+      .modal-backdrop {
+        position: fixed; inset: 0; z-index: 200;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(30, 20, 10, 0.55); backdrop-filter: blur(2px);
+        animation: modal-fade 0.12s ease-out;
+      }
+      .modal {
+        min-width: 300px; max-width: min(440px, calc(100vw - 40px));
+        padding: 18px 20px 16px; text-align: left;
+        animation: modal-rise 0.14s ease-out;
+      }
+      .modal-title { font-size: 16px; font-weight: 700; color: var(--ink); }
+      .modal-body { margin-top: 7px; font-size: 13px; color: #8a7658; line-height: 1.45; }
+      .modal-input {
+        width: 100%; box-sizing: border-box; margin-top: 12px; padding: 7px 9px;
+        border: 1.5px solid var(--wood); border-radius: 8px;
+        background: var(--cream-2); color: var(--ink); font: inherit;
+      }
+      .modal-input:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
+      .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+      .modal-actions button {
+        padding: 7px 14px; border-radius: 8px; cursor: pointer;
+        border: 1.5px solid var(--wood); background: var(--cream-2);
+        color: var(--wood); font: inherit; font-weight: 600;
+      }
+      .modal-actions button:hover { background: var(--cream); }
+      .modal-actions button:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+      .modal-actions .modal-ok.primary { background: var(--green); border-color: var(--green-dark); color: #fff; }
+      .modal-actions .modal-ok.primary:hover { background: var(--green-dark); }
+      .modal-actions .modal-ok.danger { background: var(--red); border-color: #a83c33; color: #fff; }
+      .modal-actions .modal-ok.danger:hover { background: #a83c33; }
+      @keyframes modal-fade { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes modal-rise {
+        from { opacity: 0; transform: translateY(8px) scale(0.98); }
+        to { opacity: 1; transform: none; }
+      }
+      /* Respect a system "reduce motion" setting — the dialog still appears,
+         it just doesn't slide or fade in. */
+      @media (prefers-reduced-motion: reduce) {
+        .modal-backdrop, .modal { animation: none; }
       }
 
       .building-popup { font-size: 13px; min-width: 160px; }
@@ -1299,6 +1404,14 @@
       #dev .ok { color: #8e8; }
       #dev .err { color: #f88; }
       #dev .row { margin: 1px 0; }
+      #dev-tools:empty { display: none; }
+      #dev-tools { margin-top: 5px; }
+      #dev-tools button {
+        font: inherit; font-size: 11px; font-weight: 600; cursor: pointer;
+        padding: 3px 8px; border-radius: 6px;
+        border: 1px solid #6d7; background: rgba(110, 200, 120, 0.18); color: #9e9;
+      }
+      #dev-tools button:hover { background: rgba(110, 200, 120, 0.32); }
     </style>
   </head>
   <body>
@@ -1419,6 +1532,12 @@
         <button id="settings-new-menu" class="primary">＋ New farm… (main menu)</button>
       </div>
       <div id="settings-farms"></div>
+
+      <div class="settings-section">
+        <h3>🛰️ Satellite imagery source</h3>
+        <div class="sub">If the map won't load imagery, the current host may be down — try another.</div>
+        <div id="settings-naip-providers" class="naip-provider-row"></div>
+      </div>
     </div>
 
     <div id="cropcal" class="panel">
@@ -1454,7 +1573,6 @@
       <div id="fp-main" class="fp-main">
         <h2><span id="fp-title">Field</span><button id="fp-rename" class="fp-rename-btn" title="Rename field">✏️</button></h2>
         <div class="sub" id="fp-sub">— acres</div>
-        <div><span class="badge" id="fp-status">stubble</span></div>
 
         <div id="fp-view-tab" class="fp-tabpanel">
           <div id="fp-body"></div>
@@ -1477,9 +1595,13 @@
           <div id="fp-plans"></div>
           <div id="fp-schedule-grid"></div>
           <div id="fp-schedule-msg"></div>
-          <!-- Manual "plow now" override — moved here from Field View
-               2026-07-24, since plowing is scheduled on this tab. -->
-          <div id="fp-schedule-plow"></div>
+          <!-- Reset-timing and the manual "plow now" override share one row
+               (maintainer, 2026-07-31) — two full-width stacked buttons cost
+               vertical space the calendar wanted. -->
+          <div id="fp-schedule-footer">
+            <div id="fp-schedule-reset"></div>
+            <div id="fp-schedule-plow"></div>
+          </div>
         </div>
 
         <div id="fp-finances-tab" class="fp-tabpanel" style="display: none">
@@ -1546,6 +1668,9 @@
       <div class="row" id="status-osm">Roads: …</div>
       <div class="row" id="status-route"></div>
       <div class="row" id="attr"></div>
+      <!-- Populated by main.ts ONLY on the dev server (import.meta.env.DEV);
+           stays empty in a production build. -->
+      <div class="row" id="dev-tools"></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
