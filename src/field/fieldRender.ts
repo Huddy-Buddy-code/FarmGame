@@ -21,6 +21,7 @@ import { smoothPolygon } from "../geo/geometry";
 import type { FieldStatus } from "../state/saveState";
 import { gameConfig, FEET_TO_METERS } from "../config/gameConfig";
 import type { CropId } from "../config/gameConfig";
+import { isPerennial } from "../sim/farming";
 import { buildHeadlandLaps, TASK_HEADLANDS } from "../sim/coverage";
 import type { Surface } from "../map/overlay";
 
@@ -166,13 +167,13 @@ export function drawFieldTexture(
       }
 
       case "ready":
-        if (p.crop === "grass" || p.crop === "alfalfa") {
+        if (isPerennial(p.crop)) {
           // Perennial hay stand ready to cut: no crop rows (it's a dense sward),
           // a soft wind-blown mottle, and — for alfalfa — a scatter of purple
           // bloom flecks (alfalfa flowers just before cutting).
           canopyMottle(ctx, w, h, seed + 7, dark, light, 1.1, areaScale);
           swardStreaks(ctx, w, h, angle, seed + 13, dark, light, areaScale);
-          if (p.crop === "alfalfa") bloomFlecks(ctx, w, h, seed + 29, "#7d5aa6", "#9d78c4", areaScale);
+          if (p.crop === "alfalfa" || p.crop === "alfalfaSilage") bloomFlecks(ctx, w, h, seed + 29, "#7d5aa6", "#9d78c4", areaScale);
           break;
         }
         canopyMottle(ctx, w, h, seed + 7, dark, light, 0.9, areaScale);
@@ -182,7 +183,7 @@ export function drawFieldTexture(
         break;
 
       case "harvested":
-        if (p.crop === "grass" || p.crop === "alfalfa") {
+        if (isPerennial(p.crop)) {
           // Freshly-mown hay: dark green cut stubble with mower-swath stripes —
           // regrowth already showing, not tan chaff like a combined grain field.
           rows(ctx, w, h, angle, 2.2, dark, 0.9, 0.3);
@@ -263,7 +264,7 @@ export function drawFieldTexture(
     // harvested-and-raked field (before the baler collects it).
     if (p.windrowed) {
       // Hay windrows (grass/alfalfa) are greener/paler than corn-stover rows.
-      const hay = p.crop === "grass" || p.crop === "alfalfa";
+      const hay = isPerennial(p.crop);
       const pile = hay ? "#8f9152" : "#7a6a3f";
       const crest = hay ? "#bcbb7e" : "#a89263";
       const shade = hay ? "#5c5f33" : "#4f4529";
@@ -347,8 +348,8 @@ function palette(p: FieldPaintParams): { base: string; dark: string; light: stri
     }
     case "ready": {
       // Perennial forage stands are GREEN at cutting, not golden like grain.
-      if (p.crop === "grass") return { base: "#7f9a4e", dark: "#65803a", light: "#9bb267" }; // lush tall grass
-      if (p.crop === "alfalfa") return { base: "#5f7d40", dark: "#4c6733", light: "#7a9455" }; // deep alfalfa green
+      if (p.crop === "grass" || p.crop === "grassSilage") return { base: "#7f9a4e", dark: "#65803a", light: "#9bb267" }; // lush tall grass
+      if (p.crop === "alfalfa" || p.crop === "alfalfaSilage") return { base: "#5f7d40", dark: "#4c6733", light: "#7a9455" }; // deep alfalfa green
       // Per-crop ripe tint (2026-07-22, with the six new annuals) — unlisted
       // crops (corn, wheat, barley…) share the classic golden-grain default.
       const ripe: Partial<Record<CropId, { base: string; dark: string; light: string }>> = {
@@ -362,7 +363,7 @@ function palette(p: FieldPaintParams): { base: string; dark: string; light: stri
     }
     case "harvested":
       // A freshly-cut hay stand is dark green stubble/regrowth, not tan chaff.
-      if (p.crop === "grass" || p.crop === "alfalfa") return { base: "#4f6537", dark: "#3f522c", light: "#63794a" };
+      if (isPerennial(p.crop)) return { base: "#4f6537", dark: "#3f522c", light: "#63794a" };
       return { base: "#b3a375", dark: "#9a8a5e", light: "#c4b489" };
     case "mulched":
       // Greener than stubble — grass retained under a clean, mown/baled surface.
@@ -402,7 +403,7 @@ function headlandLapsForStatus(status: FieldStatus, crop: CropId | undefined): n
     case "ready":
       // Perennial forage is a dense sward with no crop rows at all (see the
       // `ready` case above) — nothing for a frame to distinguish.
-      if (crop === "grass" || crop === "alfalfa") return 0;
+      if (isPerennial(crop)) return 0;
       return TASK_HEADLANDS.plant?.laps ?? 0;
     case "withered":
       // The crop died where it was PLANTED and nothing has driven the field
@@ -432,7 +433,7 @@ function defaultSwathM(status: FieldStatus, crop: CropId | undefined): number {
         return gameConfig.equipment.planter.medium.widthFt;
       case "harvested":
       case "mulched":
-        return crop === "grass" || crop === "alfalfa"
+        return isPerennial(crop)
           ? gameConfig.equipment.mower.medium.widthFt
           : gameConfig.equipment.harvester.medium.widthFt;
       default:

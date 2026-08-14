@@ -229,3 +229,61 @@ describe("a bale trailer joins the rig in the field before a second one goes out
     expect(queueHaulBales(save, field.id)).toBeTruthy();
   });
 });
+
+describe("farm-wide Hay-Spikes : Bale-Trailer balance (2026-08-13, maintainer request)", () => {
+  /** A field full of bales and nothing crewed on it yet. */
+  function baleField(): { save: SaveState; field: Field } {
+    const save = newGame();
+    save.money = 20_000_000;
+    buyBuildingAt(save, "baleArea", [-400, -400]);
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary, status: "mulched", baleProduct: "straw",
+      baleLocations: Array.from({ length: 30 }, (_, i) => [i * 10, i * 10] as Meters),
+    };
+    save.fields.push(field);
+    return { save, field };
+  }
+
+  // Two ACTIVE haulBales tasks parked elsewhere on the farm, standing in for
+  // whatever's already running — `haulCrewIsBalanced` only reads task type/
+  // status/trailerAgentId, so a fieldId that doesn't resolve to a real field
+  // is fine for exercising it directly.
+  function activeSpikesTask(id: string, trailerAgentId?: string): SaveState["tasks"][number] {
+    return {
+      id, type: "haulBales", fieldId: "elsewhere", totalAcres: 1, doneAcres: 0,
+      status: "active", costPaid: 0, agentId: `spikes-agent-${id}`, trailerAgentId,
+    };
+  }
+
+  it("refuses to grow a new collector once the fleet's already a spike ahead of its trailers", () => {
+    const { save, field } = baleField();
+    buyAgent(save, "tractor", "medium", [0, 0]);
+    buyImplement(save, "haySpikes", "medium");
+    // 2 active spikes, 0 active trailers — already at +2, over the +1 allowance.
+    save.tasks.push(activeSpikesTask("t1"), activeSpikesTask("t2"));
+
+    expect(queueHaulBales(save, field.id)).toBeUndefined();
+  });
+
+  it("allows growth once a paired trailer brings the ratio back within one", () => {
+    const { save, field } = baleField();
+    buyAgent(save, "tractor", "medium", [0, 0]);
+    buyImplement(save, "haySpikes", "medium");
+    // 2 active spikes, 1 active trailer — a gap of 1, right at the allowance.
+    save.tasks.push(activeSpikesTask("t1", "trailer-agent-1"), activeSpikesTask("t2"));
+
+    expect(queueHaulBales(save, field.id)).toBeTruthy();
+  });
+
+  it("never counts a QUEUED (uncrewed) task against the ratio — only active ones", () => {
+    const { save, field } = baleField();
+    buyAgent(save, "tractor", "medium", [0, 0]);
+    buyImplement(save, "haySpikes", "medium");
+    save.tasks.push(
+      { ...activeSpikesTask("t1"), status: "queued", agentId: undefined },
+      { ...activeSpikesTask("t2"), status: "queued", agentId: undefined },
+    );
+
+    expect(queueHaulBales(save, field.id)).toBeTruthy();
+  });
+});

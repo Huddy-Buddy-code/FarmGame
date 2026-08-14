@@ -2834,6 +2834,173 @@ maintainer after reload. Typecheck + 892/892 tests; no new automated
 coverage for this one — it's real MapLibre compositing behavior, not
 something the current unit tests exercise.
 
+## 2026-08-13 — Grass/Alfalfa Silage split, harvest-relay tuning, Work Queue Reset, bale-hauling rework
+
+Six related changes in one pass, bundled because they all touch task
+assignment/hauling:
+
+**Work Queue Reset/Cancel.** `resetQueuedTask` (sim/tasks.ts) cancels a
+queued task and re-enqueues an equivalent one at the back — genuinely
+distinct from Cancel for a generic field task. System tasks (`haulBales`/
+`unloadHarvester`/`sell`) self-regenerate on their own, so they only got
+Cancel (previously missing entirely for those three while queued —
+`buildQueueRow` early-returned before any cancel control). New `.qr-reset`
+button in main.ts/index.html, next to the existing `.qr-cancel`.
+
+**Harvest support.** `callCartAtFraction` 0.85 → 0.75 (call the cart
+earlier). New `cartReturnIdleFraction` (0.8): a WAITING (not actively
+alongside) cart heads to the silo once it's already ≥80% full, distinct from
+the `cartSiloRunFraction` rule removed 2026-07-24 — that one pulled the
+ACTIVE cart off early too, which wasted round trips; this only fires for a
+cart that's already stood down. `shouldReserveForHarvest` generalized to
+`shouldReserveForRelay`, now also holding a tractor back for an uncrewed
+`chop`/forageWagon job, not just `harvest`/grainTrailer — that gap meant a
+chopper could sit uncrewed while a wagon-capable tractor wandered onto field
+work. Fill bar smoothing: `computeImplFill` factored out of
+`implementRowHtml` so a new `updateFillBars()` can patch the bar width/label
+directly every tick (not the panel's throttled ~2x/sec rebuild) without
+touching row/button DOM.
+
+**Grass/Alfalfa Silage rework** (mirrors the 2026-08-12 Corn→Forage split).
+`grass`/`alfalfa` lost `silageProduct` (no more bunker-chop route) and
+display-only `Round/Square Grass/Alfalfa Bale` names (was "...Hay"). New
+`grassSilage`/`alfalfaSilage` crops: same timing, `producesWrappedBale: true`
+— wrap is automatic once baled (`wrapPending` checks the crop flag, not just
+`FieldPlan.wrap`), gated so a Combi Baler can never wrap a plain
+Grass/Alfalfa field even if one's hitched (`applyBaleDone`,
+`canWrapBales` now both check `cropProducesWrappedBale`). Combi Baler is now
+tried FIRST in auto-hitch for these crops (`BALER_KINDS_WRAP_PREFERRED`).
+Square bales can now be wrapped too (2026-08-13 — previously only round;
+`BALEAGE_OF` extended, new `haySquareBaleage`/`alfalfaHaySquareBaleage`
+products) — a deliberate reversal of the earlier "needs a tube wrapper"
+constraint per this ask. New aging mechanic: `resolveAgedBaleProduct`
+(farming.ts) turns a wrapped crop-specific product into a generic
+`silageBale`/`silageBaleSquare` ("Silage Bale (wrapped)") once
+`forage.silageAgingMonths` (2) have passed since `Field.wrappedAt` —
+resolved once, at the moment bales leave the field (`queueHaulBales`,
+`sellBales`), since `Building.storedBales` has no per-batch timestamp to age
+against once bales are in a shared store. `rotationTimeline.ts`'s
+`perennialYears` default 3 → 1 (display only — the sim never capped years).
+
+**Bale hauling relay.** Up to `maxSpikesPerTrailer` (2) Hay-Spikes rigs can
+now share one Bale Trailer (`shareableTrailerOn`/`trailerSpikeCount`,
+`assignTrailerHelper`) instead of each needing its own. This needed two
+correctness fixes beyond the happy path: (1) the trailer's "am I ready"
+check in the Hay-Spikes brain read `task.trailerPhase`/
+`haulRendezvousRuntime.get(task.id)` — fields only ever written on the
+OWNING task, so a sharing task's own copy never updated; now reads the
+owner's task via `trailerAgent.taskId`. (2) `finishHaul` freed every agent
+listed on a task unconditionally, including a shared trailer it didn't own —
+now only frees an agent whose `taskId` actually still points at this task.
+The trailer-side "done" check also now aggregates cargo across every task
+sharing it, not just the owner's own collector, so it can't retire itself
+mid-relay for a rig that's still out working the field. New farm-wide
+`haulCrewIsBalanced` gate on `queueHaulBales`: won't grow the Hay-Spikes crew
+past one more than active trailers (trailers can't exceed spikes to begin
+with — a trailer only ever exists because some spikes task summoned it).
+Manual "🚜 Haul Bales" button added next to Plow in the Field Schedule footer
+(`renderQueueHaulBales`, new `#fp-schedule-haul` host div) — same
+`queueHaulBales`/`fieldHasLooseBales` pair the existing Field-View button
+already used, gated the same way.
+
+Typecheck clean, 900/900 tests (16 new: `resetQueuedTask`, trailer sharing,
+the farm-wide balance gate, silage-crop/product invariants, plus fixture
+fixes in tests the config/threshold changes touched). **UI pieces unverified
+visually this session** — Browser Preview's `computer{screenshot}` returned
+"Browser pane is not displayed" throughout (infrastructure issue, not
+something a code change fixes), and toolbar-panel-open state didn't respond
+to either coordinate-free `ref` clicks or synthetic `.click()` calls in a way
+DOM inspection could confirm, so the Work Queue Reset/Cancel buttons, the
+manual Haul Bales button's placement, and the fill-bar smoothing couldn't be
+eyeballed. All are additive, follow existing CSS/JS patterns exactly
+(`.qr-cancel`'s sibling `.qr-reset`, `renderQueuePlow`'s structure verbatim
+for `renderQueueHaulBales`), and are backed by the full sim-logic test suite
+underneath them — but that's typecheck+tests confidence, not a UI check.
+
+## 2026-08-13 — Corn (Forage) chop silently unrunnable with no Row-Crop Head
+
+Maintainer report: "I can't harvest this crop, even though I have the
+forage harvester and forage trailer" — i.e. the two pieces they mentioned,
+minus the third (`chopHeadKind("forage")` → `rowCropHead`) they didn't.
+
+Two real bugs, both traced to the Forage crop split (`e9948f5`,
+2026-08-12), neither a regression from 2026-08-13's work:
+
+1. `enqueueTask`'s `"chop"` block (sim/tasks.ts) checked the Forage Wagon
+   but never the `forageHarvester` agent or the head implement. Clicking
+   "Queue Chop" with no Row-Crop Head owned queued the task anyway, with no
+   error — it just sat there, since task-selection correctly refuses to
+   hand a chop task to an agent that can't get the right head. A field with
+   two of the three required pieces looked identical to a hard bug: no
+   button, no message, permanently "ready." Fixed by adding the same
+   harvester/head checks `canChopField` already used elsewhere, so the
+   error surfaces at the moment of the click instead of never.
+2. Separately: the auto-hitch `needKind` ternary in the idle-agent pickup
+   loop had branches for `sell`/`harvest`/`bale` but none for `chop` (`chop`
+   isn't in the static `TASK_IMPLEMENT` table either — it's crop-dependent,
+   same reasoning as `harvest`'s header). So even a player who DID own a
+   Row-Crop Head never got it auto-attached when a chop task started — it
+   would've chopped at the wrong (likely near-zero) swath width instead of
+   refusing outright. Added a `next.type === "chop" ? chopHeadKindForTask(...)`
+   branch, mirroring `harvest`'s.
+
+Also fixed the field panel's "Queue Chop" button tooltip (main.ts), which
+only ever checked harvester ownership ("no grain, no residue" regardless of
+wagon/head) — it now names whichever of the three is actually missing.
+
+Typecheck clean, 902/902 tests (2 existing silage.test.ts cases rewritten —
+they relied on `enqueueTask` NOT checking equipment up front, which was
+exactly the bug; the "queued, then equipment sold out from under it" shape
+they were really testing is preserved by removing gear AFTER queueing
+instead of never buying it).
+
+## 2026-08-13 — Row-Crop Head/Pickup Head hidden from the map marker
+
+Maintainer request: match the combine headers' treatment ("hide the corn
+header and grain header from the field icons", 2026-07-24) — a chopper's
+head shouldn't badge separately on the map, same reasoning. Added
+`"rowCropHead"`/`"pickupHead"` to `MINOR_IMPLEMENT_KINDS` (main.ts) — the
+skip-list `updateAgentMarkers` already checks before drawing an implement
+badge beside an agent. Unlike the combine, this is skip-list ONLY: the
+Forage Harvester has no per-head sprite VARIANT the way `Combine_*_
+CornHeader.png`/`GrainHeader.png` exist — only `rowCropHead` is reachable in
+play now (Forage is the only crop left that chops), so there's nothing to
+switch between. No new art. Typecheck + 902/902 unchanged (no test covers
+this map-only rendering concern either way).
+
+## 2026-08-13 — Forage Harvester map icon resized; wagon trails behind, not beside
+
+Two quick maintainer follow-ups after seeing the Forage Harvester in place:
+
+- **Icon size**: `agentIconPx` (main.ts) special-cased `forageHarvester` to
+  117px (+50% over the shared 78px "big machine" size), then dialed back
+  20% off THAT (117 × 0.8 = 93.6 → 94px) after a look — net ~+20% over the
+  baseline, not +50%.
+- **Wagon positioning**: a Forage Wagon used to run alongside the chopper
+  during onloading, sharing the grain cart's exact positioning code
+  (`unloadHarvester` serves both relays — see the "RELAY POLYMORPHISM"
+  block). New `chopperTrailPoint(harvester)` (sim/tasks.ts) computes a point
+  `chopperTrailMeters` (20m) BEHIND the chopper along its `heading`, used at
+  both the `toHarvester` approach leg and the `onloading` re-chase check via
+  `isSilageRun(task) ? chopperTrailPoint(harvester) : harvester.pos`.
+  `alongsideMeters` (15) stays the arrival tolerance around whichever point
+  applies, same "gap, not an exact position" reasoning as before. First cut
+  routed BOTH cart types through one `relayApproachTarget(task, harvester)`
+  function (grain's branch just returned `harvester.pos`) — reverted
+  (maintainer request: "keep it simple") so the grain cart's code is the
+  literal, untouched `harvester.pos` it always was, and the silage-only math
+  lives in its own single-purpose helper instead of a shared abstraction.
+
+New test in silage.test.ts samples the wagon's position across a whole chop
+run whenever it's actually stationed-and-transferring (`unloadPhase ===
+"onloading" && agent.state === "working"`) and checks it lands on the
+trailing side of the chopper's heading, not the side — a single-tick
+snapshot is too noisy to assert an exact offset against (the chopper can
+cover tens of meters in one tick while the wagon reacts a tick behind).
+Typecheck + 903/903 (902 + 1 new); grain-cart relay tests (grainCartRelay.
+test.ts, harvestUnload.test.ts) all still pass unchanged, confirming the
+grain "alongside" behavior wasn't touched.
+
 ## Known gaps / unverified
 
 - **Field panel Schedule calendar drag-and-drop is logic-tested only** — no
@@ -2854,4 +3021,4 @@ something the current unit tests exercise.
 ## How to run
 
 `npm run dev` → http://localhost:5173. Checks: `npm run typecheck`, `npm test`.
-**Do not use Browser Preview** — see CLAUDE.md.
+Browser Preview is back on (re-enabled 2026-08-12) — see CLAUDE.md.

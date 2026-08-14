@@ -29,6 +29,13 @@ export function isPerennial(crop?: CropId): boolean {
   return !!crop && !!gameConfig.crops[crop].perennial;
 }
 
+/** Can this crop's bales be wrapped into baleage (2026-08-13)? Only the
+ * Silage crops (grassSilage/alfalfaSilage) — plain Grass/Alfalfa never wrap,
+ * even if a Combi Baler happens to be hitched to one. */
+export function cropProducesWrappedBale(crop?: CropId): boolean {
+  return !!crop && !!gameConfig.crops[crop].producesWrappedBale;
+}
+
 /** How many of THIS campaign year's cuttings a perennial field has already
  * been mowed (0 if its stored count belongs to a prior year — the counter
  * resets when the year turns). */
@@ -58,20 +65,23 @@ const SQUARE_OF: Partial<Record<BaleProduct, BaleProduct>> = {
 };
 
 /**
- * The WRAPPED (baleage) twin of each product (2026-07-31, silage Phase 1).
+ * The WRAPPED (baleage) twin of each product (2026-07-31, silage Phase 1;
+ * square variants added 2026-08-13 for the Grass/Alfalfa Silage crops — a
+ * square bale can now be wrapped too, dropping the earlier "needs a tube
+ * wrapper" constraint).
  *
- * Deliberately only the two ROUND forage products. Straw is dry residue with
- * nothing to ferment — wrapping it just makes an expensive wet bale — and corn
- * stover is legacy. Squares are excluded because wrapping one needs a tube
- * wrapper, a different machine from the round-bale wrapper this ships; a
- * square-baled field simply can't make baleage, which is a real constraint and
- * keeps the baler choice meaningful.
+ * Straw is dry residue with nothing to ferment — wrapping it just makes an
+ * expensive wet bale — and corn stover is legacy, so neither is here.
  *
  * A product missing from this table is one that can never be wrapped.
+ * Whether a FIELD is actually allowed to wrap (crop-gated) is a separate
+ * check — see `cropProducesWrappedBale`.
  */
 const BALEAGE_OF: Partial<Record<BaleProduct, BaleProduct>> = {
   hay: "hayBaleage",
   alfalfaHay: "alfalfaBaleage",
+  haySquare: "haySquareBaleage",
+  alfalfaHaySquare: "alfalfaHaySquareBaleage",
 };
 
 /** The baleage this product becomes when wrapped, or undefined if it can't be
@@ -84,6 +94,40 @@ export function baleageProductFor(product: BaleProduct): BaleProduct | undefined
  * `forage.wrappedSpoilPctPerMonth` and `tickBaleSpoilage`. */
 export function isWrappedProduct(product: BaleProduct): boolean {
   return gameConfig.baleProducts[product].wrapped === true;
+}
+
+/** What a wrapped crop-specific product ages into once nobody's hauled it off
+ * (2026-08-13) — grass and alfalfa baleage both end up as the same generic
+ * "Silage Bale (wrapped)", round or square. Products missing here don't age
+ * (they either aren't wrapped, or are already the generic product). */
+const AGED_SILAGE_OF: Partial<Record<BaleProduct, BaleProduct>> = {
+  hayBaleage: "silageBale",
+  alfalfaBaleage: "silageBale",
+  haySquareBaleage: "silageBaleSquare",
+  alfalfaHaySquareBaleage: "silageBaleSquare",
+};
+
+/**
+ * What `field`'s wrapped bales should be sold/hauled as RIGHT NOW, aging a
+ * crop-specific wrapped product into the generic "Silage Bale (wrapped)"
+ * once `forage.silageAgingMonths` have passed since wrapping.
+ *
+ * SIMPLIFICATION (2026-08-13): storage (`Building.storedBales`) is a flat
+ * per-product count with no per-batch timestamp, so once bales are hauled
+ * into a store there's nothing left to age against. The conversion is
+ * therefore resolved ONCE, at the moment the bales leave the field (hauled
+ * or sold) — call this wherever `field.baleProduct` is about to become a
+ * task's/sale's product, not on every tick. A field whose wrapped bales sit
+ * that long ungathered is the (uncommon) case this models.
+ */
+export function resolveAgedBaleProduct(field: Field, now: SimTime): BaleProduct | undefined {
+  const product = field.baleProduct;
+  if (!product) return product;
+  const aged = AGED_SILAGE_OF[product];
+  if (!aged) return product;
+  if (field.wrappedAt === undefined) return product;
+  const ageMonths = (now - field.wrappedAt) / minutesPerMonth();
+  return ageMonths >= gameConfig.forage.silageAgingMonths ? aged : product;
 }
 
 /**
@@ -101,6 +145,7 @@ export function isWrappedProduct(product: BaleProduct): boolean {
  */
 export function canWrapBales(field: Field, now: SimTime): boolean {
   if (!field.baleLocations?.length) return false;
+  if (!cropProducesWrappedBale(field.crop ?? field.lastCrop)) return false;
   const product = field.baleProduct;
   if (!product || !baleageProductFor(product)) return false;
   if (field.baledAt === undefined) return false;
@@ -192,13 +237,16 @@ export function applyChopDone(field: Field): void {
 /** Wrapping-complete effect: every bale lying in the field becomes baleage.
  * The COUNT is untouched — wrapping seals the bales that are already there, it
  * doesn't make new ones (only a baler decides how many come off an acre). */
-export function applyWrapDone(field: Field): void {
+export function applyWrapDone(field: Field, now: SimTime): void {
   const product = field.baleProduct;
   const wrapped = product ? baleageProductFor(product) : undefined;
   if (!wrapped) return;
   field.baleProduct = wrapped;
   // The window is spent: these are sealed now, so nothing can re-wrap them.
   field.baledAt = undefined;
+  // Starts the aging clock toward the generic "Silage Bale (wrapped)" —
+  // see `resolveAgedBaleProduct`.
+  field.wrappedAt = now;
 }
 
 /** Weight of one bale of `product`, tons. Square bales are heavier than round
@@ -402,13 +450,18 @@ export function applyBaleDone(field: Field, square = false, now?: SimTime, wrapp
   // actually did the work (2026-07-24).
   const round = baleProductForField(field, square);
   // A COMBI baler seals as it rolls (2026-07-31), so its bales land as baleage
-  // with no separate pass and no window to miss. On anything it can't wrap
-  // (straw, squares) it just behaves like the round baler it also is.
-  const wrapped = wrapping ? baleageProductFor(round) : undefined;
+  // with no separate pass and no window to miss — but only on a crop that's
+  // actually allowed to wrap (2026-08-13: the Silage crops only), so a combi
+  // baler hitched to a plain Grass/Alfalfa field still just bales it dry.
+  const wrapped =
+    wrapping && cropProducesWrappedBale(field.crop ?? field.lastCrop) ? baleageProductFor(round) : undefined;
   field.baleProduct = wrapped ?? round;
   // Start the wrapping window — but only on bales that could still use it.
   // Already-wrapped bales have nothing to time (see `canWrapBales`).
   field.baledAt = wrapped ? undefined : now;
+  // Already wrapped straight off the combi baler — starts the aging clock
+  // toward the generic "Silage Bale (wrapped)" (see `resolveAgedBaleProduct`).
+  field.wrappedAt = wrapped ? now : undefined;
   field.forageReady = undefined;
   field.windrowed = undefined;
   field.lastCutProductivity = undefined; // consumed by this bale run

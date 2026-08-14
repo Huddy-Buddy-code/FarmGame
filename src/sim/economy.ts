@@ -20,7 +20,7 @@ import type { SimTime } from "./clock";
 import { START_MONTH, MONTHS_PER_YEAR, minutesPerMonth } from "./calendar";
 import { grainInstantPrice, baleInstantPrice, SELLABLE_GRAINS, ALL_MARKET_PRODUCTS, effectiveSellPlan } from "./market";
 import type { MarketProduct } from "./market";
-import { baleTonsOf } from "./farming";
+import { baleTonsOf, resolveAgedBaleProduct } from "./farming";
 
 export interface SaleResult {
   tons: number;
@@ -52,10 +52,12 @@ export function sellGrain(save: SaveState, crop: CropId, tons: number, _now?: Si
  * Mutates the save; returns what sold. Bales are tracked per-field and stay put
  * until sold — this is the field's "market interface."
  */
-export function sellBales(save: SaveState, field: Field, _now?: SimTime): { bales: number; revenue: number } {
+export function sellBales(save: SaveState, field: Field, now: SimTime): { bales: number; revenue: number } {
   const bales = field.baleLocations?.length ?? 0;
   if (bales <= 0) return { bales: 0, revenue: 0 };
-  const productId = field.baleProduct ?? "cornStover";
+  // Ages a wrapped crop-specific product into the generic "Silage Bale
+  // (wrapped)" if it's sat wrapped long enough — see `resolveAgedBaleProduct`.
+  const productId = resolveAgedBaleProduct(field, now) ?? "cornStover";
   const product = gameConfig.baleProducts[productId];
   const unit = baleInstantPrice(productId); // instant pickup price -- see sellGrain
   const revenue = Math.round(bales * unit);

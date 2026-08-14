@@ -70,11 +70,12 @@ import {
   canWrapBales, cropMakesSilage, isChopOnlyCrop,
 } from "./sim/farming";
 import {
-  ensureAgents, initTaskIds, enqueueTask, cancelTask, forceCancelActiveTask, restartActiveTask, taskCost, tasksFor,
+  ensureAgents, initTaskIds, enqueueTask, cancelTask, resetQueuedTask, forceCancelActiveTask, restartActiveTask, taskCost, tasksFor,
   isFieldHarvesting, effectiveStatus, tickTasks, autoManageAll, autoManageField,
   buyAgent, sellAgent, buyImplement, sellImplement,
   agentPrice, implementPrice, implementName, getCoveragePath,
   reorderTask, estimateTaskHours, forageDue, canMulch, defaultPlan, forcePlow, removeRotationStep, blockedWork,
+  chopHeadKind,
   harvesterCapacityTons, grainTrailerCapacityTons, harvesterCapacityBushels, grainTrailerCapacityBushels,
   tonsPerBushel, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
   appendCompletedTask, haySpikesCapacityBales, baleTrailerCapacityBales, queueHaulBales, fieldHasLooseBales,
@@ -524,6 +525,10 @@ function tickWorld(prev: number) {
   for (const ev of work.events) toastTaskEvent(ev.task, ev.agent, ev.kind);
   updateReveals();
   updateAgentMarkers();
+  // Every tick, not just on the throttled refresh below (2026-08-13) — a
+  // lightweight width/label patch, not a rebuild, so the harvester/cart/
+  // baler fill bars read as a smooth fill instead of stepping in ~8% jumps.
+  updateFillBars();
   // Refresh UI ~2×/s (or instantly when a status flipped). Rebuilding the field
   // panel every frame would recreate its buttons under the player's cursor.
   const rt = performance.now();
@@ -589,8 +594,14 @@ const AGENT_EMOJI: Record<string, string> = { tractor: "🚜", harvester: "🌾"
  * anyway. The two combine HEADERS joined them 2026-07-24 (maintainer request:
  * "hide the corn header and grain header from the field icons") — every combine
  * sprite is already drawn WITH a header on the front, so badging one alongside
- * would draw the same part twice. */
-const MINOR_IMPLEMENT_KINDS = new Set<string>(["haySpikes", "cornHeader", "grainHeader"]);
+ * would draw the same part twice. The chopper heads (rowCropHead/pickupHead)
+ * joined 2026-08-13 for the same reason (maintainer request: "like the headers
+ * on the Combines, it is included in the Harvester's icon") — the Forage
+ * Harvester's sprite already reads as carrying one. Unlike the combine's two
+ * headers, neither gets its own sprite VARIANT (`agentMachineIconHtml`) yet:
+ * only `rowCropHead` is reachable in practice (the only crop that still chops
+ * is Forage — see `cropMakesSilage`), so there's nothing to pick between. */
+const MINOR_IMPLEMENT_KINDS = new Set<string>(["haySpikes", "cornHeader", "grainHeader", "rowCropHead", "pickupHead"]);
 
 // Realistic side-profile machinery SVGs live in ui/icons.ts (maintainer
 // request, 2026-07-12) — one shared set for map dots, panels, and the shop.
@@ -609,9 +620,13 @@ function machineIconHtml(kind: string, size: EquipmentSize | undefined, px: numb
  * machines run 30% larger, because at the shared size they read as tractors.
  * Combines got this 2026-07-21, the windrower 2026-07-24 (maintainer request) —
  * it's a full self-propelled machine, not a tractor with a mower on the back,
- * and it should look like one on the map. */
+ * and it should look like one on the map. The Forage Harvester got a further
+ * bump on top of that, 2026-08-13 (maintainer request: "increase the size...
+ * by 50%", 78 → 117px) then dialed back 20% after seeing it in place
+ * (117 × 0.8 = 93.6, rounded to 94px — a net ~+20% over the shared 78px). */
 const BIG_MAP_ICON_KINDS = new Set<string>(["harvester", "windrower", "forageHarvester"]);
 function agentIconPx(kind: string): number {
+  if (kind === "forageHarvester") return 94;
   return BIG_MAP_ICON_KINDS.has(kind) ? 78 : 60;
 }
 
@@ -1178,6 +1193,76 @@ const IMPLEMENT_QUEUE_ICON_PX = 36;
  * the total off to the right. Empty string for queued tasks (no agent/
  * implement committed yet) or a task type with no implement of its own.
  */
+/**
+ * The implement fill bar's {pct, primary, secondary} for a task/agent pair —
+ * factored out (2026-08-13) so `implementRowHtml`'s full row rebuild and
+ * `updateFillBars`'s per-frame lightweight patch (below) share one source of
+ * truth and can never drift out of sync with each other.
+ */
+function computeImplFill(task: FarmTask, agent: Agent): { pct: number; primary: string; secondary?: string } | null {
+  if (task.type === "harvest") {
+    const size = agent.size ?? "medium";
+    const crop = task.crop ?? save.fields.find((f) => f.id === task.fieldId)?.crop ?? "corn";
+    const capBu = harvesterCapacityBushels(size);
+    const capT = harvesterCapacityTons(size, crop);
+    const onboard = agent.grainOnboard ?? 0;
+    return {
+      pct: capT > 0 ? Math.min(100, (onboard / capT) * 100) : 0,
+      primary: `${(onboard / tonsPerBushel(crop)).toFixed(0)} / ${capBu.toLocaleString()} bu`,
+      secondary: `${onboard.toFixed(1)} / ${capT.toFixed(1)} t ${gameConfig.crops[crop].name.toLowerCase()}`,
+    };
+  }
+  if (task.type === "unloadHarvester") {
+    const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "grainTrailer");
+    if (!trailer) return null;
+    const haulCrop = task.crop ?? trailer.cargoCrop ?? "corn";
+    const capBu = grainTrailerCapacityBushels(trailer.size);
+    const capT = grainTrailerCapacityTons(trailer.size, haulCrop);
+    const cargo = trailer.cargoTons ?? 0;
+    return {
+      pct: capT > 0 ? Math.min(100, (cargo / capT) * 100) : 0,
+      primary: `${(cargo / tonsPerBushel(haulCrop)).toFixed(0)} / ${capBu.toLocaleString()} bu`,
+      secondary: `${cargo.toFixed(1)} / ${capT.toFixed(1)} t ${gameConfig.crops[haulCrop].name.toLowerCase()}`,
+    };
+  }
+  if (task.type === "haulBales") {
+    // Two different machines can carry this task's fill bar — the Bale
+    // Trailer (`buildBaleTrailerRow`) if this agent is running it, else the
+    // Hay-Spikes collector.
+    if (agent.id === task.trailerAgentId) {
+      const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "baleTrailer");
+      if (!trailer) return null;
+      const cap = baleTrailerCapacityBales(trailer.size);
+      const onboard = trailer.cargoBales ?? 0;
+      return { pct: cap > 0 ? Math.min(100, (onboard / cap) * 100) : 0, primary: `${onboard} / ${cap} bales` };
+    }
+    const spikes = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "haySpikes");
+    if (!spikes) return null;
+    const capB = haySpikesCapacityBales(spikes.size);
+    const onboard = spikes.cargoBales ?? 0;
+    return {
+      pct: capB > 0 ? Math.min(100, (onboard / capB) * 100) : 0,
+      primary: `${onboard} / ${capB} bale${capB === 1 ? "" : "s"}`,
+    };
+  }
+  if (task.type === "bale") {
+    const impl = save.implements.find(
+      (i) => i.attachedTo === agent.id && (i.kind === "bailer" || i.kind === "squareBaler"),
+    );
+    if (!impl) return null;
+    const field = save.fields.find((f) => f.id === task.fieldId);
+    const square = impl.kind === "squareBaler";
+    const baleTons = field ? baleTonsOf(baleProductForField(field, square)) : gameConfig.forage.baleTons;
+    const cargo = impl.cargoTons ?? 0;
+    return {
+      pct: baleTons > 0 ? Math.min(100, (cargo / baleTons) * 100) : 0,
+      primary: `${cargo.toFixed(2)} / ${baleTons} t`,
+      secondary: "toward the next bale",
+    };
+  }
+  return null;
+}
+
 function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
   if (!agent || task.status !== "active") return "";
 
@@ -1204,31 +1289,13 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     // Capacity is VOLUME, and how many tons that is depends on the crop
     // (2026-07-24) — so the bar shows both: bushels are what the tank actually
     // holds, tons are what the player sells.
-    const crop = task.crop ?? save.fields.find((f) => f.id === task.fieldId)?.crop ?? "corn";
-    const capBu = harvesterCapacityBushels(size);
-    const capT = harvesterCapacityTons(size, crop);
-    const onboard = agent.grainOnboard ?? 0;
-    fill = {
-      pct: capT > 0 ? Math.min(100, (onboard / capT) * 100) : 0,
-      // Volume on the bar — that's what the tank physically holds — with the
-      // saleable tonnage underneath.
-      primary: `${(onboard / tonsPerBushel(crop)).toFixed(0)} / ${capBu.toLocaleString()} bu`,
-      secondary: `${onboard.toFixed(1)} / ${capT.toFixed(1)} t ${gameConfig.crops[crop].name.toLowerCase()}`,
-    };
+    fill = computeImplFill(task, agent);
   } else if (task.type === "unloadHarvester") {
     const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "grainTrailer");
     if (!trailer) return "";
     iconSvg = grainTrailerIconSvg(IMPLEMENT_QUEUE_ICON_PX);
     info = implementInfoLines("grainTrailer", trailer.size);
-    const haulCrop = task.crop ?? trailer.cargoCrop ?? "corn";
-    const capBu = grainTrailerCapacityBushels(trailer.size);
-    const capT = grainTrailerCapacityTons(trailer.size, haulCrop);
-    const cargo = trailer.cargoTons ?? 0;
-    fill = {
-      pct: capT > 0 ? Math.min(100, (cargo / capT) * 100) : 0,
-      primary: `${(cargo / tonsPerBushel(haulCrop)).toFixed(0)} / ${capBu.toLocaleString()} bu`,
-      secondary: `${cargo.toFixed(1)} / ${capT.toFixed(1)} t ${gameConfig.crops[haulCrop].name.toLowerCase()}`,
-    };
+    fill = computeImplFill(task, agent);
   } else if (task.type === "haulBales") {
     const spikes = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "haySpikes");
     if (!spikes) return "";
@@ -1239,12 +1306,7 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     // second machine the header doesn't show.
     iconSvg = (IMPLEMENT_ICON_SVG.haySpikes ?? plowIconSvg)(IMPLEMENT_QUEUE_ICON_PX);
     info = implementInfoLines("haySpikes", spikes.size);
-    const capB = haySpikesCapacityBales(spikes.size);
-    const onboard = spikes.cargoBales ?? 0;
-    fill = {
-      pct: capB > 0 ? Math.min(100, (onboard / capB) * 100) : 0,
-      primary: `${onboard} / ${capB} bale${capB === 1 ? "" : "s"}`,
-    };
+    fill = computeImplFill(task, agent);
   } else if (task.type === "bale") {
     const impl = save.implements.find(
       (i) => i.attachedTo === agent.id && (i.kind === "bailer" || i.kind === "squareBaler"),
@@ -1259,17 +1321,7 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
       name: `${IMPLEMENT_KIND_NAME[impl.kind]} - ${SIZE_LABEL[impl.size]}`,
       detail: swathFt ? `${swathFt.toFixed(0)} ft windrow` : "picks up the windrow",
     };
-    // The baler's real hopper (like the combine): tons gathered toward the next
-    // bale, resetting to 0 each time one ejects. Total = one bale's worth,
-    // which is product-dependent since square bales arrived.
-    const square = impl.kind === "squareBaler";
-    const baleTons = field ? baleTonsOf(baleProductForField(field, square)) : gameConfig.forage.baleTons;
-    const cargo = impl.cargoTons ?? 0;
-    fill = {
-      pct: baleTons > 0 ? Math.min(100, (cargo / baleTons) * 100) : 0,
-      primary: `${cargo.toFixed(2)} / ${baleTons} t`,
-      secondary: "toward the next bale",
-    };
+    fill = computeImplFill(task, agent);
   } else if (agent.kind === "windrower") {
     // NO implement row at all (maintainer request, 2026-07-25). A windrower is
     // self-propelled — it IS the mower — so an implement row has nothing to
@@ -1297,15 +1349,18 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
   // It gets its own full-width CARD now (`buildBaleTrailerRow`, 2026-07-25):
   // its name carries both the implement and its tractor, which wrapped onto
   // four lines inside a sub-row and left the fill bar clipped to "/ 20 bales".
-  return implRow(iconSvg, info, fill);
+  return implRow(iconSvg, info, fill, agent.id);
 }
 
 /** Wrap one implement into a Work-Queue sub-row (icon + name/detail + optional
- * fill bar). Shared by the collector row and the Bale Trailer row. */
+ * fill bar). Shared by the collector row and the Bale Trailer row. `agentId`
+ * (2026-08-13) stamps the bar/label so `updateFillBars` can patch them every
+ * frame without waiting for the panel's throttled full rebuild. */
 function implRow(
   iconSvg: string,
   info: { name: string; detail: string },
   fill: { pct: number; primary: string; secondary?: string } | null,
+  agentId?: string,
 ): string {
   // The bar takes the WHOLE row (2026-07-24). It used to share the row with a
   // non-shrinking total off to the right, which was fine at "50 t" and hopeless
@@ -1314,7 +1369,7 @@ function implRow(
   const fillHtml = fill
     ? `<div class="impl-fillrow">
         <span class="impl-fill">
-          <span class="impl-fill-bar" style="width:${fill.pct.toFixed(0)}%"></span>
+          <span class="impl-fill-bar" ${agentId ? `data-fill-agent="${agentId}"` : ""} style="width:${fill.pct.toFixed(0)}%"></span>
           <span class="impl-fill-label">${fill.primary} · ${fill.pct.toFixed(0)}%</span>
         </span>
       </div>${fill.secondary ? `<div class="impl-fillsub">${fill.secondary}</div>` : ""}`
@@ -1382,9 +1437,7 @@ function buildBaleTrailerRow(task: FarmTask): HTMLElement | null {
   const trailer = save.implements.find((i) => i.attachedTo === tAgent.id && i.kind === "baleTrailer");
   if (!trailer) return null;
 
-  const cap = baleTrailerCapacityBales(trailer.size);
-  const onboard = trailer.cargoBales ?? 0;
-  const loadPct = cap > 0 ? Math.min(100, (onboard / cap) * 100) : 0;
+  const load = computeImplFill(task, tAgent);
   const phase = task.waitingForStorage
     ? "⚠️ Waiting for storage room"
     : (TRAILER_PHASE_TEXT[task.trailerPhase ?? "toEntrance"] ?? "");
@@ -1407,7 +1460,8 @@ function buildBaleTrailerRow(task: FarmTask): HTMLElement | null {
       ${implRow(
         trailerIconHtml(trailer, IMPLEMENT_QUEUE_ICON_PX),
         implementInfoLines("baleTrailer", trailer.size),
-        { pct: loadPct, primary: `${onboard} / ${cap} bales` },
+        load,
+        tAgent.id,
       )}
     </span>`;
   return row; // system task — not draggable/cancelable, it follows its haul
@@ -1493,6 +1547,52 @@ function wireRowSelection(row: HTMLElement, task: FarmTask): void {
   });
 }
 
+/** A queued row's Cancel button (2026-08-13) — shared by every queued row
+ * type now, including the system ones (Unload Harvester / Haul Bales /
+ * Sell), which used to have no way to cancel while queued at all. */
+function queuedCancelButton(task: FarmTask): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.className = "qr-cancel";
+  btn.textContent = "✕";
+  btn.title = task.costPaid > 0 ? `Cancel and refund $${task.costPaid.toLocaleString()}` : "Cancel";
+  btn.addEventListener("click", () => {
+    try {
+      cancelTask(save, task.id);
+      updateHud();
+      refreshQueuePanel();
+      if (selectedFieldId) refreshFieldPanel(true);
+      toast(task.costPaid > 0 ? `↩️ Canceled — $${task.costPaid.toLocaleString()} refunded` : "↩️ Canceled");
+    } catch (err) {
+      toast("❌ " + (err as Error).message, 3500);
+    }
+  });
+  return btn;
+}
+
+/** A queued row's Reset button (2026-08-13) — cancel it and immediately
+ * re-queue an equivalent task at the back, freshly validated and re-paid
+ * (see `resetQueuedTask`). Generic field tasks only: a system task
+ * self-regenerates on its own every tick its trigger condition still holds,
+ * so Cancel already covers "reset" for those — `queuedCancelButton` alone. */
+function queuedResetButton(task: FarmTask): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.className = "qr-reset";
+  btn.textContent = "↻";
+  btn.title = "Reset — cancel and re-queue at the back";
+  btn.addEventListener("click", () => {
+    try {
+      resetQueuedTask(save, task.id, clock.time());
+      updateHud();
+      refreshQueuePanel();
+      if (selectedFieldId) refreshFieldPanel(true);
+      toast("↻ Reset");
+    } catch (err) {
+      toast("❌ " + (err as Error).message, 3500);
+    }
+  });
+  return btn;
+}
+
 function buildQueueRow(task: FarmTask): HTMLElement {
   const isActive = task.status === "active";
   const agent = isActive && task.agentId ? save.agents.find((a) => a.id === task.agentId) : undefined;
@@ -1515,6 +1615,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
       </span>`;
     wireRowSelection(row, task);
     if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task));
+    else if (!isActive) row.appendChild(queuedCancelButton(task));
     return row; // system task — not draggable/reorderable, it self-regenerates
   }
 
@@ -1546,6 +1647,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
       </span>`;
     wireRowSelection(row, task);
     if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task));
+    else if (!isActive) row.appendChild(queuedCancelButton(task));
     return row; // system task — not draggable/reorderable, it self-regenerates
   }
 
@@ -1572,6 +1674,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
       </span>`;
     wireRowSelection(row, task);
     if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task));
+    else if (!isActive) row.appendChild(queuedCancelButton(task));
     return row; // system task — self-regenerating, not draggable/reorderable
   }
 
@@ -1624,27 +1727,38 @@ function buildQueueRow(task: FarmTask): HTMLElement {
       }
     });
 
-    const btn = document.createElement("button");
-    btn.className = "qr-cancel";
-    btn.textContent = "✕";
-    btn.title = task.costPaid > 0 ? `Cancel and refund $${task.costPaid.toLocaleString()}` : "Cancel";
-    btn.addEventListener("click", () => {
-      try {
-        cancelTask(save, task.id);
-        updateHud();
-        refreshQueuePanel();
-        if (selectedFieldId) refreshFieldPanel(true);
-        toast(task.costPaid > 0 ? `↩️ Canceled — $${task.costPaid.toLocaleString()} refunded` : "↩️ Canceled");
-      } catch (err) {
-        toast("❌ " + (err as Error).message, 3500);
-      }
-    });
-    row.appendChild(btn);
+    row.appendChild(queuedResetButton(task));
+    row.appendChild(queuedCancelButton(task));
   }
   wireRowSelection(row, task);
   if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task));
 
   return row;
+}
+
+/**
+ * Patch every implement fill bar's width/label directly, without rebuilding
+ * the row it lives in (2026-08-13). `refreshQueuePanel` only rebuilds the
+ * Work Queue panel ~2x/sec (`tickWorld`'s `lastUiRefresh` gate) — rebuilding
+ * every frame was ruled out because it recreates buttons under the player's
+ * cursor. The underlying data (`agent.grainOnboard`, `Implement.cargoTons`,
+ * …) is already updated every tick, so the bar visibly stepping in ~8%
+ * jumps was purely a redraw-cadence problem, not a data one. Called
+ * unconditionally every `tickWorld` — this only ever touches two `<span>`s
+ * per bar, so it's cheap enough to run at full frame rate.
+ */
+function updateFillBars(): void {
+  const bars = document.querySelectorAll<HTMLElement>(".impl-fill-bar[data-fill-agent]");
+  for (const bar of bars) {
+    const agentId = bar.dataset.fillAgent;
+    const agent = agentId ? save.agents.find((a) => a.id === agentId) : undefined;
+    const task = agent?.taskId ? save.tasks.find((t) => t.id === agent.taskId) : undefined;
+    const fill = agent && task ? computeImplFill(task, agent) : null;
+    if (!fill) continue;
+    bar.style.width = `${fill.pct.toFixed(0)}%`;
+    const label = bar.parentElement?.querySelector<HTMLElement>(".impl-fill-label");
+    if (label) label.textContent = `${fill.primary} · ${fill.pct.toFixed(0)}%`;
+  }
 }
 
 /** Rebuild the right-hand queue panel: Jobs only, split into a locked Active
@@ -5031,9 +5145,21 @@ function refreshFieldViewTab(field: Field, now: number, auto: boolean, force: bo
           const chopBtn = document.createElement("button");
           chopBtn.className = "primary";
           chopBtn.innerHTML = `🌱 Queue Chop (Silage) <span class="small">$${chopCost.toLocaleString()}</span>`;
-          chopBtn.title = save.agents.some((a) => a.kind === "forageHarvester")
-            ? "Chop the whole plant for silage — no grain, no residue"
-            : "Needs a Forage Harvester and a Forage Wagon (Equipment)";
+          // Named per missing piece (2026-08-13) — queuing used to succeed
+          // regardless (enqueueTask never checked the harvester or head), so
+          // a field with everything but a Row-Crop Head just sat "ready"
+          // forever with no explanation. Same three checks `enqueueTask`
+          // now enforces (sim/tasks.ts), in the same order, so the tooltip
+          // and the click can never disagree.
+          if (!save.agents.some((a) => a.kind === "forageHarvester")) {
+            chopBtn.title = "Needs a Forage Harvester (Equipment)";
+          } else if (!save.implements.some((i) => i.kind === "forageWagon")) {
+            chopBtn.title = "Needs a Forage Wagon (Equipment) — a chopper has no tank of its own";
+          } else if (!save.implements.some((i) => i.kind === chopHeadKind(field.crop!))) {
+            chopBtn.title = `Needs a ${IMPLEMENT_KIND_NAME[chopHeadKind(field.crop!)]} (Equipment) — the chopper can't cut standing ${cfg.name.toLowerCase()} without one`;
+          } else {
+            chopBtn.title = "Chop the whole plant for silage — no grain, no residue";
+          }
           chopBtn.addEventListener("click", () => queueFromPanel(field, "chop"));
           actions.appendChild(chopBtn);
         }
@@ -5085,6 +5211,7 @@ function refreshFieldScheduleTab(field: Field, _now: number, _force: boolean): v
   refreshPlanEditor(field, auto);
   refreshScheduleCalendar(field, auto);
   renderQueuePlow(field);
+  renderQueueHaulBales(field);
 }
 
 /**
@@ -5142,6 +5269,34 @@ function renderQueuePlow(field: Field): void {
       }
     });
   }
+  host.appendChild(btn);
+}
+
+/**
+ * Manual "Haul Bales" control (maintainer request, 2026-08-13) — a one-click
+ * sweep for stranded bales, next to Plow so a player working the Schedule
+ * tab doesn't have to switch to Field View to notice loose bales and go find
+ * the (also-existing) button there. Reuses `queueHaulBales`/
+ * `fieldHasLooseBales` directly rather than `queueFromPanel`, whose `type`
+ * union doesn't include "haulBales" — same pattern the Field View button
+ * already follows. Visible only while there's actually something to sweep.
+ */
+function renderQueueHaulBales(field: Field): void {
+  const host = $("fp-schedule-haul");
+  host.innerHTML = "";
+  if (!fieldHasLooseBales(save, field.id)) return;
+  const btn = document.createElement("button");
+  btn.innerHTML = `🚜 Haul Bales`;
+  btn.title = "Send a Hay-Spikes tractor to pick up bales stranded on this field";
+  btn.addEventListener("click", () => {
+    if (!queueHaulBales(save, field.id, clock.time())) {
+      toast("Nothing to haul, or a haul's already running");
+      return;
+    }
+    refreshQueuePanel();
+    refreshFieldPanel(true);
+    toast("🚜 Haul Bales queued — a Hay-Spikes tractor is on it");
+  });
   host.appendChild(btn);
 }
 

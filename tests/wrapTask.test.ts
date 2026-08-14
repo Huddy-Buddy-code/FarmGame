@@ -28,6 +28,9 @@ function baledField(save: SaveState, n = 12, product: BaleProduct = "hay", baled
   const field: Field = {
     id: "field-1", parcelId: "parcel-1",
     boundary: [[0, 0], [s, 0], [s, s], [0, s]],
+    // grassSilage (2026-08-13): wrap is crop-gated now — a real in-game
+    // perennial keeps its crop set through baling, so tests need it too.
+    crop: "grassSilage",
     status: "mulched", baleProduct: product, baleLocations, baledAt,
     accessPoints: [[s / 2, 0], [s / 2, s]],
   };
@@ -83,12 +86,25 @@ describe("queueing a wrap", () => {
     expect(() => enqueueTask(save, field, "wrap", 0)).toThrow(/no bales/i);
   });
 
-  it("refuses straw and squares — neither makes baleage", () => {
-    for (const product of ["straw", "haySquare"] as BaleProduct[]) {
-      const save = gameWithWrapper();
-      const field = baledField(save, 12, product);
-      expect(() => enqueueTask(save, field, "wrap", 0)).toThrow(/can't be wrapped/i);
-    }
+  it("refuses straw — dry residue has nothing to ferment", () => {
+    const save = gameWithWrapper();
+    const field = baledField(save, 12, "straw");
+    expect(() => enqueueTask(save, field, "wrap", 0)).toThrow(/can't be wrapped/i);
+  });
+
+  it("wraps squares too (2026-08-13) — no longer refused", () => {
+    const save = gameWithWrapper();
+    const field = baledField(save, 12, "haySquare");
+    enqueueTask(save, field, "wrap", 0);
+    runTasks(save, 0, () => save.tasks.every((t) => t.type !== "wrap"));
+    expect(field.baleProduct).toBe("haySquareBaleage");
+  });
+
+  it("refuses a crop that doesn't wrap at all — plain Grass isn't Grass (Silage)", () => {
+    const save = gameWithWrapper();
+    const field = baledField(save);
+    field.crop = "grass";
+    expect(() => enqueueTask(save, field, "wrap", 0)).toThrow(/crop can't be wrapped/i);
   });
 
   it("refuses bales that are already wrapped", () => {
@@ -100,7 +116,7 @@ describe("queueing a wrap", () => {
 
 describe("wrap before haul", () => {
   const planToWrap = (field: Field): void => {
-    field.plans = [{ crop: "grass", bale: true, wrap: true }];
+    field.plans = [{ crop: "grassSilage", bale: true, wrap: true }];
   };
 
   it("HOLDS the auto-haul while a wrap is still owed", () => {
@@ -154,9 +170,10 @@ describe("wrap before haul", () => {
     expect(queueHaulBales(save, field.id, 0)).toBeDefined();
   });
 
-  it("never holds a field whose plan doesn't ask for baleage", () => {
+  it("never holds a field whose crop doesn't wrap (plain Grass, not Grass (Silage))", () => {
     const save = gameWithWrapper();
     const field = baledField(save);
+    field.crop = "grass"; // not a Silage crop — no auto-wrap
     field.plans = [{ crop: "grass", bale: true }]; // wrap off
     expect(wrapPending(save, field, 0)).toBe(false);
     expect(queueHaulBales(save, field.id, 0)).toBeDefined();

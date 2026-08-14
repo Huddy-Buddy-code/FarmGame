@@ -24,6 +24,9 @@ function field(over: Partial<Field> = {}): Field {
     id: "f1",
     parcelId: "p1",
     boundary: [[0, 0], [100, 0], [100, 100], [0, 100]],
+    // grassSilage (2026-08-13): wrap is gated on the crop now — a plain
+    // "grass" field can never wrap even with bales/timing lined up.
+    crop: "grassSilage",
     status: "harvested",
     baleLocations: [[10, 10], [20, 20]],
     baleProduct: "hay",
@@ -43,9 +46,9 @@ describe("what can become baleage", () => {
     expect(baleageProductFor("cornStover")).toBeUndefined();
   });
 
-  it("refuses SQUARE bales — wrapping one needs a tube wrapper, a different machine", () => {
-    expect(baleageProductFor("haySquare")).toBeUndefined();
-    expect(baleageProductFor("alfalfaHaySquare")).toBeUndefined();
+  it("wraps SQUARE grass/alfalfa bales too (2026-08-13) — straw squares still can't", () => {
+    expect(baleageProductFor("haySquare")).toBe("haySquareBaleage");
+    expect(baleageProductFor("alfalfaHaySquare")).toBe("alfalfaHaySquareBaleage");
     expect(baleageProductFor("strawSquare")).toBeUndefined();
   });
 
@@ -54,9 +57,11 @@ describe("what can become baleage", () => {
     expect(baleageProductFor("alfalfaBaleage")).toBeUndefined();
   });
 
-  it("flags exactly the two baleage products as wrapped", () => {
+  it("flags exactly the six wrapped products (2026-08-13: +2 square, +2 generic aged)", () => {
     const wrapped = (Object.keys(gameConfig.baleProducts) as BaleProduct[]).filter(isWrappedProduct);
-    expect(wrapped.sort()).toEqual(["alfalfaBaleage", "hayBaleage"]);
+    expect(wrapped.sort()).toEqual(
+      ["alfalfaBaleage", "alfalfaHaySquareBaleage", "hayBaleage", "haySquareBaleage", "silageBale", "silageBaleSquare"].sort(),
+    );
   });
 });
 
@@ -85,8 +90,8 @@ describe("the same-month wrapping window", () => {
 
   it("is closed for products that can't be wrapped at all", () => {
     expect(canWrapBales(field({ baleProduct: "straw" }), 0)).toBe(false);
-    expect(canWrapBales(field({ baleProduct: "haySquare" }), 0)).toBe(false);
-    expect(canWrapBales(field({ baleProduct: "hayBaleage" }), 0)).toBe(false);
+    // haySquare CAN be wrapped now (2026-08-13) — see the square-baleage tests.
+    expect(canWrapBales(field({ baleProduct: "hayBaleage" }), 0)).toBe(false); // already wrapped
   });
 
   it("treats legacy bales with no timestamp as too old — never retro-upgrades an old save", () => {
@@ -97,7 +102,7 @@ describe("the same-month wrapping window", () => {
 describe("wrapping a field", () => {
   it("converts the product and spends the window", () => {
     const f = field();
-    applyWrapDone(f);
+    applyWrapDone(f, 0);
     expect(f.baleProduct).toBe("hayBaleage");
     expect(f.baledAt).toBeUndefined();
     expect(canWrapBales(f, 0)).toBe(false); // can't be wrapped twice
@@ -105,27 +110,27 @@ describe("wrapping a field", () => {
 
   it("does NOT change the bale count — wrapping preserves bales, it doesn't make them", () => {
     const f = field({ baleLocations: [[1, 1], [2, 2], [3, 3]] });
-    applyWrapDone(f);
+    applyWrapDone(f, 0);
     expect(f.baleLocations).toHaveLength(3);
   });
 
   it("leaves an unwrappable field completely alone", () => {
     const f = field({ baleProduct: "straw" });
-    applyWrapDone(f);
+    applyWrapDone(f, 0);
     expect(f.baleProduct).toBe("straw");
     expect(f.baledAt).toBe(0); // window untouched — nothing happened
   });
 
   it("alfalfa wraps to its own product, not grass baleage", () => {
-    const f = field({ baleProduct: "alfalfaHay" });
-    applyWrapDone(f);
+    const f = field({ crop: "alfalfaSilage", baleProduct: "alfalfaHay" });
+    applyWrapDone(f, 0);
     expect(f.baleProduct).toBe("alfalfaBaleage");
   });
 });
 
 describe("baling stamps the window", () => {
   const perennial = (over: Partial<Field> = {}): Field =>
-    field({ crop: "grass", status: "harvested", baleProduct: undefined, baledAt: undefined, ...over });
+    field({ crop: "grassSilage", status: "harvested", baleProduct: undefined, baledAt: undefined, ...over });
 
   it("a round baler records WHEN, so the wrap window can be judged", () => {
     const f = perennial();
@@ -151,11 +156,11 @@ describe("baling stamps the window", () => {
     expect(f.baledAt).toBe(5000); // still a normal (unwrappable) window stamp
   });
 
-  it("a SQUARE baler's bales are stamped but never wrappable", () => {
+  it("a SQUARE baler's bales are stamped and wrappable too (2026-08-13)", () => {
     const f = perennial();
     applyBaleDone(f, true, 5000);
     expect(f.baleProduct).toBe("haySquare");
-    expect(canWrapBales(f, 5000)).toBe(false);
+    expect(canWrapBales(f, 5000)).toBe(true);
   });
 });
 

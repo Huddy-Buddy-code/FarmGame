@@ -182,9 +182,16 @@ describe("unloading on the move", () => {
       if (unloads(save).some(atCombine)) onboardWhenCalled = combine.grainOnboard ?? 0;
     }
     expect(onboardWhenCalled).not.toBeNull();
-    // Called before the tank was full, and not absurdly early either.
+    // Called before the tank was full, and not absurdly early either. Wide
+    // tolerance below `callAt` (not a tight one) because this farm's cart
+    // starts at the SAME position as the combine (zero travel distance) —
+    // the moment the call threshold is crossed, `tickAgent`'s internal budget
+    // loop can carry the cart straight through "toHarvester" into "onloading"
+    // and drain up to a full tick's worth of `unloadTonsPerMinute` before the
+    // test's once-per-minute poll ever samples it, so the observed value can
+    // land well under the threshold that actually triggered the call.
     expect(onboardWhenCalled!).toBeLessThan(cap - 1e-9);
-    expect(onboardWhenCalled!).toBeGreaterThanOrEqual(callAt - 0.5);
+    expect(onboardWhenCalled!).toBeGreaterThanOrEqual(callAt - cap * 0.3);
     expect(field.status).not.toBe("harvested"); // still cutting when the call went out
   });
 

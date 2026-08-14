@@ -171,19 +171,40 @@ describe("harvester hopper + Grain Trailer hauling (maintainer request, 2026-07-
     assignSiloCrop(save, silo.id, "corn");
     const combine = combineOf(save);
     const tractor = tractorOf(save);
+    // Parked well clear of both gates (2026-08-13) — an earlier call-out
+    // (`callCartAtFraction`, now 0.75 not 0.85) means the relay can trigger
+    // while the combine's covered only a sliver of the field and so is still
+    // right where it started. Both agents used to spawn together at [0,0],
+    // which is also the field's own corner — so the cart's "drive to the
+    // gate" leg could complete inside the very first simulated tick, with
+    // nothing left to observe. A real starting distance guarantees a genuine
+    // staging episode regardless of how little the combine has moved.
+    tractor.pos = [-500, -500];
 
     let now = APRIL_1;
     enqueueTask(save, field, "harvest", now);
-    // Once the cart first parks at a gate, it must not move until the combine
-    // is actually full — even as the combine's sweep flips which gate is nearer.
+    // Once the cart first parks at a gate, it must not move for as long as it
+    // stays in the STAGING episode — even as the combine's sweep flips which
+    // gate is nearer. Stop watching the moment it's called in for real
+    // (unloadPhase leaves "staging" AFTER having genuinely been there):
+    // that's the one episode this test cares about. A freshly-created relay
+    // task starts as "toHarvester" optimistically (`ensureUnloadTask`) before
+    // the cart's own brain has run even once to correct it down to "staging"
+    // — that transient default doesn't count as "called in".
     let parkedAt: Meters | null = null;
     let moved = false;
-    for (let i = 0; i < 400_000 && (combine.grainOnboard ?? 0) < harvesterCapacityTons("medium") - 1e-9; i++) {
+    let sawStaging = false;
+    for (let i = 0; i < 400_000; i++) {
       now += 1;
       tickFarming(save, now);
       tickTasks(save, now, 1, () => 0.5);
       const trip = unloadTaskFor(save, combine.id);
-      if (trip?.unloadPhase !== "staging") continue;
+      if (!trip) continue;
+      if (trip.unloadPhase !== "staging") {
+        if (sawStaging) break; // called in for real — staging episode over
+        continue; // still the creation-time default, not yet corrected
+      }
+      sawStaging = true;
       if (!parkedAt && tractor.state === "working") parkedAt = [tractor.pos[0], tractor.pos[1]];
       else if (parkedAt && !samePos(tractor.pos, parkedAt)) moved = true;
     }

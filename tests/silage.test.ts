@@ -58,22 +58,25 @@ function runTasks(save: SaveState, from: number, done: () => boolean, cap = 900_
 }
 
 describe("which crops make silage", () => {
-  it("forage and the two perennials do; grain crops (including corn) don't", () => {
+  it("only Forage does — bunker silage is exclusive to it now", () => {
     expect(cropMakesSilage("forage")).toBe(true);
-    expect(cropMakesSilage("grass")).toBe(true);
-    expect(cropMakesSilage("alfalfa")).toBe(true);
     // Corn moved OFF the silage route entirely (2026-08-12) — chopping it for
     // silage is now a different crop (Forage), not a toggle on this one.
-    for (const c of ["corn", "soybeans", "wheat", "canola", "sunflowers"] as const) {
+    // Grass/Alfalfa (and their Silage twins) lost the bunker-chop route
+    // entirely (2026-08-13) — their "silage" is wrapped BALES now, made by
+    // baling + wrapping, not chopping. See `cropProducesWrappedBale`.
+    for (const c of [
+      "corn", "soybeans", "wheat", "canola", "sunflowers", "grass", "alfalfa", "grassSilage", "alfalfaSilage",
+    ] as const) {
       expect(cropMakesSilage(c), c).toBe(false);
     }
   });
 
-  it("maps each to its own product", () => {
+  it("maps forage to its product; nothing else has one any more", () => {
     const save = newGame();
     expect(silageProductForField(fieldOf(save, 10, { id: "a", crop: "forage" }))).toBe("cornSilage");
-    expect(silageProductForField(fieldOf(save, 10, { id: "b", crop: "grass" }))).toBe("haylage");
-    expect(silageProductForField(fieldOf(save, 10, { id: "c", crop: "alfalfa" }))).toBe("alfalfaHaylage");
+    expect(silageProductForField(fieldOf(save, 10, { id: "b", crop: "grassSilage" }))).toBeUndefined();
+    expect(silageProductForField(fieldOf(save, 10, { id: "c", crop: "alfalfaSilage" }))).toBeUndefined();
     expect(silageProductForField(fieldOf(save, 10, { id: "d", crop: "soybeans" }))).toBeUndefined();
   });
 
@@ -223,13 +226,34 @@ describe("THE CHOPPER CANNOT WORK WITHOUT A WAGON", () => {
     expect(blocked.some((b) => /Forage Wagon/i.test(b.reason))).toBe(true);
   });
 
-  it("reports a missing chopper too", () => {
+  it("refuses to queue a chop when the farm owns no forage harvester (2026-08-13)", () => {
+    // Used to queue silently and just sit unrunnable forever — enqueueTask
+    // didn't check the harvester or the head at all, only the wagon. A
+    // player with everything but ONE piece of chop equipment got no
+    // explanation at all (maintainer report: "I can't harvest this crop").
     const save = newGame();
     ensureAgents(save, [0, 0]);
     buyImplement(save, "forageWagon", "medium");
     buyImplement(save, "rowCropHead", "medium");
     const field = fieldOf(save, 20);
+    expect(() => enqueueTask(save, field, "chop", 0)).toThrow(/forage harvester/i);
+  });
+
+  it("refuses to queue a chop when the farm owns no row-crop head (2026-08-13)", () => {
+    const save = newGame();
+    ensureAgents(save, [0, 0]);
+    buyAgent(save, "forageHarvester", "medium", [0, 0]);
+    buyImplement(save, "forageWagon", "medium");
+    const field = fieldOf(save, 20);
+    expect(() => enqueueTask(save, field, "chop", 0)).toThrow(/row-crop head/i);
+  });
+
+  it("still reports a missing chopper in blocked work if one's SOLD after queueing", () => {
+    const save = silageFarm();
+    const field = fieldOf(save, 20);
     enqueueTask(save, field, "chop", 0);
+    // Sell the harvester after queueing — the task is now unrunnable.
+    save.agents = save.agents.filter((a) => a.kind !== "forageHarvester");
     expect(blockedWork(save).some((b) => /forage harvester/i.test(b.reason))).toBe(true);
   });
 });
@@ -256,13 +280,16 @@ describe("estimateTaskHours on a QUEUED chop (2026-08-12 regression)", () => {
     expect(Number.isFinite(hours)).toBe(true);
   });
 
-  it("still works if the farm hasn't bought the row-crop head yet — falls back sanely", () => {
-    const save = newGame();
-    ensureAgents(save, [0, 0]);
-    buyAgent(save, "forageHarvester", "medium", [0, 0]);
-    buyImplement(save, "forageWagon", "medium");
+  it("still works if the row-crop head is sold out from under a queued chop — falls back sanely", () => {
+    // enqueueTask requires the head up front now (2026-08-13), so this can no
+    // longer happen at QUEUE time — but the head can still vanish afterward
+    // (sold, or reassigned) while the task sits queued with no agent yet,
+    // which is the actual shape the original regression needs: a queued task
+    // with no head implement anywhere on the farm.
+    const save = silageFarm();
     const field = fieldOf(save, 20);
     const task = enqueueTask(save, field, "chop", 0);
+    save.implements = save.implements.filter((i) => i.kind !== "rowCropHead");
     let hours = NaN;
     expect(() => { hours = estimateTaskHours(save, task); }).not.toThrow();
     expect(hours).toBeGreaterThan(0);
@@ -300,6 +327,35 @@ describe("chopping end to end", () => {
     expect(relay?.silageProduct).toBe("cornSilage");
   });
 
+  it("the wagon trails BEHIND the chopper while onloading, not beside it (2026-08-13)", () => {
+    // The chopper keeps moving every tick while the wagon reacts a tick
+    // behind, so any SINGLE snapshot's exact offset is noisy (the harvester
+    // can easily cover tens of meters in one tick, same order of magnitude as
+    // `chopperTrailMeters`). Sample across the whole run instead and check
+    // the wagon is on the trailing side far more often than not — the
+    // qualitative behavior the maintainer asked for, not a precise geometry.
+    const save = silageFarm();
+    const field = fieldOf(save, 20);
+    enqueueTask(save, field, "chop", 0);
+    let behind = 0;
+    let beside = 0;
+    let now = 0;
+    while (field.status !== "stubble" && now < 400_000) {
+      now += 1;
+      tickTasks(save, now, 1, () => 0.5);
+      const relay = save.tasks.find((t) => t.type === "unloadHarvester");
+      const harvester = save.agents.find((a) => a.kind === "forageHarvester");
+      const wagonAgent = relay ? save.agents.find((a) => a.id === relay.agentId) : undefined;
+      if (relay?.unloadPhase !== "onloading" || wagonAgent?.state !== "working" || harvester?.heading === undefined) continue;
+      const dx = wagonAgent.pos[0] - harvester.pos[0];
+      const dy = wagonAgent.pos[1] - harvester.pos[1];
+      const behindComponent = -(dx * Math.cos(harvester.heading) + dy * Math.sin(harvester.heading));
+      if (behindComponent > 0) behind++; else beside++;
+    }
+    expect(behind + beside).toBeGreaterThan(5); // sanity: enough samples to mean something
+    expect(behind).toBeGreaterThan(beside * 4); // overwhelmingly trailing, not beside
+  });
+
   it("STALLS when the wagon is taken away mid-job — no tank means no work", () => {
     const save = silageFarm();
     const field = fieldOf(save, 20);
@@ -335,32 +391,20 @@ describe("chopping end to end", () => {
   });
 });
 
-describe("haylage: chopping a perennial", () => {
-  it("chops the windrow and leaves the stand regrowing", () => {
+describe("grass/alfalfa: no bunker-chop route any more (2026-08-13)", () => {
+  it("refuses to chop grass or alfalfa (or their Silage twins) — chopping is Forage-only", () => {
     const save = newGame();
     ensureAgents(save, [0, 0]);
     buyAgent(save, "forageHarvester", "medium", [0, 0]);
     buyImplement(save, "pickupHead", "medium");
     buyImplement(save, "forageWagon", "medium");
     buyBuildingAt(save, "silageBunker", [50, 50], "medium");
-    const field = fieldOf(save, 20, {
-      crop: "grass", status: "harvested", forageReady: true, windrowed: true, windrowWidthM: 7.6,
-    });
-    enqueueTask(save, field, "chop", 0);
-    runTasks(save, 0, () => field.status === "growing");
-    expect(field.status).toBe("growing");
-    expect(field.crop).toBe("grass");
-    expect(save.silage!.haylage).toBeGreaterThan(40); // 20 ac x 3.2 t/ac = 64 t
-  });
-
-  it("refuses to chop a perennial that hasn't been mowed", () => {
-    const save = newGame();
-    ensureAgents(save, [0, 0]);
-    buyAgent(save, "forageHarvester", "medium", [0, 0]);
-    buyImplement(save, "pickupHead", "medium");
-    buyImplement(save, "forageWagon", "medium");
-    const field = fieldOf(save, 20, { crop: "grass", status: "growing" });
-    expect(() => enqueueTask(save, field, "chop", 0)).toThrow(/Mow/i);
+    for (const crop of ["grass", "alfalfa", "grassSilage", "alfalfaSilage"] as const) {
+      const field = fieldOf(save, 20, {
+        id: `f-${crop}`, crop, status: "harvested", forageReady: true, windrowed: true, windrowWidthM: 7.6,
+      });
+      expect(() => enqueueTask(save, field, "chop", 0), crop).toThrow();
+    }
   });
 });
 
@@ -421,12 +465,9 @@ describe("silage balance", () => {
     expect(gameConfig.forage.chopCostPerAcre).toBeGreaterThan(gameConfig.harvestCostPerAcre * 2);
   });
 
-  it("haylage lands beside hay and baleage per acre, so the routes compete", () => {
-    const hay = gameConfig.baleProducts.hay.pricePerBale * gameConfig.baleProducts.hay.balesPerAcre;
-    const haylage = gameConfig.crops.grass.silageTonsPerAcre! * gameConfig.silageProducts.haylage.pricePerTon;
-    expect(haylage).toBeGreaterThan(hay * 0.85);
-    expect(haylage).toBeLessThan(hay * 1.15);
-  });
+  // Haylage (bunker silage from grass/alfalfa) was removed 2026-08-13 — see
+  // `tests/baleage.test.ts` "grosses within ~15% of dry hay per acre" for the
+  // equivalent balance check on their replacement, wrapped baleage bales.
 
   it("a forage wagon out-carries a grain trailer at EVERY tier (maintainer request)", () => {
     // Compared in tons of CORN, since a grain trailer is rated by volume.

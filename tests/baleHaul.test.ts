@@ -445,6 +445,35 @@ describe("Bale hauling relay (maintainer request, 2026-07-17)", () => {
     for (const b of [...even, ...varied]) expect(pointInPolygon(b, boundary)).toBe(true);
   });
 
+  it("two Hay-Spikes rigs share one Bale Trailer (2026-08-13) — both deliver, everyone's released", () => {
+    const save = gameForHaul();
+    buyImplement(save, "haySpikes", "small"); // rig #1, 1 bale/trip
+    buyImplement(save, "baleTrailer", "small");
+    buyAgent(save, "tractor", "medium", [0, 0]); // pulls the trailer
+    const area = buyBuildingAt(save, "baleArea", [-500, -500]);
+    const field = baledField(save, 20, "hay");
+    const task1 = queueHaulBales(save, field.id, APRIL_1)!;
+
+    // Run until the first rig is fully up (crewed + trailer paired), so
+    // PAIR-BEFORE-YOU-MULTIPLY and the farm-wide balance gate both allow a
+    // second rig to join this same field.
+    const midpoint = runTasks(save, APRIL_1, () => !!task1.agentId && !!task1.trailerAgentId, 100_000);
+    expect(task1.trailerAgentId).toBeDefined(); // sanity: premise of the test
+
+    // A second Hay-Spikes tractor comes available for the same field.
+    buyImplement(save, "haySpikes", "small");
+    buyAgent(save, "tractor", "medium", [0, 0]);
+    const task2 = queueHaulBales(save, field.id, midpoint)!;
+    expect(task2).toBeTruthy(); // not blocked — the trailer has room to share
+
+    runTasks(save, midpoint, noHaulLeft(save, field));
+
+    expect(task2.trailerAgentId).toBe(task1.trailerAgentId); // shared, not a second trailer
+    expect(save.implements.filter((i) => i.kind === "baleTrailer")).toHaveLength(1); // only ever bought one
+    expect(storedBalesTotal(area)).toBe(20); // whole field delivered
+    expect(save.agents.every((a) => a.taskId === undefined)).toBe(true); // everyone released
+  });
+
   it("baling a field auto-dispatches a Haul Bales job (no player click needed)", () => {
     const save = newGame();
     ensureAgents(save, [0, 0]);

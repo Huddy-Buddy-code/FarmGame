@@ -343,6 +343,15 @@
         width: 100%; font-size: 11px; padding: 5px 6px; white-space: nowrap;
         overflow: hidden; text-overflow: ellipsis;
       }
+      /* Haul Bales (2026-08-13) — shares the row but doesn't fight Reset/Plow
+         for their 50/50 split: sized to its own content, collapsing to
+         nothing (no gap either) whenever it's empty — the JS only appends a
+         button when the field actually has loose bales to sweep. */
+      #fp-schedule-haul { flex: 0 1 auto; min-width: 0; display: flex; }
+      #fp-schedule-haul:empty { display: none; }
+      #fp-schedule-haul button {
+        font-size: 11px; padding: 5px 8px; white-space: nowrap;
+      }
       /* Shown when Auto-manage is off (the schedule only drives auto-manage). */
       .fp-sched-hint { font-size: 12px; color: #8a7658; margin: 10px 2px; line-height: 1.45; }
 
@@ -1105,11 +1114,15 @@
       .queue-row.completed { opacity: 0.8; border-style: dashed; padding: 4px 8px; }
       .queue-row.completed .icon { font-size: 18px; }
       .queue-row.completed .qr-name { font-size: 13px; }
-      .qr-cancel {
+      .qr-cancel, .qr-reset {
         border: none; background: none; padding: 0 2px; font-size: 13px;
         color: #8a7658; line-height: 1.4;
       }
       .qr-cancel:hover { color: var(--red); background: none; }
+      /* Reset (2026-08-13) — cancel + immediately re-queue a queued task at
+         the back. Same bare-text styling as Cancel, just tinted green on
+         hover instead of red so the two read as distinct actions. */
+      .qr-reset:hover { color: var(--green-dark); background: none; }
       /* Restart/Cancel on an ACTIVE row (2026-08-12) — the stuck-task escape
          hatch. Icon-only (2026-08-12 follow-up: labeled chips ate too much
          width for something used rarely), tucked into the row's bottom-left
@@ -1595,12 +1608,15 @@
           <div id="fp-plans"></div>
           <div id="fp-schedule-grid"></div>
           <div id="fp-schedule-msg"></div>
-          <!-- Reset-timing and the manual "plow now" override share one row
-               (maintainer, 2026-07-31) — two full-width stacked buttons cost
-               vertical space the calendar wanted. -->
+          <!-- Reset-timing, the manual "plow now" override, and manual Haul
+               Bales share one row (maintainer, 2026-07-31; haul added
+               2026-08-13) — full-width stacked buttons cost vertical space
+               the calendar wanted. Haul Bales renders empty (0 width, no gap
+               eaten) whenever there's nothing stranded to sweep. -->
           <div id="fp-schedule-footer">
             <div id="fp-schedule-reset"></div>
             <div id="fp-schedule-plow"></div>
+            <div id="fp-schedule-haul"></div>
           </div>
         </div>
 

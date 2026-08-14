@@ -18,7 +18,7 @@ import { newGame } from "../src/state/saveState";
 import type { Field, FarmTask, SaveState } from "../src/state/saveState";
 import {
   ensureAgents, tickTasks, enqueueTask, buyAgent, buyImplement,
-  forceCancelActiveTask, restartActiveTask,
+  forceCancelActiveTask, restartActiveTask, resetQueuedTask,
 } from "../src/sim/tasks";
 import { tickFarming } from "../src/sim/farming";
 import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
@@ -201,5 +201,60 @@ describe("restartActiveTask", () => {
     expect(after.unloadDest).toBeUndefined();
     expect(after.status).toBe("active"); // relay kept, just reset
     expect(after.agentId).toBeDefined(); // agent kept, not freed like a cancel would
+  });
+});
+
+describe("resetQueuedTask (2026-08-13)", () => {
+  it("cancels and re-queues an equivalent task, refunding then re-paying the same cost", () => {
+    const save = newGame();
+    save.money = 1_000_000;
+    const field = plowableField();
+    save.fields.push(field);
+    const task = enqueueTask(save, field, "plow", APRIL_1);
+    expect(task.status).toBe("queued");
+    const cost = task.costPaid;
+    expect(cost).toBeGreaterThan(0); // sanity: this really is a paid task
+    const cashAfterQueue = save.money;
+
+    const fresh = resetQueuedTask(save, task.id, APRIL_1);
+
+    expect(save.tasks).not.toContain(task); // the old task object is gone
+    expect(fresh.id).not.toBe(task.id); // a genuinely new task, not the same one mutated
+    expect(fresh.type).toBe("plow");
+    expect(fresh.fieldId).toBe(field.id);
+    expect(fresh.status).toBe("queued");
+    expect(fresh.costPaid).toBe(cost);
+    expect(save.money).toBe(cashAfterQueue); // refunded then re-paid the same amount — net zero
+    expect(save.tasks).toContain(fresh);
+  });
+
+  it("carries the crop through for a plant task", () => {
+    const save = newGame();
+    save.money = 1_000_000;
+    const field: Field = { ...plowableField(), status: "tilled" };
+    save.fields.push(field);
+    const task = enqueueTask(save, field, "plant", APRIL_1, "corn");
+    expect(task.crop).toBe("corn");
+
+    const fresh = resetQueuedTask(save, task.id, APRIL_1);
+    expect(fresh.crop).toBe("corn");
+  });
+
+  it("throws on an ACTIVE task — nothing queued left to reset", () => {
+    const save = newGame();
+    save.money = 1_000_000;
+    buyAgent(save, "tractor", "medium", [0, 0]);
+    buyImplement(save, "plow", "medium");
+    const field = plowableField();
+    save.fields.push(field);
+    const task = enqueueTask(save, field, "plow", APRIL_1);
+    run(save, 50);
+    expect(task.status).toBe("active");
+    expect(() => resetQueuedTask(save, task.id, APRIL_1)).toThrow(/already underway/);
+  });
+
+  it("throws on an unknown task id", () => {
+    const save = newGame();
+    expect(() => resetQueuedTask(save, "nope", APRIL_1)).toThrow(/not found/);
   });
 });

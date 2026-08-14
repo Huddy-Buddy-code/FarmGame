@@ -209,6 +209,13 @@ export interface Field {
    * wrapped, nothing to time).
    */
   baledAt?: SimTime;
+  /** When this field's current bales became WRAPPED (2026-08-13) — either
+   * straight off a Combi Baler or via a standalone Wrap task. Drives
+   * `resolveAgedBaleProduct` (sim/farming.ts): once `forage.silageAgingMonths`
+   * have passed, a crop-specific wrapped product (e.g. "Round Alfalfa Bale
+   * (wrapped)") is sold/hauled as the generic "Silage Bale (wrapped)"
+   * instead. Undefined = not wrapped, or a legacy save. */
+  wrappedAt?: SimTime;
   /** Perennial forage crops only (grass/alfalfa): how many of this year's
    * cuttings have been mowed, and which campaign year that count belongs to
    * (reset to 0 when the year turns). Drives the fixed-monthly-window "ready"

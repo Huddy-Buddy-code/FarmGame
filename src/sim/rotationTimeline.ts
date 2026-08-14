@@ -39,7 +39,7 @@ import type { CropId } from "../config/gameConfig";
 import { MONTHS_PER_YEAR, dateOf } from "./calendar";
 import type { SimTime } from "./clock";
 import type { Field, FieldPlan } from "../state/saveState";
-import { isPerennial, isChopOnlyCrop } from "./farming";
+import { isPerennial, isChopOnlyCrop, cropProducesWrappedBale } from "./farming";
 import { legalMonthsFor, effectiveMonthFor } from "./schedule";
 import type { ScheduleTaskType } from "./schedule";
 
@@ -222,7 +222,14 @@ function perennialTasks(plan: FieldPlan, standStartAbs: AbsMonth, years: number)
   }
   out.push({ kind: "mow", at: allCuts, legal: [], on: true });
   out.push({ kind: "bale", at: allCuts, legal: [], toggle: "bale", on: !!plan.bale });
-  if (plan.bale) out.push({ kind: "wrap", at: allCuts, legal: [], toggle: "wrap", on: !!plan.wrap });
+  // A Silage crop (grassSilage/alfalfaSilage, 2026-08-13) wraps automatically
+  // once baled — no in-season toggle, unlike the old grass/alfalfa silage
+  // toggle this replaced (see `wrapPending`, sim/tasks.ts). Every other crop
+  // keeps the FieldPlan.wrap toggle as-drawn, though nothing currently sets it.
+  const autoWrap = cropProducesWrappedBale(plan.crop);
+  if (plan.bale && (autoWrap || plan.wrap)) {
+    out.push({ kind: "wrap", at: allCuts, legal: [], toggle: "wrap", on: autoWrap || !!plan.wrap });
+  }
   if (cfg.silageProduct) {
     out.push({ kind: "silage", at: allCuts, legal: [], toggle: "silage", on: !!plan.silage });
   }
@@ -239,7 +246,11 @@ function perennialTasks(plan: FieldPlan, standStartAbs: AbsMonth, years: number)
 export function projectRotation(field: Field, now: SimTime, opts: ProjectOptions = {}): RotationTimeline {
   const maxBands = opts.maxBands ?? (field.plans?.length || 1);
   const maxMonths = opts.maxMonths ?? 72;
-  const perennialYears = opts.perennialYears ?? 3;
+  // A single year of cuttings is plenty to show (maintainer request,
+  // 2026-08-13 — was 3, which repeated the same cutting pattern for no
+  // reason: the sim already cuts a perennial stand indefinitely with no
+  // year cap, this is purely how far ahead the Schedule tab draws).
+  const perennialYears = opts.perennialYears ?? 1;
   const todayAbs = absMonthOf(now);
   const plans = field.plans && field.plans.length > 0 ? field.plans : [];
   const bands: TimelineBand[] = [];
