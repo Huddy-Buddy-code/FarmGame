@@ -299,11 +299,11 @@ describe("mower sizes", () => {
   });
 
   it("...but the windrower still out-cuts it once its own speed is counted", () => {
-    // The trade only holds up if the specialist actually keeps pace with the
-    // best tractor rig. 25 ft × 16 km/h beats 32 ft × 12 km/h, narrowly.
+    // The trade holds up: 25 ft × 24.1 km/h (15 mph, 2026-08-15) clears
+    // 32 ft × 12 km/h outright — the specialist's speed, not just its width,
+    // is what you're buying.
     const windrowerRate = gameConfig.equipment.windrower.widthFt * gameConfig.work.windrowerSpeedKmh;
     const largeMowerRate = gameConfig.equipment.mower.large.widthFt * gameConfig.work.fieldSpeedKmh;
     expect(windrowerRate).toBeGreaterThan(largeMowerRate);
-    expect(windrowerRate / largeMowerRate).toBeLessThan(1.1); // near enough a dead heat
   });
 });

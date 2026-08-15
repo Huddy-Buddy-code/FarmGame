@@ -17,14 +17,16 @@
  * was removed 2026-07-22, maintainer request — it was complex and inconsistent.)
  */
 
-import { gameConfig } from "../config/gameConfig";
-import type { CropId, BaleProduct } from "../config/gameConfig";
+import { gameConfig, SILAGE_PRODUCTS } from "../config/gameConfig";
+import type { CropId, BaleProduct, SilageProduct } from "../config/gameConfig";
 import { dateOf, MONTHS_PER_YEAR } from "./calendar";
 import type { SimTime } from "./clock";
 
-/** Anything that can be sold on the market: a grain crop or a bale product.
- * (Their string values are disjoint, so a plain union is unambiguous.) */
-export type MarketProduct = CropId | BaleProduct;
+/** Anything that can be sold on the market: a grain crop, a bale product, or
+ * a bunker silage product (2026-08-15 — bunker silage joined the same
+ * Auto/Manual/Haul system grain and bales already had). Their string values
+ * are disjoint, so a plain union is unambiguous. */
+export type MarketProduct = CropId | BaleProduct | SilageProduct;
 
 /** Grain crops that actually sell grain (excludes the perennial forage crops,
  * whose yield is realized as bales). */
@@ -32,15 +34,48 @@ export const SELLABLE_GRAINS: CropId[] = (Object.keys(gameConfig.crops) as CropI
   (c) => gameConfig.crops[c].producesGrain !== false,
 );
 
-/** Bale products that are actually reachable/sellable (`forage` never is).
- * The square variants (2026-07-24) are made by the Large Square Baler. */
-export const SELLABLE_BALES: BaleProduct[] = [
-  "cornStover", "straw", "hay", "alfalfaHay",
-  "strawSquare", "haySquare", "alfalfaHaySquare",
-];
+/**
+ * Every bale product — all of them reachable/sellable now (the one
+ * permanently-unreachable one, "forage", was cut from the config entirely
+ * 2026-08-15 rather than filtered out here; see the BaleProduct union's
+ * comment, config/gameConfig.ts).
+ *
+ * Derived from `gameConfig.baleProducts` (2026-08-14 fix), not hand-listed —
+ * a hardcoded list here silently went stale every time a new BaleProduct
+ * shipped (baleage 2026-07-31, square baleage + generic aged silage
+ * 2026-08-13): none of those ever made it into this list, so a Bale Storage
+ * building holding nothing BUT baleage showed its per-product breakdown as
+ * "Empty" despite a real non-zero count (`storedBalesTotal` sums the whole
+ * record; the Inventory tab's breakdown only iterates THIS list) — and, more
+ * seriously, `ALL_MARKET_PRODUCTS` (below) meant auto-sell never covered
+ * wrapped bales either. Deriving this from the config union means a NEW
+ * product can't recreate the same bug by omission again.
+ */
+export const SELLABLE_BALES: BaleProduct[] = Object.keys(gameConfig.baleProducts) as BaleProduct[];
+
+/**
+ * Freshly-wrapped baleage, and fresh-chopped Corn Forage, that auto-sell
+ * holds onto rather than cashing out early (maintainer request, 2026-08-14
+ * for baleage, extended 2026-08-15 to Corn Forage on the same terms: "the
+ * Corn Forage will get the same 'held until Silage' treatment as the
+ * wrapped grass and alfalfa bales"). Once `resolveAgedBaleProduct`/
+ * `tickBaleAging` (bales) or `tickSilageAging` (the bunker) convert one
+ * into its aged twin after `forage.silageAgingMonths`, THAT product is
+ * fully auto-sellable — this only holds the pre-aged form. Still sellable
+ * by hand from the Inventory tab any time, and still haulable to a Sell
+ * Point on demand; this is auto-sell-only.
+ */
+export const AUTO_SELL_HOLDS_UNTIL_AGED: ReadonlySet<BaleProduct | SilageProduct> = new Set([
+  "hayBaleage", "alfalfaBaleage", "haySquareBaleage", "alfalfaHaySquareBaleage",
+  "cornForage",
+]);
 
 /** Every product the market deals in — what the farm-wide auto-sell covers. */
-export const ALL_MARKET_PRODUCTS: MarketProduct[] = [...SELLABLE_GRAINS, ...SELLABLE_BALES];
+export const ALL_MARKET_PRODUCTS: MarketProduct[] = [
+  ...SELLABLE_GRAINS,
+  ...SELLABLE_BALES.filter((p) => !AUTO_SELL_HOLDS_UNTIL_AGED.has(p)),
+  ...SILAGE_PRODUCTS.filter((p) => !AUTO_SELL_HOLDS_UNTIL_AGED.has(p)),
+];
 
 /**
  * When, and whether, `product` auto-sells.
@@ -102,6 +137,14 @@ export function baleUnitPrice(product: BaleProduct, month: number): number {
   return gameConfig.baleProducts[product].pricePerBale * seasonalMultiplier(product, month);
 }
 
+/** Current per-ton bunker silage price at `month` (2026-08-15 — silage now
+ * follows the same seasonal curve as grain/bales, replacing the flat
+ * year-round price it launched with; see the pricing note on
+ * `gameConfig.silageProducts` for why). */
+export function silageUnitPrice(product: SilageProduct, month: number): number {
+  return gameConfig.silageProducts[product].pricePerTon * seasonalMultiplier(product, month);
+}
+
 /**
  * The DELIVERED price is the one above (`grainUnitPrice`/`baleUnitPrice`): you
  * hauled the load to a Sell Point yourself, so you get the seasonal premium.
@@ -125,6 +168,12 @@ export function grainInstantPrice(crop: CropId): number {
 /** Per-bale price when sold instantly from Inventory. */
 export function baleInstantPrice(product: BaleProduct): number {
   return gameConfig.baleProducts[product].pricePerBale * instantPriceFactor();
+}
+
+/** Per-ton bunker silage price when sold instantly from Inventory (no season,
+ * less fee) — same discount structure as grain/bales (2026-08-15). */
+export function silageInstantPrice(product: SilageProduct): number {
+  return gameConfig.silageProducts[product].pricePerTon * instantPriceFactor();
 }
 
 /** Calendar month (0-11) of a sim-time — convenience for callers that only

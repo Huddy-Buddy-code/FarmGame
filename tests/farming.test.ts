@@ -454,6 +454,23 @@ describe("equipment: sizes, implements, buy/sell/attach (brief §8 capital)", ()
     expect(smallPlow.attachedTo).toBe(small.id);
   });
 
+  it("Hay Spike breaks the pull-size rule on purpose (2026-08-14): Small/Medium yes, Large no", () => {
+    // The one implement on the farm a bigger tractor DOESN'T automatically
+    // get to use — a bale spear needs no horsepower, so it's capped away
+    // from Large tractors specifically rather than following implSize's rank.
+    expect(canPull("small", "medium", "haySpikes")).toBe(true);
+    expect(canPull("medium", "medium", "haySpikes")).toBe(true);
+    expect(canPull("large", "medium", "haySpikes")).toBe(false);
+
+    const save = gameWithAgents();
+    const large = buyAgent(save, "tractor", "large", [0, 0]);
+    const spikes = buyImplement(save, "haySpikes", "medium");
+    expect(() => attachImplement(save, large.id, spikes.id)).toThrow(/can't pull/);
+    const small = buyAgent(save, "tractor", "small", [0, 0]);
+    expect(() => attachImplement(save, small.id, spikes.id)).not.toThrow();
+    expect(spikes.attachedTo).toBe(small.id);
+  });
+
   it("plowing needs a plow: with none available, the task waits", () => {
     const save = gameWithAgents();
     // Remove the seeded plow entirely.

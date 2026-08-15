@@ -40,8 +40,9 @@ import {
   BUILDING_NAME, siloCapacityForCrop, siloCapacityOf, siloCapacityTonsOf, assignSiloCrop,
   barnSlotTotal, nearestFarmYard,
   baleStorageCapacityOf, storedBalesTotal, assignBaleStorageProduct,
-  tickBaleSpoilage, baleSpoilRateOf,
+  tickBaleSpoilage, baleSpoilRateOf, tickSilageAging, tickBaleAging,
   bunkerCapacityOf, silageCapacityTons, silageStoredTons, buildingIsSized,
+  storedSilageTotal, assignSilageBunkerProduct, migrateLegacySilage, migrateLegacySilageProductNames,
 } from "./sim/buildings";
 import { distanceAtAcres } from "./sim/coverage";
 import type { CoveragePath } from "./sim/coverage";
@@ -51,10 +52,10 @@ import {
 } from "./state/persistence";
 import { farmSummaryLine } from "./state/farmSummary";
 import { runHomeScreen, AUTOBOOT_KEY, MENU_OPEN_NEW_KEY } from "./ui/homeScreen";
-import { sellBales, netWorth, baleInventory, sellAllOfProduct, tickAutoSell, silageInventory, sellSilage } from "./sim/economy";
+import { sellBales, netWorth, baleInventory, sellAllOfProduct, tickAutoSell } from "./sim/economy";
 import {
-  grainUnitPrice, baleUnitPrice, seasonalBonus, monthOf, peakSaleMonth, effectiveSellPlan,
-  SELLABLE_GRAINS, SELLABLE_BALES,
+  grainUnitPrice, baleUnitPrice, silageUnitPrice, seasonalBonus, monthOf, peakSaleMonth, effectiveSellPlan,
+  SELLABLE_GRAINS, SELLABLE_BALES, AUTO_SELL_HOLDS_UNTIL_AGED,
 } from "./sim/market";
 import type { MarketProduct } from "./sim/market";
 import { SimClock } from "./sim/clock";
@@ -67,7 +68,7 @@ import {
   tickFarming, growthProgress, yieldRange, productivityMultiplier, yieldModifierSteps, inPlantingWindow, canPlow,
   hasStandingCrop, inWeedingWindow, canFertilizeNow, isPerennial, canSeedPerennial,
   isPerennialDormant, harvestMonthsRemaining, harvestWindowMonthsFor, baleTonsOf, baleProductForField,
-  canWrapBales, cropMakesSilage, isChopOnlyCrop,
+  canWrapBales, cropMakesSilage, isChopOnlyCrop, migrateLegacyBaleProducts,
 } from "./sim/farming";
 import {
   ensureAgents, initTaskIds, enqueueTask, cancelTask, resetQueuedTask, forceCancelActiveTask, restartActiveTask, taskCost, tasksFor,
@@ -75,7 +76,7 @@ import {
   buyAgent, sellAgent, buyImplement, sellImplement,
   agentPrice, implementPrice, implementName, getCoveragePath,
   reorderTask, estimateTaskHours, forageDue, canMulch, defaultPlan, forcePlow, removeRotationStep, blockedWork,
-  chopHeadKind,
+  chopHeadKind, isSilageRun, relayTrailerKind, chopHeadKindForTask, taskFieldSpeedKmh,
   harvesterCapacityTons, grainTrailerCapacityTons, harvesterCapacityBushels, grainTrailerCapacityBushels,
   tonsPerBushel, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
   appendCompletedTask, haySpikesCapacityBales, baleTrailerCapacityBales, queueHaulBales, fieldHasLooseBales,
@@ -88,7 +89,7 @@ import { defaultAccessPoints } from "./sim/access";
 import {
   MACHINE_ICON, IMPLEMENT_ICON_SVG, tractorIconSvg, baleIconSvg,
   plowIconSvg, planterIconSvg, sprayerIconSvg, rakeIconSvg, grainTrailerIconSvg,
-  grainHeaderIconSvg, mowerIconSvg, mulcherIconSvg, haySpikesIconSvg, baleTrailerIconSvg,
+  mowerIconSvg, mulcherIconSvg, haySpikesIconSvg, baleTrailerIconSvg,
 } from "./ui/icons";
 import { machineImageUrl, machineImgTag, trailerFillImageUrl, machineVariantImageUrl } from "./ui/machineImages";
 import type { EquipmentKind, ImplementKind } from "./sim/tasks";
@@ -105,8 +106,8 @@ import { setScheduleOverride } from "./sim/schedule";
 import { projectRotation, splitAbs } from "./sim/rotationTimeline";
 import type { AbsMonth, TimelineTaskKind } from "./sim/rotationTimeline";
 import type { FarmTask, Agent, Implement, FieldStatus, TaskType, CompletedTask, FieldPlan } from "./state/saveState";
-import { gameConfig, FEET_TO_METERS } from "./config/gameConfig";
-import type { CropId, EquipmentSize, BaleProduct } from "./config/gameConfig";
+import { gameConfig, FEET_TO_METERS, KMH_TO_MPH, SILAGE_PRODUCTS } from "./config/gameConfig";
+import type { CropId, EquipmentSize, BaleProduct, SilageProduct } from "./config/gameConfig";
 
 // Multi-farm saves (maintainer request, 2026-07-13): exactly one farm is
 // "active" at a time — everything below talks to THAT farm's save, same as
@@ -183,6 +184,9 @@ if (loaded) {
     }
   }
   initBuildingIdCounters(save);
+  migrateLegacySilageProductNames(save); // pre-2026-08-15 saves: cornSilage/silage id swap -> cornForage/cornSilage
+  migrateLegacySilage(save); // pre-2026-08-15 saves: pooled silage -> per-bunker
+  migrateLegacyBaleProducts(save); // one-day-old "unwrapped" Silage-crop bale ids -> hay/alfalfaHay
   // Pre-finance saves: start the open borrowing year at whatever campaign
   // year the save was loaded at (tickLoans self-corrects instantly either
   // way, since a year with $0 pending never creates a loan).
@@ -201,7 +205,10 @@ if (loaded) {
 }
 
 // Only one map interaction is active at a time.
-type Mode = "none" | "field" | `building:${BuildingKind}`;
+// `relocate:<buildingId>` (2026-08-14) reuses the same click-to-place step
+// as a fresh purchase — see `wireBuildingPlacement` — just mutating an
+// existing building's `pos` instead of calling `buyBuildingAt`.
+type Mode = "none" | "field" | `building:${BuildingKind}` | `relocate:${string}`;
 let mode: Mode = "none";
 /** Size armed for the NEXT silo placement (set by the Buildings shop button
  * just before `mode` becomes "building:silo"; ignored for every other kind). */
@@ -519,6 +526,8 @@ function tickWorld(prev: number) {
   tickLoans(save, now); // lock in a turned-over year, charge due monthly payments
   tickAutoSell(save, now); // fire any scheduled auto-sells for months just crossed
   tickBaleSpoilage(save, dt); // stored bales rot — fast outdoors, slowly in a Barn
+  tickSilageAging(save, now); // stored Corn Forage ages into Corn Silage after a while
+  tickBaleAging(save, now); // stored wrapped bales age into their Aged Baleage twin after a while
   const allChanged = [...changed, ...work.changed];
   for (const f of allChanged) renderField(mapRef, overlay, f, now);
   repaintGrowthStages(now, allChanged);
@@ -529,6 +538,10 @@ function tickWorld(prev: number) {
   // lightweight width/label patch, not a rebuild, so the harvester/cart/
   // baler fill bars read as a smooth fill instead of stepping in ~8% jumps.
   updateFillBars();
+  // Same idea for the Equipment/Structures tabs' status text (2026-08-14) —
+  // see `updateEquipStatusText`'s own doc comment for the flicker/missed-
+  // click bug this fixes.
+  updateEquipStatusText();
   // Refresh UI ~2×/s (or instantly when a status flipped). Rebuilding the field
   // panel every frame would recreate its buttons under the player's cursor.
   const rt = performance.now();
@@ -735,6 +748,7 @@ function taskVerb(task: FarmTask): string {
   if (task.type === "fertilize") return "fertilizing";
   if (task.type === "rake") return "raking";
   if (task.type === "bale") return "baling";
+  if (task.type === "wrap") return "wrapping";
   if (task.type === "unloadHarvester") return "hauling grain";
   if (task.type === "haulBales") return "hauling bales";
   return "harvesting";
@@ -917,9 +931,14 @@ interface Reveal {
   seg: number;
 }
 
-/** Min real-ms between GPU uploads of a revealing surface (~8/s reads as
- * continuous; the strips themselves are still stamped every tick). */
-const REVEAL_UPLOAD_MS = 120;
+/** Min real-ms between GPU uploads of a revealing surface. Was 120 (~8/s) —
+ * maintainer report (2026-08-14): reads as choppy, not continuous, since each
+ * upload pops in a visibly larger chunk than the eye expects from a texture
+ * that's supposedly sweeping smoothly. 40ms (~25/s) is well above the ~24fps
+ * "looks continuous" threshold; the strips themselves are still stamped every
+ * tick regardless of this value — only the GPU re-upload is throttled, and
+ * only a handful of fields have an active reveal at once. */
+const REVEAL_UPLOAD_MS = 40;
 // Keyed by TASK id — a single field can carry TWO concurrent reveals at once:
 // the rake laying windrows and the baler laying mulch behind it.
 const reveals = new Map<string, Reveal>();
@@ -932,14 +951,23 @@ function revealTargetStatus(task: FarmTask, field: Field): FieldStatus {
   if (task.type === "bale") return isPerennial(field.crop) ? "growing" : "mulched";
   if (task.type === "weed" || task.type === "fertilize") return field.status; // same status, different overlay
   if (task.type === "mulch") return "stubble"; // residue shredded back to bare stubble
-  return "harvested"; // harvest + mow both cut to bare/cut ground
+  // harvest + mow + chop all cut to bare/cut ground. Chop used to be a
+  // separate "stubble" branch here from back when `applyChopDone` skipped
+  // straight past "harvested" — that mapping went stale when it changed to
+  // settle at "harvested" (2026-08-14, texture parity with combine-harvested
+  // Corn), so the WHOLE active sweep kept baking and blitting the wrong
+  // texture strip-by-strip, then "popped" to the right one only once the
+  // full field repainted on completion — exactly the visible seam this
+  // bake-ahead system exists to prevent (maintainer report, 2026-08-15:
+  // "It looks to be going straight to mulched status").
+  return "harvested";
 }
 
 /** Task types whose completion actually changes the field's texture — the only
  * ones worth the reveal-stamping treatment. Weeding bakes the SAME status with
  * the weed overlay off (sprayer cleans strip-by-strip); fertilizing bakes it
  * ~20% darker (wet liquid spray, dries off next month); mowing cuts the sward. */
-const REVEALS_TEXTURE: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "mow", "mulch", "rake", "bale", "weed", "fertilize"]);
+const REVEALS_TEXTURE: ReadonlySet<TaskType> = new Set(["plow", "plant", "harvest", "chop", "mow", "mulch", "rake", "bale", "weed", "fertilize"]);
 
 function updateReveals(): void {
   if (!overlay) return;
@@ -1159,10 +1187,10 @@ const IMPLEMENT_GROUP: Record<ImplementKind, ImplementGroup> = {
 const IMPLEMENT_KIND_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake",
   bailer: "Round Baler", squareBaler: "Square Baler", grainTrailer: "Grain Trailer", mower: "Mower",
-  mulcher: "Mulcher", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
+  mulcher: "Mulcher", haySpikes: "Hay Spike", baleTrailer: "Bale Trailer",
   cornHeader: "Corn Header", grainHeader: "Grain Header",
-  baleWrapper: "Bale Wrapper", combiBaler: "Combi Baler",
-  forageWagon: "Forage Wagon", rowCropHead: "Row-Crop Head", pickupHead: "Pickup Head",
+  baleWrapper: "Bale Wrapper", combiBaler: "Round Baler with Wrapper",
+  forageWagon: "Forage Wagon", rowCropHead: "Forage Row-Crop Header", pickupHead: "Forage Pickup Header",
 };
 function implementInfoLines(kind: ImplementKind, size: EquipmentSize): { name: string; detail: string } {
   const name = `${IMPLEMENT_KIND_NAME[kind]} - ${SIZE_LABEL[size]}`;
@@ -1171,16 +1199,25 @@ function implementInfoLines(kind: ImplementKind, size: EquipmentSize): { name: s
     // familiar yardstick (a lighter crop gets fewer tons into the same wagon).
     return { name, detail: `${grainTrailerCapacityBushels(size).toLocaleString()} bu (~${grainTrailerCapacityTons(size).toFixed(0)} t corn)` };
   }
+  if (kind === "forageWagon") {
+    // No width of its own (towed, same reasoning as grainTrailer) — its
+    // gameConfig widthFt is 0, so the generic fallback below would print
+    // "0 ft Working Width".
+    return { name, detail: `${gameConfig.equipment.forageWagon[size].capacityTons.toFixed(0)} t capacity` };
+  }
   if (kind === "haySpikes") {
     return { name, detail: `${haySpikesCapacityBales(size)} bale capacity` };
   }
   if (kind === "baleTrailer") {
     return { name, detail: `${baleTrailerCapacityBales(size)} bale capacity` };
   }
+  if (kind === "baleWrapper") {
+    // No width of its own either (2026-08-14 redesign) — it seals bales in
+    // place one at a time rather than driving a swath.
+    return { name, detail: "seals bales one at a time" };
+  }
   return { name, detail: `${gameConfig.equipment[kind][size].widthFt} ft Working Width` };
 }
-
-const IMPLEMENT_QUEUE_ICON_PX = 36;
 
 /**
  * The IMPLEMENT row for an active task's Work Queue box (maintainer request,
@@ -1213,6 +1250,22 @@ function computeImplFill(task: FarmTask, agent: Agent): { pct: number; primary: 
     };
   }
   if (task.type === "unloadHarvester") {
+    // Grain cart or Forage Wagon, depending on what this relay is hauling
+    // (2026-08-14 — the wagon used to fall through and show nothing at all,
+    // since this only ever looked for a Grain Trailer).
+    if (isSilageRun(task)) {
+      const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "forageWagon");
+      if (!trailer) return null;
+      const capT = gameConfig.equipment.forageWagon[trailer.size].capacityTons;
+      const cargo = trailer.cargoTons ?? 0;
+      return {
+        pct: capT > 0 ? Math.min(100, (cargo / capT) * 100) : 0,
+        // "Forage", not "Silage" (maintainer request, 2026-08-14) — it only
+        // ages into generic Silage once it's sat in the bunker a while
+        // (`tickSilageAging`); on the wagon it's still fresh-cut.
+        primary: `${cargo.toFixed(1)} / ${capT.toFixed(1)} t forage`,
+      };
+    }
     const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "grainTrailer");
     if (!trailer) return null;
     const haulCrop = task.crop ?? trailer.cargoCrop ?? "corn";
@@ -1223,6 +1276,17 @@ function computeImplFill(task: FarmTask, agent: Agent): { pct: number; primary: 
       pct: capT > 0 ? Math.min(100, (cargo / capT) * 100) : 0,
       primary: `${(cargo / tonsPerBushel(haulCrop)).toFixed(0)} / ${capBu.toLocaleString()} bu`,
       secondary: `${cargo.toFixed(1)} / ${capT.toFixed(1)} t ${gameConfig.crops[haulCrop].name.toLowerCase()}`,
+    };
+  }
+  if (task.type === "chop") {
+    // The chopper's own small onboard buffer (2026-08-14 — 5t flat, see
+    // gameConfig.equipment.forageHarvester), same idea as a combine's tank.
+    const size = agent.size ?? "medium";
+    const capT = gameConfig.equipment.forageHarvester[size].capacityTons;
+    const onboard = agent.grainOnboard ?? 0;
+    return {
+      pct: capT > 0 ? Math.min(100, (onboard / capT) * 100) : 0,
+      primary: `${onboard.toFixed(1)} / ${capT.toFixed(1)} t forage`,
     };
   }
   if (task.type === "haulBales") {
@@ -1266,7 +1330,6 @@ function computeImplFill(task: FarmTask, agent: Agent): { pct: number; primary: 
 function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
   if (!agent || task.status !== "active") return "";
 
-  let iconSvg: string;
   let info: { name: string; detail: string };
   // `primary` rides ON the bar (with the %), `secondary` goes on its own line
   // beneath it. Splitting them was forced by the bushel change (2026-07-24):
@@ -1282,7 +1345,6 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     const header = save.implements.find(
       (i) => i.attachedTo === agent.id && (i.kind === "cornHeader" || i.kind === "grainHeader"),
     );
-    iconSvg = header ? implementIconHtml(header.kind, header.size, IMPLEMENT_QUEUE_ICON_PX) : grainHeaderIconSvg(IMPLEMENT_QUEUE_ICON_PX);
     info = header
       ? implementInfoLines(header.kind, header.size)
       : { name: "No header fitted", detail: `${gameConfig.equipment.harvester[size].widthFt} ft nominal` };
@@ -1291,20 +1353,27 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     // holds, tons are what the player sells.
     fill = computeImplFill(task, agent);
   } else if (task.type === "unloadHarvester") {
-    const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "grainTrailer");
+    // Grain cart or Forage Wagon, depending on what this relay is hauling
+    // (2026-08-14 — the wagon used to fall through this branch entirely,
+    // since it only ever looked for a Grain Trailer, and returned "" —
+    // no row at all, unlike the grain cart's).
+    const trailerKind = relayTrailerKind(task);
+    const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === trailerKind);
     if (!trailer) return "";
-    iconSvg = grainTrailerIconSvg(IMPLEMENT_QUEUE_ICON_PX);
-    info = implementInfoLines("grainTrailer", trailer.size);
+    info = implementInfoLines(trailerKind, trailer.size);
+    fill = computeImplFill(task, agent);
+  } else if (task.type === "chop") {
+    // The chopper's own head (2026-08-14) — text only, no picture: the head
+    // is a small detail on a machine already the size of the card.
+    const headKind = chopHeadKindForTask(save, task);
+    const head = headKind ? save.implements.find((i) => i.attachedTo === agent.id && i.kind === headKind) : undefined;
+    info = head
+      ? implementInfoLines(head.kind, head.size)
+      : { name: "No header fitted", detail: headKind ? `${IMPLEMENT_KIND_NAME[headKind]} needed` : "" };
     fill = computeImplFill(task, agent);
   } else if (task.type === "haulBales") {
     const spikes = save.implements.find((i) => i.attachedTo === agent.id && i.kind === "haySpikes");
     if (!spikes) return "";
-    // Just the implement, like every other job's row (2026-07-25). It used to
-    // pair a tractor icon with it to say WHICH of the relay's two machines this
-    // was — unnecessary now the card carries the collector's sprite at the top.
-    // The Bale Trailer row below still pairs its tractor, because that one is a
-    // second machine the header doesn't show.
-    iconSvg = (IMPLEMENT_ICON_SVG.haySpikes ?? plowIconSvg)(IMPLEMENT_QUEUE_ICON_PX);
     info = implementInfoLines("haySpikes", spikes.size);
     fill = computeImplFill(task, agent);
   } else if (task.type === "bale") {
@@ -1312,7 +1381,6 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
       (i) => i.attachedTo === agent.id && (i.kind === "bailer" || i.kind === "squareBaler"),
     );
     if (!impl) return "";
-    iconSvg = implementIconHtml(impl.kind, impl.size, IMPLEMENT_QUEUE_ICON_PX);
     // A baler has no width of its own (2026-07-24) — it clears whatever the
     // windrow is wide, so that's what's worth showing here.
     const field = save.fields.find((f) => f.id === task.fieldId);
@@ -1341,7 +1409,6 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
     // No row rather than a fabricated one: `size ?? "medium"` used to invent an
     // implement (and a width) for any machine that wasn't actually carrying one.
     if (!impl) return "";
-    iconSvg = implementIconHtml(kind, impl.size, IMPLEMENT_QUEUE_ICON_PX);
     info = implementInfoLines(kind, impl.size);
   }
 
@@ -1349,15 +1416,18 @@ function implementRowHtml(task: FarmTask, agent: Agent | undefined): string {
   // It gets its own full-width CARD now (`buildBaleTrailerRow`, 2026-07-25):
   // its name carries both the implement and its tractor, which wrapped onto
   // four lines inside a sub-row and left the fill bar clipped to "/ 20 bales".
-  return implRow(iconSvg, info, fill, agent.id);
+  return implRow(info, fill, agent.id);
 }
 
-/** Wrap one implement into a Work-Queue sub-row (icon + name/detail + optional
- * fill bar). Shared by the collector row and the Bale Trailer row. `agentId`
+/** Wrap one implement into a Work-Queue sub-row (name/detail + optional fill
+ * bar). Shared by the collector row and the Bale Trailer row. `agentId`
  * (2026-08-13) stamps the bar/label so `updateFillBars` can patch them every
- * frame without waiting for the panel's throttled full rebuild. */
+ * frame without waiting for the panel's throttled full rebuild.
+ *
+ * No icon (2026-08-14, maintainer request) — the row used to lead with a
+ * small implement icon; dropped to cut card height, since the machine's own
+ * large sprite at the top of the card already carries the art. */
 function implRow(
-  iconSvg: string,
   info: { name: string; detail: string },
   fill: { pct: number; primary: string; secondary?: string } | null,
   agentId?: string,
@@ -1375,7 +1445,6 @@ function implRow(
       </div>${fill.secondary ? `<div class="impl-fillsub">${fill.secondary}</div>` : ""}`
     : "";
   return `<div class="qr-impl">
-      <span class="impl-icon">${iconSvg}</span>
       <div class="impl-body">
         <div class="impl-name">${info.name}</div>
         <div class="impl-detail">${info.detail}</div>
@@ -1455,10 +1524,9 @@ function buildBaleTrailerRow(task: FarmTask): HTMLElement | null {
     <span class="qr-info">
       <div class="qr-name">Bale Trailer · ${escapeHtml(fieldLabelOf(task.fieldId))}</div>
       <div class="qr-machine">${escapeHtml(tAgent.name)}</div>
-      <div class="qr-sub">${progressText ? `${progressText} · ` : ""}${phase}${job.remaining > 0 ? ` · ${job.remaining} left in field` : ""}</div>
+      <div class="qr-sub">${progressText ? `${progressText} · ` : ""}${phase}${job.remaining > 0 ? ` · ${job.remaining}` : ""}</div>
       ${job.total > 0 ? `<div class="progress"><div class="fill" style="width:${job.pct.toFixed(0)}%"></div></div>` : ""}
       ${implRow(
-        trailerIconHtml(trailer, IMPLEMENT_QUEUE_ICON_PX),
         implementInfoLines("baleTrailer", trailer.size),
         load,
         tAgent.id,
@@ -1480,10 +1548,20 @@ function buildBaleTrailerRow(task: FarmTask): HTMLElement | null {
  * those are exactly the phase-machine-heavy ones most likely to wedge.
  * Icon-only, tucked in the row's bottom-left corner (2026-08-12 follow-up —
  * the labeled buttons ate too much width for something used rarely): the
- * title attribute carries the label instead of visible text. */
-function buildActiveTaskControls(task: FarmTask): HTMLElement {
+ * title attribute carries the label instead of visible text.
+ *
+ * Also carries a 📍 Locate button (2026-08-14, maintainer request) — same
+ * fly-to-position button used on Field/Equipment/Structures cards
+ * (`locateButton`), reused here rather than duplicated: jumps the map to
+ * wherever the working agent actually is, which for a haul/unload/sell leg
+ * may be well off the field itself. */
+function buildActiveTaskControls(task: FarmTask, agent: Agent | undefined): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "qr-active-controls";
+
+  const field = save.fields.find((f) => f.id === task.fieldId);
+  const locatePos = agent?.pos ?? (field ? centroidOf(field.boundary) : undefined);
+  if (locatePos) wrap.appendChild(locateButton(agent?.name ?? fieldLabelOf(task.fieldId), locatePos));
 
   const restartBtn = document.createElement("button");
   restartBtn.className = "qr-restart";
@@ -1608,13 +1686,13 @@ function buildQueueRow(task: FarmTask): HTMLElement {
     row.innerHTML = `
       ${iconHtml}
       <span class="qr-info">
-        <div class="qr-name">Unload Harvester · ${escapeHtml(fieldLabelOf(task.fieldId))}</div>
+        <div class="qr-name">Unload · ${escapeHtml(fieldLabelOf(task.fieldId))}</div>
         ${agent ? `<div class="qr-machine">${agent.name}</div>` : ""}
         <div class="qr-sub">${sub}</div>
         ${implementRowHtml(task, agent)}
       </span>`;
     wireRowSelection(row, task);
-    if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task));
+    if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task, agent));
     else if (!isActive) row.appendChild(queuedCancelButton(task));
     return row; // system task — not draggable/reorderable, it self-regenerates
   }
@@ -1627,8 +1705,10 @@ function buildQueueRow(task: FarmTask): HTMLElement {
     // a haul isn't acres-based and had no denominator. The relay is still
     // legible: the big sprite is the COLLECTOR (in its hay-spike livery, which
     // is unmistakable), and the Bale Trailer keeps its own row with its own
-    // tractor paired to it below.
-    const trailerAgent = task.trailerAgentId ? save.agents.find((a) => a.id === task.trailerAgentId) : undefined;
+    // tractor paired to it below — this card only names ITS OWN tractor
+    // (2026-08-14 follow-up: the paired trailer tractor used to tag along
+    // in this card's machine line too, which read as one card driving two
+    // tractors instead of two cards each driving one).
     // Bales CLEARED off the field, against the high-water total the sim keeps.
     // Shared with the trailer's card via `haulProgress` so the two halves of
     // one relay can never show different progress for the same job.
@@ -1640,13 +1720,13 @@ function buildQueueRow(task: FarmTask): HTMLElement {
       ${agent ? `<span class="icon">${agentMachineIconHtml(agent, 96)}</span>` : ""}
       <span class="qr-info">
         <div class="qr-name">Haul Bales · ${escapeHtml(fieldLabelOf(task.fieldId))}</div>
-        ${agent ? `<div class="qr-machine">${agent.name}${trailerAgent ? ` + ${trailerAgent.name}` : ""}</div>` : ""}
-        <div class="qr-sub">${progressText ? `${progressText} · ` : ""}${haulSubText(task)}${job.remaining > 0 ? ` · ${job.remaining} left in field` : ""}</div>
+        ${agent ? `<div class="qr-machine">${agent.name}</div>` : ""}
+        <div class="qr-sub">${progressText ? `${progressText} · ` : ""}${haulSubText(task)}${job.remaining > 0 ? ` · ${job.remaining}` : ""}</div>
         ${isActive && job.total > 0 ? `<div class="progress"><div class="fill" style="width:${job.pct.toFixed(0)}%"></div></div>` : ""}
         ${implementRowHtml(task, agent)}
       </span>`;
     wireRowSelection(row, task);
-    if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task));
+    if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task, agent));
     else if (!isActive) row.appendChild(queuedCancelButton(task));
     return row; // system task — not draggable/reorderable, it self-regenerates
   }
@@ -1657,6 +1737,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
     const product = task.sellProduct ?? "";
     const name = (gameConfig.crops as Record<string, { name: string } | undefined>)[product]?.name
       ?? (gameConfig.baleProducts as Record<string, { name: string } | undefined>)[product]?.name
+      ?? (gameConfig.silageProducts as Record<string, { name: string } | undefined>)[product]?.name
       ?? product;
     const left = sellableStock(save, product);
     const phase: Record<string, string> = {
@@ -1673,26 +1754,65 @@ function buildQueueRow(task: FarmTask): HTMLElement {
         ${implementRowHtml(task, agent)}
       </span>`;
     wireRowSelection(row, task);
-    if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task));
+    if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task, agent));
     else if (!isActive) row.appendChild(queuedCancelButton(task));
     return row; // system task — self-regenerating, not draggable/reorderable
   }
 
+  // Wrap is bale-count progress, not acreage (2026-08-14 redesign) — the
+  // tractor visits each unwrapped bale in turn (see the `wrap` tick block,
+  // sim/tasks.ts), so "done" is bales sealed, not distance driven. Both
+  // piles live on the FIELD, not the task, so this reads them directly the
+  // same way `implementRowHtml`'s haulBales branch reads `field.
+  // baleLocations`. Still a REGULAR queued field task otherwise (unlike
+  // haulBales/unloadHarvester/sell above, which self-regenerate) — it shares
+  // this branch's drag-reorder + Reset/Cancel footer below, just with its
+  // own name/sub/progress markup instead of the acres/mph one.
+  const isWrap = task.type === "wrap";
+  const wrapField = isWrap ? save.fields.find((f) => f.id === task.fieldId) : undefined;
+  const wrapped = wrapField?.wrappedBaleLocations?.length ?? 0;
+  const wrapRemaining = wrapField?.baleLocations?.length ?? 0;
+  const wrapTotal = wrapped + wrapRemaining;
+
   const hours = estimateTaskHours(save, task);
-  const pct = (task.doneAcres / task.totalAcres) * 100;
-  const sub = isActive
-    ? `${task.totalAcres.toFixed(0)} ac · ${pct.toFixed(0)}% done · ${hours.toFixed(1)}h left`
-    : `${task.totalAcres.toFixed(0)} ac · waiting · ~${hours.toFixed(1)}h`;
+  const pct = isWrap
+    ? (wrapTotal > 0 ? (wrapped / wrapTotal) * 100 : 0)
+    : (task.doneAcres / task.totalAcres) * 100;
+  // Active row trades "hrs left" for the machine's working speed (2026-08-14,
+  // maintainer request) — the hour figure moved out to sit beside the
+  // progress bar instead (see `.progress-row` below), so it isn't lost.
+  const speedMph = taskFieldSpeedKmh(task.type, agent) * KMH_TO_MPH;
+  const sub = isWrap
+    // No text at all while active (2026-08-14, maintainer request) — the
+    // count now sits next to the bar instead (below), same place every
+    // other active row's "Xh left" lives, so there's nothing left to say
+    // here that isn't already on the bar.
+    ? (isActive ? "" : `waiting${wrapTotal > 0 ? ` · ${wrapped}/${wrapTotal}` : ""}`)
+    : isActive
+      ? `${task.totalAcres.toFixed(0)} ac · ${speedMph.toFixed(1)} mph`
+      : `${task.totalAcres.toFixed(0)} ac · waiting · ~${hours.toFixed(1)}h`;
 
   const row = document.createElement("div");
   row.className = "queue-row" + (isActive ? " active" : " queued");
   row.innerHTML = `
     ${iconHtml}
     <span class="qr-info">
-      <div class="qr-name">${cap(taskVerb(task))} · ${escapeHtml(fieldLabelOf(task.fieldId))}</div>
+      <div class="qr-name">${isWrap ? "Wrap Bales" : cap(taskVerb(task))} · ${escapeHtml(fieldLabelOf(task.fieldId))}</div>
       ${agent ? `<div class="qr-machine">${agent.name}</div>` : ""}
-      <div class="qr-sub">${sub}</div>
-      ${isActive ? `<div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>` : ""}
+      ${sub ? `<div class="qr-sub">${sub}</div>` : ""}
+      ${isActive
+        ? (isWrap
+          ? (wrapTotal > 0
+            ? `<div class="progress-row">
+                <div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>
+                <span class="progress-hrs">${wrapped}/${wrapTotal}</span>
+              </div>`
+            : "")
+          : `<div class="progress-row">
+              <div class="progress"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>
+              <span class="progress-hrs">${hours.toFixed(1)}h left</span>
+            </div>`)
+        : ""}
       ${implementRowHtml(task, agent)}
     </span>`;
 
@@ -1731,7 +1851,7 @@ function buildQueueRow(task: FarmTask): HTMLElement {
     row.appendChild(queuedCancelButton(task));
   }
   wireRowSelection(row, task);
-  if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task));
+  if (isActive && task.id === selectedTaskId) row.appendChild(buildActiveTaskControls(task, agent));
 
   return row;
 }
@@ -1758,6 +1878,46 @@ function updateFillBars(): void {
     bar.style.width = `${fill.pct.toFixed(0)}%`;
     const label = bar.parentElement?.querySelector<HTMLElement>(".impl-fill-label");
     if (label) label.textContent = `${fill.primary} · ${fill.pct.toFixed(0)}%`;
+  }
+}
+
+/**
+ * Patch the Equipment tab's live status text/dot color directly, without
+ * rebuilding a card's row (2026-08-14). `refreshEquipTab`'s rebuild-gating
+ * key used to include every card's live progress %/onboard tonnage, which
+ * — being genuinely continuous while a job runs — meant the key changed on
+ * essentially every refresh and `buildEquipMachines`/`buildEquipImplements`
+ * did a full `innerHTML = ""` + rebuild roughly 2x/sec any time equipment
+ * was working (maintainer report: "flickers and sometimes you have to
+ * attempt a few clicks... to execute the action" — a fresh button replacing
+ * the one under the cursor mid-click eats the click). The key now only
+ * tracks STRUCTURAL changes (attach/detach, discrete state, fleet size);
+ * this patches the couple of text nodes that actually change continuously,
+ * same split as `updateFillBars`/`computeImplFill`.
+ */
+function updateEquipStatusText(): void {
+  if ($("equiptab").style.display === "block") {
+    for (const el of document.querySelectorAll<HTMLElement>('[data-status-for^="agent:"]')) {
+      const agent = save.agents.find((a) => `agent:${a.id}` === el.dataset.statusFor);
+      if (!agent) continue;
+      const { taskText, stateClass } = agentCardStatus(agent);
+      el.className = el.className.replace(/^equip-card \S+/, `equip-card ${stateClass}`);
+      const dot = el.querySelector<HTMLElement>(".ec-dot");
+      if (dot) { dot.className = `ec-dot ${stateClass}`; dot.title = taskText; }
+      const status = el.querySelector<HTMLElement>(".ec-status");
+      if (status) { status.textContent = taskText; status.title = taskText; }
+    }
+  }
+  if ($("structurestab").style.display !== "block") return;
+  for (const el of document.querySelectorAll<HTMLElement>('[data-status-for^="impl:"]')) {
+    const impl = save.implements.find((i) => `impl:${i.id}` === el.dataset.statusFor);
+    if (!impl) continue;
+    const { statusText, stateClass } = implCardStatus(impl);
+    el.className = el.className.replace(/\S+$/, stateClass);
+    const dot = el.querySelector<HTMLElement>(".ec-dot");
+    if (dot) { dot.className = `ec-dot ${stateClass}`; dot.title = statusText; }
+    const status = el.querySelector<HTMLElement>(".ec-status");
+    if (status) { status.textContent = statusText; status.title = statusText; }
   }
 }
 
@@ -2230,6 +2390,27 @@ function buildMarketSection(rows: HTMLElement): void {
       perAcre: `${balesPerAcre.toFixed(1)} bales/ac · $${Math.round(unitPrice * balesPerAcre).toLocaleString()}/ac${cuttings > 1 ? ` (${cuttings} cuts)` : ""}`,
     });
   }
+  // Bunker silage (2026-08-15) — joins the same Auto/Manual/Haul row as
+  // grain and bales, instead of the bespoke Sell-only rows it used to get
+  // below (still there for the per-bunker CAPACITY/product cards —
+  // infrastructure, not the sellable totals). No per-acre stat: a pooled
+  // generic product doesn't map to one crop's yield the clean way
+  // grain/bales do. Summed across every bunker (storage moved off one
+  // farm-wide pool to per-building 2026-08-15, so a total needs adding up).
+  for (const p of SILAGE_PRODUCTS) {
+    const cfg = gameConfig.silageProducts[p];
+    let tons = 0;
+    for (const b of save.buildings) tons += b.storedSilage?.[p] ?? 0;
+    if (tons <= 0) continue;
+    const unitPrice = silageUnitPrice(p, month);
+    products.push({
+      id: p, name: cfg.name, iconHtml: cfg.emoji, unit: "/t",
+      unitPrice,
+      qty: tons,
+      qtyLabel: `${tons.toFixed(1)} t stored`,
+      perAcre: "",
+    });
+  }
 
   if (products.length === 0) {
     rows.insertAdjacentHTML(
@@ -2301,6 +2482,19 @@ function buildMarketSection(rows: HTMLElement): void {
       toast(`🚜 Hauling ${prod.name.toLowerCase()} to market`);
     });
     row.appendChild(haulBtn);
+
+    // Freshly-wrapped baleage AND freshly-chopped crop-specific bunker
+    // silage both hold until they age into the generic Silage product
+    // (maintainer request, 2026-08-14 for baleage, 2026-08-15 for silage) —
+    // never following the master toggle either, so (same pattern as the
+    // master-follow case right below) the per-product controls are replaced
+    // with a note instead of a toggle that would silently do nothing once
+    // `tickAutoSell` skips these products.
+    if (AUTO_SELL_HOLDS_UNTIL_AGED.has(prod.id as BaleProduct | SilageProduct)) {
+      row.insertAdjacentHTML("beforeend", `<span class="mkt-following">held until Silage</span>`);
+      rows.appendChild(row);
+      continue;
+    }
 
     // While the master is on it OWNS every product, so the per-product controls
     // are hidden rather than shown doing nothing (maintainer decision,
@@ -2374,13 +2568,13 @@ function refreshInventory(force = false) {
   // stored bales, and the in-field bale tallies.
   const grainKey = (Object.keys(save.grain) as CropId[]).map((c) => `${c}:${save.grain[c].toFixed(1)}`).join(",");
   const bldgKey = save.buildings
-    .map((b) => `${b.id}:${b.assignedCrop ?? ""}:${b.assignedProduct ?? ""}:${JSON.stringify(b.storedBales ?? {})}`)
+    .map((b) => `${b.id}:${b.assignedCrop ?? ""}:${b.assignedProduct ?? ""}:${JSON.stringify(b.storedBales ?? {})}:${JSON.stringify(b.storedSilage ?? {})}`)
     .join("|");
   const fieldBaleKey = baleInventory(save, clock.time()).map((s) => `${s.product}:${s.bales}`).join(",");
   // Also keyed on the current month (seasonal prices shift the strip + badges)
-  // and the sell schedule.
-  const silageKey = JSON.stringify(save.silage ?? {});
-  const key = `${grainKey}#${bldgKey}#${fieldBaleKey}#${silageKey}#m${monthOf(clock.time())}#${JSON.stringify(save.sellSchedule ?? {})}`;
+  // and the sell schedule. Silage is folded into `bldgKey` now (per-bunker
+  // storage, 2026-08-15) rather than its own key off the old farm-wide pool.
+  const key = `${grainKey}#${bldgKey}#${fieldBaleKey}#m${monthOf(clock.time())}#${JSON.stringify(save.sellSchedule ?? {})}`;
   if (!force && key === lastInventoryKey) return;
   lastInventoryKey = key;
 
@@ -2470,47 +2664,86 @@ function refreshInventory(force = false) {
     rows.appendChild(card);
   }
 
-  // --- Silage bunkers (2026-07-31, Phase 2). Pooled farm-wide rather than
-  // per-building: a bunker takes any silage and has no assignment, so the
-  // player's real question is "how much silage have I got and what's it
-  // worth", not which slab it's sitting on. ---
+  // --- Silage bunkers: real per-building storage (2026-08-15, maintainer
+  // request — "make it a real per-bunker restriction", styled to match Bale
+  // Storage below: a `store-card` per bunker with a fill bar, a product
+  // dropdown that actually gates what that bunker accepts, and the products
+  // actually sitting in it. The sellable TOTALS (Sell/Haul/Auto) live in the
+  // unified market list above; these cards are the storage-infrastructure
+  // view, same division of labor as Bale Storage's cards vs. that list. ---
   const bunkers = save.buildings.filter((b) => b.kind === "silageBunker");
-  const silageRows = silageInventory(save);
-  if (bunkers.length > 0 || silageRows.length > 0) {
+  if (bunkers.length > 0) {
     rows.insertAdjacentHTML("beforeend", `<div class="inv-heading">🧱 Silage Bunkers</div>`);
-    const cap = silageCapacityTons(save);
-    const stored = silageStoredTons(save);
-    const pct = cap > 0 ? Math.min(100, (stored / cap) * 100) : 0;
-    const level = pct >= 95 ? "full" : pct >= 75 ? "high" : "ok";
-    rows.insertAdjacentHTML("beforeend",
-      `<div class="silo-card">
-         <div class="sc-top"><span class="sc-name">${bunkers.length} bunker${bunkers.length === 1 ? "" : "s"}</span>
-         <span class="sc-cap">${stored.toFixed(0)} / ${cap.toLocaleString()} t</span></div>
-         <div class="silo-bar"><div class="silo-fill ${level}" style="width:${pct.toFixed(1)}%"></div></div>
-       </div>`);
-    if (cap === 0) {
-      rows.insertAdjacentHTML("beforeend",
-        `<div class="silo-bar-empty">No bunker built — a chopper's wagons will divert to a Sell Point instead.</div>`);
-    }
-    for (const s of silageRows) {
-      const row = document.createElement("div");
-      row.className = "inv-row";
-      row.innerHTML =
-        `<span class="ir-name">${s.emoji} ${escapeHtml(s.name)}</span>` +
-        `<span class="ir-qty">${s.tons.toFixed(0)} t</span>` +
-        `<span class="ir-val">$${s.value.toLocaleString()}</span>`;
-      const btn = document.createElement("button");
-      btn.className = "shop-buy";
-      btn.textContent = `Sell · $${s.pricePerTon}/t`;
-      btn.addEventListener("click", () => {
-        const r = sellSilage(save, s.product, s.tons, clock.time());
-        updateHud();
+    for (const b of bunkers) {
+      const name = `${buildingDisplayName(b.kind, b.size)} ${buildingIndex(b)}`;
+      const cap = bunkerCapacityOf(b.size ?? "small");
+      const stored = storedSilageTotal(b);
+      const pct = cap > 0 ? Math.min(100, (stored / cap) * 100) : 0;
+      const level = pct >= 95 ? "full" : pct >= 75 ? "high" : "ok";
+      const held = SILAGE_PRODUCTS
+        .map((p) => ({ p, n: b.storedSilage?.[p] ?? 0 }))
+        .filter((x) => x.n > 1e-9);
+
+      const card = document.createElement("div");
+      card.className = "store-card";
+      card.innerHTML = `
+        <div class="sc-head">
+          <span class="sc-headleft">
+            <span class="icon">🧱</span>
+            <span class="sc-title">
+              <span class="sc-name">${name}</span>
+              <span class="sc-sub">${cap.toLocaleString()} t capacity · sealed, doesn't spoil</span>
+            </span>
+          </span>
+          <span class="sc-headright"></span>
+        </div>
+        <div class="sc-bar"><div class="sc-fill ${level}" style="width:${pct.toFixed(1)}%"></div>
+          <span class="sc-bar-label">${stored.toFixed(0)} / ${cap.toLocaleString()} t · ${pct.toFixed(0)}%</span>
+        </div>
+        ${held.length > 0
+          ? `<div class="sc-contents">${held.map((x) =>
+              `<span class="sc-chip">${gameConfig.silageProducts[x.p].emoji} ${escapeHtml(gameConfig.silageProducts[x.p].name)} · ${x.n.toFixed(0)} t</span>`,
+            ).join("")}</div>`
+          : `<div class="sc-contents empty">Empty</div>`}
+        <div class="sc-note">Bunker silage is sealed and packed — unlike a Bale Storage pad, it doesn't rot in place.</div>`;
+
+      // Optional product assignment — mirrors the Bale Storage dropdown.
+      // Unassigned (the default) accepts any product and may hold a mix;
+      // assigning one dedicates the bunker's WHOLE capacity to it, same
+      // restriction a Bale Storage building already enforces.
+      const select = document.createElement("select");
+      select.className = "inv-crop-select";
+      select.innerHTML =
+        `<option value="">— any product —</option>` +
+        SILAGE_PRODUCTS.map((p) => `<option value="${p}">${gameConfig.silageProducts[p].name}</option>`).join("");
+      select.value = b.assignedProduct ?? "";
+      select.addEventListener("change", () => {
+        assignSilageBunkerProduct(save, b.id, (select.value || undefined) as SilageProduct | undefined);
         refreshInventory(true);
-        refreshQueuePanel();
-        toast(`💰 Sold ${r.tons.toFixed(0)} t of ${s.name} for $${r.revenue.toLocaleString()}`);
       });
-      row.appendChild(btn);
-      rows.appendChild(row);
+      card.querySelector(".sc-head")!.insertBefore(select, card.querySelector(".sc-headright"));
+
+      const actions = document.createElement("div");
+      actions.className = "sc-actions";
+      actions.appendChild(locateButton(name, b.pos));
+      const refund = buildingPrice(b.kind, b.size);
+      actions.appendChild(
+        iconButton("💰", `Sell · $${refund.toLocaleString()}`, false, async () => {
+          if (!(await confirmDialog({
+            title: `Sell ${name}?`,
+            body: `You'll get back $${refund.toLocaleString()}.`,
+            okLabel: "Sell", danger: true,
+          }))) return;
+          sellBuilding(save, b.id);
+          toast(`💰 Sold ${name} for $${refund.toLocaleString()}`);
+          refreshInventory(true);
+          refreshBuildingMarkers();
+          updateHud();
+        }),
+      );
+      card.appendChild(actions);
+      wireStorageSelection(card, `bunker:${b.id}`);
+      rows.appendChild(card);
     }
   }
 
@@ -3177,7 +3410,10 @@ let lastStructuresKey = "";
 function refreshStructuresTab(force = false) {
   const el = $("structurestab");
   if (el.style.display !== "block") return;
-  const key = save.buildings.map((b) => `${b.id}:${b.assignedCrop ?? ""}`).join("|") + `|$${Math.round(save.money)}`;
+  // Rounded coarser (2026-08-14) — same reasoning as refreshEquipTab: the
+  // shop's affordability styling doesn't need penny accuracy, and a coarser
+  // key means fewer full rebuilds of the owned-structures list.
+  const key = save.buildings.map((b) => `${b.id}:${b.assignedCrop ?? ""}`).join("|") + `|$${Math.round(save.money / 100) * 100}`;
   if (!force && key === lastStructuresKey) return;
   lastStructuresKey = key;
 
@@ -3362,6 +3598,19 @@ function agentStatusText(agent: Agent): { text: string; pct: number | null } {
     return { text, pct: null };
   }
   if (task && agent.state === "traveling") return { text: `Driving to ${escapeHtml(fieldLabelOf(task.fieldId))}…`, pct: null };
+  if (task && task.type === "wrap" && agent.state === "working") {
+    // Bale-count progress, not acreage (2026-08-14 redesign) — same reason
+    // the Work Queue's wrap card reads `field.wrappedBaleLocations`/
+    // `baleLocations` directly instead of the generic doneAcres/totalAcres
+    // fallback below, which would otherwise sit frozen at 0% the whole run.
+    const wrapField = save.fields.find((f) => f.id === task.fieldId);
+    const wrapped = wrapField?.wrappedBaleLocations?.length ?? 0;
+    const wrapTotal = wrapped + (wrapField?.baleLocations?.length ?? 0);
+    return {
+      text: `${cap(taskVerb(task))} ${escapeHtml(fieldLabelOf(task.fieldId))}`,
+      pct: wrapTotal > 0 ? (wrapped / wrapTotal) * 100 : null,
+    };
+  }
   if (task && agent.state === "working") {
     let text = `${cap(taskVerb(task))} ${escapeHtml(fieldLabelOf(task.fieldId))}`;
     if (task.type === "harvest" && (agent.grainOnboard ?? 0) > 0) {
@@ -3381,17 +3630,26 @@ function refreshEquipTab(force = false) {
   const el = $("equiptab");
   if (el.style.display !== "block") return;
 
+  // STRUCTURAL only (2026-08-14) — deliberately excludes anything that
+  // changes continuously while a job runs (doneAcres %, grainOnboard,
+  // cargoTons): those used to be IN this key, which meant it changed on
+  // almost every refresh and `buildEquipMachines`/`buildEquipImplements`
+  // did a full teardown+rebuild ~2x/sec any time equipment was working —
+  // the flicker, and the "have to click a few times" bug (a fresh button
+  // replacing the one under the cursor mid-click). Those numbers are still
+  // kept fresh, just via `updateEquipStatusText` patching text in place
+  // instead of rebuilding. Money's rounded coarser than before for the same
+  // reason — the shop's affordability styling doesn't need penny accuracy.
   const key =
     save.agents
       .map((a) => {
         const task = a.taskId ? save.tasks.find((t) => t.id === a.taskId) : undefined;
-        const pct = task ? Math.round((task.doneAcres / task.totalAcres) * 100) : "";
-        return `${a.id}:${a.state}:${pct}:${Math.round(a.grainOnboard ?? 0)}:${task?.unloadPhase ?? ""}:${task?.waitingForSilo ?? ""}:${a.lastCrop ?? ""}`;
+        return `${a.id}:${a.state}:${task?.unloadPhase ?? ""}:${task?.waitingForSilo ?? ""}:${a.lastCrop ?? ""}`;
       })
       .join("|") +
     "#" +
-    save.implements.map((i) => `${i.id}:${i.attachedTo ?? ""}:${Math.round(i.cargoTons ?? 0)}`).join("|") +
-    `|$${Math.round(save.money)}`;
+    save.implements.map((i) => `${i.id}:${i.attachedTo ?? ""}`).join("|") +
+    `|$${Math.round(save.money / 100) * 100}`;
   if (!force && key === lastEquipKey) return;
   lastEquipKey = key;
 
@@ -3550,6 +3808,21 @@ function buildEquipShop(): void {
     spec: `${gameConfig.equipment.grainHeader[s].widthFt} ft · all but corn`,
     price: implementPrice("grainHeader", s), onBuy: buyImpl("grainHeader", s),
   }])));
+  // The chopper's two heads (2026-07-31, moved into Harvesting 2026-08-14 to
+  // match how the owned-implements list already grouped them — IMPLEMENT_
+  // GROUP had both as "Harvesting" while the shop still had them under Hay &
+  // Silage Tools) — which one a job needs depends on the crop, exactly like
+  // the combine's.
+  line("Forage Row-Crop Header", implementIconHtml("rowCropHead", "medium", 26), Object.fromEntries(SIZES.map((s) => [s, {
+    spec: `${gameConfig.equipment.rowCropHead[s].widthFt} ft · chops standing corn, whole plant`,
+    price: implementPrice("rowCropHead", s), onBuy: buyImpl("rowCropHead", s),
+  }])));
+  line("Forage Pickup Header", implementIconHtml("pickupHead", "medium", 26), {
+    medium: {
+      spec: "picks a mown windrow up · grass & alfalfa haylage",
+      price: implementPrice("pickupHead", "medium"), onBuy: buyImpl("pickupHead", "medium"),
+    },
+  });
 
   section("Hay & Silage Tools");
   // Mower: cuts perennial forage (grass/alfalfa) — three sizes as of 2026-07-24.
@@ -3580,32 +3853,25 @@ function buildEquipShop(): void {
   // one-pass route — see `baleProducts`' balance note for the trade.
   line("Bale Wrapper", implementIconHtml("baleWrapper", "medium", 26), {
     medium: {
-      spec: "wraps round bales into baleage · same month as baling",
+      spec: "wraps square and round bales to make silage",
       price: implementPrice("baleWrapper", "medium"), onBuy: buyImpl("baleWrapper", "medium"),
     },
   });
-  line("Combi Baler", implementIconHtml("combiBaler", "medium", 26), {
+  line("Round Baler with Wrapper", implementIconHtml("combiBaler", "medium", 26), {
     medium: {
-      spec: "bales AND wraps in one pass · never misses the window",
+      spec: "bales AND wraps in one pass",
       price: implementPrice("combiBaler", "medium"), onBuy: buyImpl("combiBaler", "medium"),
     },
   });
-  // The chopper's two heads (2026-07-31) — which one a job needs depends on
-  // the crop, exactly like the combine's.
-  line("Row-Crop Head", implementIconHtml("rowCropHead", "medium", 26), Object.fromEntries(SIZES.map((s) => [s, {
-    spec: `${gameConfig.equipment.rowCropHead[s].widthFt} ft · chops standing corn, whole plant`,
-    price: implementPrice("rowCropHead", s), onBuy: buyImpl("rowCropHead", s),
-  }])));
-  line("Pickup Head", implementIconHtml("pickupHead", "medium", 26), {
+  // Hay Spike: in-field bale collector. Single tier now (2026-08-14, was
+  // Small 1-bale / Medium 2-bale) — pullable by Small OR Medium tractors,
+  // but not Large (see `canPull`'s haySpikes special case, sim/tasks.ts).
+  line("Hay Spike", haySpikesIconSvg(26), {
     medium: {
-      spec: "picks a mown windrow up · grass & alfalfa haylage",
-      price: implementPrice("pickupHead", "medium"), onBuy: buyImpl("pickupHead", "medium"),
+      spec: `${haySpikesCapacityBales("medium")} bales · collects`,
+      price: implementPrice("haySpikes", "medium"), onBuy: buyImpl("haySpikes", "medium"),
     },
   });
-  // Hay Spikes: in-field bale collector — Small (1 bale) & Medium (2).
-  line("Hay Spikes", haySpikesIconSvg(26), Object.fromEntries((["small", "medium"] as EquipmentSize[]).map((s) => [s, {
-    spec: `${haySpikesCapacityBales(s)} bale${haySpikesCapacityBales(s) === 1 ? "" : "s"} · collects`, price: implementPrice("haySpikes", s), onBuy: buyImpl("haySpikes", s),
-  }])));
 
   section("Trailers");
   // Forage Wagon: bigger than the grain line at every tier — chopped forage is
@@ -3692,12 +3958,27 @@ function spawnPos(): Meters {
 
 /** MACHINES you drive: tractors + the combine. A tractor shows the plow it's
  * carrying as a subtitle; attaching is done from the Implements area below. */
+/** Status text + dot/card color for one agent's Equipment card — factored
+ * out (2026-08-14) so `buildEquipMachines` (full rebuild) and
+ * `updateEquipStatusText` (per-tick patch, no rebuild) can never drift out
+ * of sync, same reasoning as `computeImplFill`/`updateFillBars`. */
+function agentCardStatus(agent: Agent): { taskText: string; stateClass: string } {
+  const { text, pct } = agentStatusText(agent);
+  const taskText = pct !== null ? `${text} · ${pct.toFixed(0)}%` : text;
+  // Corner dot + card tint carry "is it working" at a glance (maintainer
+  // request, 2026-07-17, replacing the old progress bar): pulsing green
+  // while actually working, gold while driving, red if a harvester is
+  // blocked waiting on a Grain Trailer, gray otherwise.
+  const waiting = agent.kind === "harvester" ? harvesterWaitingText(agent) : null;
+  const stateClass = agent.state === "working" ? "working" : agent.state === "traveling" ? "traveling" : waiting ? "waiting" : "idle";
+  return { taskText, stateClass };
+}
+
 function buildEquipMachines(): void {
   const rows = $("equip-machines");
   rows.innerHTML = "";
   for (const agent of save.agents) {
-    const { text, pct } = agentStatusText(agent);
-    const taskText = pct !== null ? `${text} · ${pct.toFixed(0)}%` : text;
+    const { taskText, stateClass } = agentCardStatus(agent);
     const carried =
       agent.kind === "tractor"
         ? save.implements.find((i) => i.attachedTo === agent.id)
@@ -3706,15 +3987,9 @@ function buildEquipMachines(): void {
       ? `<div class="ec-sub" title="${carried ? implementName(save, carried) : "no implement"}">🔧 ${carried ? implementName(save, carried) : "no implement"}</div>`
       : "";
 
-    // Corner dot + card tint carry "is it working" at a glance (maintainer
-    // request, 2026-07-17, replacing the old progress bar): pulsing green
-    // while actually working, gold while driving, red if a harvester is
-    // blocked waiting on a Grain Trailer, gray otherwise.
-    const waiting = agent.kind === "harvester" ? harvesterWaitingText(agent) : null;
-    const stateClass = agent.state === "working" ? "working" : agent.state === "traveling" ? "traveling" : waiting ? "waiting" : "idle";
-
     const row = document.createElement("div");
     row.className = `equip-card ${stateClass}`;
+    row.dataset.statusFor = `agent:${agent.id}`;
     row.innerHTML = `
       <span class="ec-dot ${stateClass}" title="${taskText}"></span>
       <span class="icon">${agentMachineIconHtml(agent, 118)}</span>
@@ -3774,6 +4049,21 @@ function buildEquipMachines(): void {
   }
 }
 
+/** Status text + dot color for one implement's Equipment strip — factored
+ * out (2026-08-14), same reasoning as `agentCardStatus`. */
+function implCardStatus(impl: Implement): { statusText: string; stateClass: string } {
+  const host = impl.attachedTo ? save.agents.find((a) => a.id === impl.attachedTo) : undefined;
+  const where = host ? `On ${host.name}` : "In the yard";
+  const sizeLine = impl.kind === "grainTrailer"
+    ? `${grainTrailerCapacityBushels(impl.size).toLocaleString()} bu${impl.cargoTons ? ` · ${impl.cargoTons.toFixed(1)}t onboard` : ""}`
+    : `${gameConfig.equipment[impl.kind][impl.size].widthFt} ft wide`;
+  // Same dot language as the Machines cards: green while its host tractor
+  // is actively working, gold while driving, gray otherwise (in the yard
+  // or hitched to an idle tractor).
+  const stateClass = host?.state === "working" ? "working" : host?.state === "traveling" ? "traveling" : "idle";
+  return { statusText: `${where} · ${sizeLine}`, stateClass };
+}
+
 /** IMPLEMENTS you attach, grouped by type (2026-07-24): short strips with a big
  * icon on the left, and a sell button that appears on hover or selection. */
 function buildEquipImplements(): void {
@@ -3795,24 +4085,15 @@ function buildEquipImplements(): void {
     rows.insertAdjacentHTML("beforeend", `<div class="eq-group">${group}</div>`);
 
     for (const impl of inGroup) {
-      const host = impl.attachedTo ? save.agents.find((a) => a.id === impl.attachedTo) : undefined;
-      const where = host ? `On ${host.name}` : "In the yard";
+      const { statusText, stateClass } = implCardStatus(impl);
       const refund = impl.purchaseCost ?? implementPrice(impl.kind, impl.size);
-      const sizeLine = impl.kind === "grainTrailer"
-        ? `${grainTrailerCapacityBushels(impl.size).toLocaleString()} bu${impl.cargoTons ? ` · ${impl.cargoTons.toFixed(1)}t onboard` : ""}`
-        : `${gameConfig.equipment[impl.kind][impl.size].widthFt} ft wide`;
-
-      // Same dot language as the Machines cards: green while its host tractor
-      // is actively working, gold while driving, gray otherwise (in the yard
-      // or hitched to an idle tractor).
-      const stateClass = host?.state === "working" ? "working" : host?.state === "traveling" ? "traveling" : "idle";
-      const statusText = `${where} · ${sizeLine}`;
 
       // SHORT card (2026-07-24): one row, big icon on the left, text to its
       // right. The hitch dropdown is gone — hitching is automatic when a task
       // is picked up, and the card still says where the implement is.
       const row = document.createElement("div");
       row.className = `eq-strip implement ${stateClass}`;
+      row.dataset.statusFor = `impl:${impl.id}`;
       row.innerHTML = `
         <span class="ec-dot ${stateClass}" title="${escapeHtml(statusText)}"></span>
         <span class="icon">${trailerIconHtml(impl, 44)}</span>
@@ -3821,6 +4102,7 @@ function buildEquipImplements(): void {
           <span class="ec-status" title="${escapeHtml(statusText)}">${escapeHtml(statusText)}</span>
         </span>`;
 
+      const host = impl.attachedTo ? save.agents.find((a) => a.id === impl.attachedTo) : undefined;
       const busy = !!host && host.state !== "idle";
       const actions = document.createElement("div");
       actions.className = "ec-actions";
@@ -4005,10 +4287,35 @@ function wireTimeControls() {
 }
 
 /**
- * The skip montage: fast-forward the sim to `target` over ~2.5 real seconds so the
- * player watches the field green up / ripen instead of teleporting. All skipped
- * time IS simulated (no shortcuts), just at very high compression.
+ * The skip montage: fast-forward the sim to `target` so the player watches the
+ * field green up / ripen instead of teleporting. All skipped time IS
+ * simulated (no shortcuts), just at very high compression.
+ *
+ * Advances in bounded chunks, one per animation frame, rather than jumping
+ * straight to an eased target within a single frame (maintainer request,
+ * 2026-08-14, replacing the original fixed-2.5s eased version). That old
+ * version could hand ONE frame hours of sim-time in the middle of its ease
+ * curve, which (a) could silently drop in-progress relay/haul/wrap work —
+ * `tickAgent` only processes a bounded number of discrete phase transitions
+ * per `tickWorld` call (see the guard in sim/tasks.ts) — and (b) could force
+ * enough field-repaint/agent work into one JS frame to visibly freeze the
+ * browser before it could paint, then jump once it finally did. Capping the
+ * chunk size fixes both: a typical Skip Month still finishes in about the
+ * same ~2.5s it always has, but a skip too big to fit that comfortably (Skip
+ * to Spring, or a long days-per-month setting) takes proportionally longer
+ * instead of overflowing a single frame.
  */
+/** Hard ceiling on sim-minutes advanced in any one montage frame. Chosen well
+ * inside what the raised per-tick guard in `tickAgent` can drain (500
+ * transitions at the shortest real phase, ~0.17 min, covers ~85 sim-minutes
+ * even in a fully degenerate case with zero travel time between steps —
+ * 60 leaves comfortable headroom under that). */
+const MONTAGE_MAX_CHUNK_MINUTES = 60;
+/** Frame budget a TYPICAL Skip Month aims for, so the common case keeps
+ * animating at roughly its old ~2.5s pace (150 frames @ 60fps); only skips
+ * whose natural chunk size would exceed `MONTAGE_MAX_CHUNK_MINUTES` take
+ * more frames (and therefore longer) than this. */
+const MONTAGE_TARGET_FRAMES = 150;
 /** Auto-advance the season through dead stretches: if the farm's had no work
  * (no queued OR active tasks) for this long of REAL time, fire the same
  * Skip-Month montage on its own — so idle downtime doesn't need repeated
@@ -4041,33 +4348,31 @@ function runMontage(target: number) {
   if (montageActive) return;
   montageActive = true;
   const wasPaused = clock.isPaused();
-  const durationMs = 2500;
-  const start = performance.now();
   const from = clock.time();
+  const chunk = Math.min(MONTAGE_MAX_CHUNK_MINUTES, Math.max(1, (target - from) / MONTAGE_TARGET_FRAMES));
   $("montage").style.display = "flex";
   clock.pause(); // we drive time manually during the montage
 
-  const step = (ts: number) => {
-    const t = Math.min(1, (ts - start) / durationMs);
-    const eased = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2; // easeInOutQuad
-    const now = from + (target - from) * eased;
+  const step = () => {
     const prev = clock.time();
-    // Drive the clock forward in montage steps (clock stays paused; we set time
-    // by advancing at exact compression for one fake second).
-    clock.play();
-    clock.setCompression(now - prev);
-    clock.advance(1);
-    clock.pause();
-    tickWorld(prev);
-    $("montage-month").textContent = MONTH_NAMES[dateOf(clock.time()).month]!;
-    if (t < 1) {
-      requestAnimationFrame(step);
-    } else {
+    if (prev >= target) {
       $("montage").style.display = "none";
       montageActive = false;
       restoreSpeed(wasPaused);
       toast(`📅 ${formatDate(clock.time())}`);
+      return;
     }
+    const dt = Math.min(chunk, target - prev);
+    // Drive the clock forward by exactly `dt` minutes (clock stays paused
+    // between frames; we set time by advancing at exact compression for one
+    // fake second).
+    clock.play();
+    clock.setCompression(dt);
+    clock.advance(1);
+    clock.pause();
+    tickWorld(prev);
+    $("montage-month").textContent = MONTH_NAMES[dateOf(clock.time()).month]!;
+    requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
 }
@@ -4314,9 +4619,26 @@ function wireFieldDrawing(map: maplibregl.Map) {
  * Structures tab's shop). Unlike field drawing there's no draft —
  * the first click buys and drops it, then resets to "none" whether or not
  * the purchase succeeded (so a misclick/insufficient funds doesn't strand
- * the player in placement mode). */
+ * the player in placement mode).
+ *
+ * Relocating an already-placed building (mode = `relocate:<id>`, maintainer
+ * request 2026-08-14) reuses this exact same click-to-place step — the only
+ * difference is the click mutates an existing building's `pos` instead of
+ * calling `buyBuildingAt`, so it's free and there's nothing to refund if the
+ * player backs out (there's no "place" to undo). */
 function wireBuildingPlacement(map: maplibregl.Map) {
   map.on("click", (e) => {
+    if (mode.startsWith("relocate:")) {
+      const id = mode.slice("relocate:".length);
+      mode = "none";
+      const building = save.buildings.find((b) => b.id === id);
+      if (!building) return;
+      building.pos = toMeters([e.lngLat.lng, e.lngLat.lat]);
+      prefetchAroundAsset(building.pos);
+      refreshBuildingMarkers();
+      toast(`🏗️ Moved ${buildingDisplayName(building.kind, building.size)}`);
+      return;
+    }
     if (!mode.startsWith("building:")) return;
     const kind = mode.slice("building:".length) as BuildingKind;
     mode = "none";
@@ -4362,8 +4684,11 @@ function buildingCapacityText(building: Building): string {
       return "Rally point — new equipment parks here";
     case "sellPoint":
       return "No capacity — a bale hauler sells here on the spot when Bale Storage is missing or full";
-    case "silageBunker":
-      return `Silage: ${silageStoredTons(save).toFixed(0)} / ${silageCapacityTons(save).toLocaleString()} t farm-wide · this bunker holds ${bunkerCapacityOf(building.size ?? "small").toLocaleString()} t · takes any silage`;
+    case "silageBunker": {
+      const assigned = building.assignedProduct as SilageProduct | undefined;
+      const what = assigned ? gameConfig.silageProducts[assigned].name.toLowerCase() : "any silage";
+      return `Silage: ${storedSilageTotal(building).toFixed(0)} / ${bunkerCapacityOf(building.size ?? "small").toLocaleString()} t · takes ${what} · farm total ${silageStoredTons(save).toFixed(0)} / ${silageCapacityTons(save).toLocaleString()} t`;
+    }
   }
 }
 
@@ -4393,6 +4718,16 @@ function onBuildingClick(building: Building): void {
     });
     el.appendChild(select);
   }
+
+  const moveBtn = document.createElement("button");
+  moveBtn.className = "shop-buy secondary";
+  moveBtn.textContent = "📍 Move";
+  moveBtn.addEventListener("click", () => {
+    popup.remove();
+    mode = `relocate:${building.id}`;
+    toast(`📍 Click the map to relocate your ${name}`);
+  });
+  el.appendChild(moveBtn);
 
   const sellBtn = document.createElement("button");
   sellBtn.className = "shop-buy";

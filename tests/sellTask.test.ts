@@ -6,9 +6,12 @@ import type { SaveState } from "../src/state/saveState";
 import {
   ensureAgents, buyAgent, buyImplement, tickTasks, queueSellRun, sellableStock,
 } from "../src/sim/tasks";
-import { buyBuildingAt, assignSiloCrop } from "../src/sim/buildings";
+import { buyBuildingAt, assignSiloCrop, storeSilage } from "../src/sim/buildings";
 import { sellGrain, sellStoredBalesFrom, sellAllOfProduct } from "../src/sim/economy";
-import { grainUnitPrice, grainInstantPrice, baleInstantPrice, baleUnitPrice, monthOf, peakSaleMonth } from "../src/sim/market";
+import {
+  grainUnitPrice, grainInstantPrice, baleInstantPrice, baleUnitPrice, silageUnitPrice, silageInstantPrice,
+  monthOf, peakSaleMonth,
+} from "../src/sim/market";
 import { minutesPerMonth } from "../src/sim/calendar";
 import { gameConfig } from "../src/config/gameConfig";
 
@@ -101,6 +104,42 @@ describe("queueSellRun — when a run is worth making", () => {
       if (t) t.agentId = save.agents[i % save.agents.length]!.id;
     }
     expect(save.tasks.filter((t) => t.type === "sell").length).toBe(gameConfig.hauling.maxCrewSize);
+  });
+});
+
+describe("a static sell backlog grows its own crew, live (2026-08-15 fix)", () => {
+  // The bug this guards: `queueSellRun`'s crew-growth logic (crew cap,
+  // "every existing hauler already crewed", a free tractor+trailer
+  // available) was only ever CALLED at one-off trigger moments (the
+  // Inventory tab's Haul button, `tickAutoSell`'s scheduled month) — every
+  // test above proves the function's own gates are correct, but all of
+  // them call it directly. In real play, once the first sell task is
+  // running and nothing new triggers a fresh call, a second tractor+
+  // trailer never joined no matter how large the backlog was. Live
+  // `tickTasks` simulation, no manual `queueSellRun` calls after the
+  // first — proves the periodic re-check (added to the "sell" tick block
+  // itself) actually closes that gap end to end. Mirrors
+  // crewPairing.test.ts's "a static bale backlog grows its own crew, live".
+  it("adds a second grain-cart rig to the sell run, with no further queueSellRun calls after the seed", () => {
+    const save = grainFarm(5000); // a large static backlog — plenty of time for a second rig to join
+    save.money = 10_000_000;
+    buyAgent(save, "tractor", "medium", [0, 0]); // rig 2's tractor
+    buyImplement(save, "grainTrailer", "medium"); // rig 2's trailer
+
+    expect(queueSellRun(save, "corn")).toBeTruthy();
+
+    run(save, 0, () =>
+      save.tasks.filter((t) => t.type === "sell" && t.sellProduct === "corn").length >= 2
+      && save.tasks.filter((t) => t.type === "sell" && t.sellProduct === "corn").every((t) => !!t.agentId),
+    );
+
+    const runs = save.tasks.filter((t) => t.type === "sell" && t.sellProduct === "corn");
+    expect(runs.length).toBeGreaterThanOrEqual(2);
+    expect(runs.every((t) => !!t.agentId)).toBe(true);
+    // Two DISTINCT tractors, each running its own leg in parallel — not
+    // both somehow sharing one.
+    const agentIds = new Set(runs.map((t) => t.agentId));
+    expect(agentIds.size).toBe(2);
   });
 });
 
@@ -252,5 +291,75 @@ describe("storage sell helpers still work for the instant path", () => {
     expect(r.bales).toBe(10);
     expect(save.money - before).toBe(Math.round(10 * baleInstantPrice("straw")));
     expect(store.storedBales.straw).toBe(0);
+  });
+});
+
+/** Farm with a tractor + Forage Wagon, a bunker, and a Sell Point — the
+ * silage counterpart of `grainFarm`. */
+function silageFarmWithStock(tons = 40): SaveState {
+  const save = newGame();
+  ensureAgents(save, [0, 0]);
+  buyImplement(save, "forageWagon", "medium");
+  buyBuildingAt(save, "silageBunker", [-100, -100], "medium");
+  buyBuildingAt(save, "sellPoint", [300, 300]);
+  storeSilage(save, "cornSilage", tons);
+  return save;
+}
+
+describe("bunker silage joins the sell system (2026-08-15)", () => {
+  it("prices the same way grain and bales do: instant forgoes the season AND pays a pickup fee", () => {
+    const base = gameConfig.silageProducts.cornSilage.pricePerTon;
+    expect(silageInstantPrice("cornSilage")).toBeCloseTo(base * (1 - gameConfig.market.instantSellPenaltyPct), 6);
+    expect(silageInstantPrice("cornSilage")).toBeLessThan(silageUnitPrice("cornSilage", peakSaleMonth()));
+  });
+
+  it("sellableStock reads the pooled bunker balance", () => {
+    const save = silageFarmWithStock(75);
+    expect(sellableStock(save, "cornSilage")).toBe(75);
+  });
+
+  it("queueSellRun refuses with nothing in the bunkers", () => {
+    const save = silageFarmWithStock(0);
+    expect(queueSellRun(save, "cornSilage")).toBeUndefined();
+  });
+
+  it("queueSellRun refuses with no Sell Point to haul to", () => {
+    const save = newGame();
+    ensureAgents(save, [0, 0]);
+    buyImplement(save, "forageWagon", "medium");
+    buyBuildingAt(save, "silageBunker", [-100, -100], "medium");
+    storeSilage(save, "cornSilage", 40);
+    expect(queueSellRun(save, "cornSilage")).toBeUndefined();
+  });
+
+  it("hauls silage out of the bunker to the Sell Point for the FULL seasonal price, using the Forage Wagon", () => {
+    const save = silageFarmWithStock(40);
+    const before = save.money;
+
+    queueSellRun(save, "cornSilage");
+    run(save, DEC, () => !save.tasks.some((t) => t.type === "sell"));
+
+    expect(silageRoomOf(save)).toBe(0); // bunker drained
+    const expected = Math.round(40 * silageUnitPrice("cornSilage", monthOf(DEC)));
+    expect(save.money - before).toBe(expected);
+    expect(save.money - before).toBeGreaterThan(Math.round(40 * silageInstantPrice("cornSilage")));
+
+    // Same Forage Wagon the chop relay uses — no new implement kind needed.
+    const wagon = save.implements.find((i) => i.kind === "forageWagon")!;
+    expect(wagon.cargoTons ?? 0).toBe(0);
+    expect(wagon.cargoSilage).toBeUndefined();
+  });
+
+  function silageRoomOf(save: SaveState): number {
+    return save.silage?.cornSilage ?? 0;
+  }
+
+  it("releases the tractor when it's done", () => {
+    const save = silageFarmWithStock(20);
+    queueSellRun(save, "cornSilage");
+    run(save, DEC, () => !save.tasks.some((t) => t.type === "sell"));
+    const tractor = save.agents.find((a) => a.kind === "tractor")!;
+    expect(tractor.taskId).toBeUndefined();
+    expect(tractor.state).toBe("idle");
   });
 });

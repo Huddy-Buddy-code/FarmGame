@@ -37,36 +37,81 @@ export type CropId =
  * Stored as TONS in a Silage Bunker (not bales, not bushels), because that's
  * how a bunker is really specified and because chopped forage has no discrete
  * unit to count. Sold by the ton like grain.
+ *
+ * Corn Forage is the ONLY crop that ever chops into a bunker (2026-08-15 —
+ * confirmed via `crops[x].silageProduct`; Grass/Alfalfa Silage went
+ * bale-only back on 2026-08-13, and nothing else ever set one). "haylage"/
+ * "alfalfaHaylage" existed here as a result but were never actually
+ * reachable — the same class of dead product as the old bale-side "forage"
+ * — so this shrank to just the one crop's two aging stages:
+ *   "cornForage" (fresh, just chopped) → 2 months →  "cornSilage" (cured).
+ * Renamed from "cornSilage"/"silage" (2026-08-15) — those ids had the
+ * relationship backwards from their own display names (id "cornSilage"
+ * displayed as "Corn Forage"), confusing to read in code even though
+ * nothing was wrong at runtime. A legacy save is remapped on load
+ * (`migrateLegacySilageProducts`, sim/buildings.ts).
  */
-export type SilageProduct = "cornSilage" | "haylage" | "alfalfaHaylage";
+export type SilageProduct = "cornForage" | "cornSilage";
 
-export const SILAGE_PRODUCTS: SilageProduct[] = ["cornSilage", "haylage", "alfalfaHaylage"];
+export const SILAGE_PRODUCTS: SilageProduct[] = ["cornForage", "cornSilage"];
 
 export type BaleProduct =
-  | "cornStover" | "hay" | "alfalfaHay" | "straw" | "forage"
-  // BALEAGE (wrapped silage bales, 2026-07-31 — silage Phase 1). A round bale
-  // sealed in plastic ferments instead of drying, so it keeps almost
-  // indefinitely wherever it's stacked — that's the whole product. Only the
-  // two FORAGE crops make it (straw is dry residue; there's nothing to
-  // ferment) — see `BALEAGE_OF` in sim/farming.ts.
-  | "hayBaleage" | "alfalfaBaleage"
+  | "cornStover" | "hay" | "alfalfaHay" | "straw"
   // SQUARE-baled variants (2026-07-24). Which one a field ends up with is
   // decided by the baler that was hitched — the Large baler is a large square
-  // baler (see `equipment.bailer`). Square bales are heavier, so fewer come off
-  // an acre and each is worth more; they also stack and haul better, which is
-  // the small premium per ton on top. Forked as separate products rather than a
-  // shape flag because everything downstream — storage, the Market rows, the
-  // sell schedule — is already keyed by BaleProduct.
+  // baler (see `equipment.bailer`). Square bales are MUCH bigger than round
+  // (1.6x the weight, 2026-08-15 balance pass — real large square balers
+  // routinely make bales that much heavier) but sell at the SAME price per
+  // TON as round — real hay markets price by tonnage/quality, not bale
+  // shape, so there's no per-ton premium here any more either. Forked as
+  // separate products rather than a shape flag because everything
+  // downstream — storage, the Market rows, the sell schedule — is already
+  // keyed by BaleProduct.
   | "haySquare" | "alfalfaHaySquare" | "strawSquare"
-  // SQUARE baleage (2026-08-13, Grass/Alfalfa Silage crops). Originally square
-  // bales couldn't be wrapped (a round-only wrapper) — dropped so the Grass
-  // (Silage)/Alfalfa (Silage) crops can make a square wrapped bale too.
-  | "haySquareBaleage" | "alfalfaHaySquareBaleage"
-  // GENERIC aged silage bale (2026-08-13): what a wrapped grass/alfalfa bale
-  // becomes once it's sat wrapped for `forage.silageAgingMonths` — see
-  // `resolveAgedBaleProduct` in sim/farming.ts. Crop identity is lost on
-  // purpose; this is what "it's just silage now" means.
-  | "silageBale" | "silageBaleSquare";
+  // BALEAGE (wrapped bales, 2026-07-31 — silage Phase 1; square variants
+  // 2026-08-13). A bale sealed in plastic ferments instead of drying, so it
+  // keeps almost indefinitely wherever it's stacked. Only Grass/Alfalfa make
+  // it (straw is dry residue, nothing to ferment) — see `BALEAGE_OF`,
+  // sim/farming.ts. Priced ABOVE the dry twin per ton (2026-08-15 balance
+  // pass, maintainer rule: "silage is always more valuable than its
+  // original form") — a "finished, ready-to-feed, no spoilage risk" premium,
+  // not the dry-matter-content discount a strict water-weight comparison
+  // would give it (real markets show that too — DM-adjusted, a wetter
+  // product is definitionally cheaper per ton — but a straight per-ton
+  // comparison of finished feed products more often shows wrapped/ensiled
+  // forage priced ABOVE dry hay, which is the comparison this game makes).
+  // Same bale COUNT per acre as the dry route now, not a bonus one (2026-
+  // 08-15 — confirmed the sim never actually used the old +8% "avoids field
+  // loss" bonus for real bale counts; it was a display-only number that
+  // didn't match what happened in the field).
+  | "hayBaleage" | "alfalfaBaleage" | "haySquareBaleage" | "alfalfaHaySquareBaleage"
+  // AGED baleage (2026-08-15, replacing the old crop-agnostic "silageBale"/
+  // "silageBaleSquare"): what baleage becomes once it's sat wrapped for
+  // `forage.silageAgingMonths` — see `resolveAgedBaleProduct`,
+  // sim/farming.ts. Used to merge grass and alfalfa into one generic
+  // "it's just silage now" product; now keeps crop identity (maintainer
+  // rule: "Grass Silage, Alfalfa Silage, and Corn Silage are all different
+  // and have different pricing" — losing which CROP it was contradicted
+  // that even for the bale side). Priced above its own fresh baleage, same
+  // "silage > original form" rule. Still real bales, not bunker silage —
+  // named "Baleage"/"Aged Baleage" rather than "Silage" so the word
+  // "Silage" keeps meaning exactly one thing in the whole game (the Corn
+  // Forage/Corn Silage bunker pair, `SilageProduct`) instead of three.
+  | "hayBaleageAged" | "alfalfaBaleageAged" | "haySquareBaleageAged" | "alfalfaHaySquareBaleageAged";
+  // "grassRoundbaleUnwrapped"/"alfalfaRoundbaleUnwrapped" and their square
+  // twins EXISTED 2026-08-14 → 2026-08-15 as a distinct id for a Silage
+  // crop's not-yet-wrapped bales — the same product-list cleanup that
+  // removed them (maintainer request: "too many products") confirmed the
+  // gate that actually holds them back from hauling off unwrapped is
+  // `wrapPending` reading the FIELD's crop (sim/tasks.ts), not the bale's
+  // own id — so the distinct id was pricing-identical to plain "hay"/
+  // "alfalfaHay"/"haySquare"/"alfalfaHaySquare" and cosmetic-only by the
+  // time it was cut. Merged back into those four; a save from that one-day
+  // window is remapped on load (`migrateLegacyBaleProducts`, sim/farming.ts).
+  //
+  // "forage" (unraked cut forage, never actually reachable — baling always
+  // follows a rake) was cut in the same pass. Neither removal changed a
+  // single price or balesPerAcre number.
 
 /** Equipment size classes. A tractor pulls implements of its class or smaller. */
 export type EquipmentSize = "small" | "medium" | "large";
@@ -76,6 +121,9 @@ export const SIZE_RANK: Record<EquipmentSize, number> = { small: 0, medium: 1, l
 
 /** Feet → meters (implement widths are specified in real feet). */
 export const FEET_TO_METERS = 0.3048;
+
+/** km/h → mph (in-field working speeds are configured in km/h). */
+export const KMH_TO_MPH = 0.621371;
 
 /**
  * Tons in one bushel of `crop` — its test weight over 2000 lb.
@@ -529,9 +577,13 @@ export interface GameConfig {
      * bale takes 70–130% of a nominal bale's forage to fill, so the field's
      * total bale COUNT (and thus revenue) varies a little run to run. */
     baleFillVariance: number;
-    /** In-field speed of the wrapping pass, km/h (2026-07-31). Slower than
-     * baling — an inline wrapper stops at every bale. */
-    wrapSpeedKmh: number;
+    /** How long the wrapper pauses at each bale to seal it, in SIM-minutes
+     * (2026-08-14, replacing `wrapSpeedKmh`: Wrap is a per-bale task now —
+     * the tractor visits each unwrapped bale in turn, like Hay-Spikes
+     * visiting each one to collect it — not a coverage-path pass). Driving
+     * BETWEEN bales uses the shared `work.travelSpeedKmh`, same as
+     * Hay-Spikes' collector leg. */
+    wrapMinutesPerBale: number;
     /** Cost per acre to wrap: plastic film plus the pass. Real film runs
      * $5–7/bale, so ~$18/ac at baleage's ~2.7 bales/ac. */
     wrapCostPerAcre: number;
@@ -551,9 +603,10 @@ export interface GameConfig {
      * priciest pass in the game — a chopper burns more than a combine, and
      * real custom chopping runs $120-160/ac including the haul. */
     chopCostPerAcre: number;
-    /** Months a wrapped bale keeps its crop-specific identity before it ages
-     * into the generic "Silage Bale (wrapped)" (2026-08-13) — see
-     * `resolveAgedBaleProduct` (sim/farming.ts). */
+    /** Months a fresh-wrapped bale (or freshly chopped Corn Forage) sits
+     * before it ages into its Aged Baleage/Corn Silage twin — see
+     * `resolveAgedBaleProduct` (sim/farming.ts) and `tickSilageAging`
+     * (sim/buildings.ts). */
     silageAgingMonths: number;
   };
 
@@ -779,7 +832,7 @@ export const gameConfig: GameConfig = {
       // that grosses ~$1,100/ac — chopping costs ~$130/ac against grain
       // corn's $40 harvest, but a month less growing time and no drydown risk
       // is the actual trade a player is making.
-      silageProduct: "cornSilage",
+      silageProduct: "cornForage",
       silageTonsPerAcre: 20,
     },
     soybeans: {
@@ -949,6 +1002,9 @@ export const gameConfig: GameConfig = {
       perennial: true,
       harvestMonths: [4, 6, 8],
       fertilizeMonth: 3,
+      // Shares plain Grass's "hay" id again (2026-08-15 — briefly had its own
+      // "grassRoundbaleUnwrapped" id 2026-08-14, cut in the product-list
+      // cleanup; see the BaleProduct union's comment for why that was safe).
       baleProduct: "hay",
       producesWrappedBale: true,
     },
@@ -986,6 +1042,8 @@ export const gameConfig: GameConfig = {
       perennial: true,
       harvestMonths: [4, 6, 8],
       fertilizeMonth: 3,
+      // Shares plain Alfalfa's "alfalfaHay" id again (2026-08-15) — see
+      // grassSilage's identical comment above.
       baleProduct: "alfalfaHay",
       producesWrappedBale: true,
     },
@@ -1009,7 +1067,7 @@ export const gameConfig: GameConfig = {
     fieldSpeedKmh: 12,
     harvestSpeedKmh: 7,
     plowSpeedKmh: 7,
-    windrowerSpeedKmh: 16,
+    windrowerSpeedKmh: 24.1, // 15 mph (maintainer request, 2026-08-15)
     travelSpeedKmh: 22,
   },
   equipment: {
@@ -1136,10 +1194,14 @@ export const gameConfig: GameConfig = {
     // they should be: a chopper only earns its keep on serious forage acres.
     // Widths are the HEAD's job (see rowCropHead/pickupHead); the width here is
     // only the fallback for a head-less chop, same as the combine's.
+    // Flat 5t buffer at every size (2026-08-14, was 1.5/2/2.5 tiered) — a
+    // small invisible cushion, not a real tank: it just means the chopper
+    // doesn't stall dead the instant a wagon's briefly out of position,
+    // giving the relay a little slack for logistics instead of a hard stop.
     forageHarvester: {
-      small: { price: 420_000, widthFt: 15, capacityTons: 1.5 },
-      medium: { price: 600_000, widthFt: 20, capacityTons: 2 },
-      large: { price: 850_000, widthFt: 25, capacityTons: 2.5 },
+      small: { price: 420_000, widthFt: 15, capacityTons: 5 },
+      medium: { price: 600_000, widthFt: 20, capacityTons: 5 },
+      large: { price: 850_000, widthFt: 25, capacityTons: 5 },
     },
     // Bigger than the grain line at EVERY tier, in tons (maintainer request:
     // "a line of forage trailers with larger capacity"). The grain trailers
@@ -1147,10 +1209,11 @@ export const gameConfig: GameConfig = {
     // matters more here than it does for grain, because the chopper STOPS
     // whenever no wagon is taking material. Capacity is how long it keeps
     // cutting between wagons, i.e. the whole tempo of a silage harvest.
+    // Doubled again 2026-08-14 (maintainer request).
     forageWagon: {
-      small: { price: 40_000, widthFt: 0, capacityTons: 18 },
-      medium: { price: 70_000, widthFt: 0, capacityTons: 32 },
-      large: { price: 105_000, widthFt: 0, capacityTons: 48 },
+      small: { price: 40_000, widthFt: 0, capacityTons: 36 },
+      medium: { price: 70_000, widthFt: 0, capacityTons: 64 },
+      large: { price: 105_000, widthFt: 0, capacityTons: 96 },
     },
     // A chopper's corn head is narrower than a combine's (it's pulling whole
     // plants through, not stripping cobs) and dearer per foot.
@@ -1166,9 +1229,17 @@ export const gameConfig: GameConfig = {
       medium: { price: 32_000, widthFt: 0 },
       large: { price: 32_000, widthFt: 0 },
     },
-    // Hay Spikes — cheap, low-capacity in-field bale collector. Small (1 bale)
-    // is pullable by any tractor; Medium (2 bales) needs a medium+. The large
-    // slot mirrors medium so the record type-checks; only Small/Medium are sold.
+    // Hay Spike — cheap, low-capacity in-field bale collector. Single
+    // SHOP tier now (2026-08-14, maintainer request) — sold as just
+    // "Hay Spike" (was "Hay Spikes" with a Small/Medium choice), and
+    // pullable by Small or Medium tractors, but NOT Large (see `canPull`'s
+    // `haySpikes` special case, sim/tasks.ts: a bale spear is a light
+    // errand, not what a large 4WD unit is bought for — a deliberate
+    // exception to the usual "bigger tractor can always do what a smaller
+    // one can" size rule). The `small` slot is UNCHANGED and no longer
+    // purchasable — kept exactly as it was so existing 1-bale-per-trip relay
+    // tests keep meaning what they say — same "kept for the record type,
+    // not sold" convention the `large` slot already used.
     // Repriced 2026-07-25: a bale spear is a steel fork, not a machine. Real
     // money is $500–2000 for a single and $5–10k for a 2-bale hydraulic
     // handler; $8k/$16k had it costing more than a third of a Bale Trailer.
@@ -1211,8 +1282,8 @@ export const gameConfig: GameConfig = {
     chopperTrailMeters: 20,
   },
   forage: {
-    rakeSpeedKmh: 13, // slightly faster than the baler
-    baleSpeedKmh: 10, // slightly slower than the rake
+    rakeSpeedKmh: 24.1, // 15 mph (maintainer request, 2026-08-14) — still faster than the baler
+    baleSpeedKmh: 16.1, // 10 mph (maintainer request, 2026-08-14) — still slower than the rake
     rakeCostPerAcre: 6,
     baleCostPerAcre: 14, // real round-baling custom rate $14–18/ac (was $10)
     // 2026-07-25: a round bale is 0.75 t, not 1 t — a real 5x6 of dry hay runs
@@ -1223,8 +1294,8 @@ export const gameConfig: GameConfig = {
     balePricePerBale: 38, // ~$50/t, unchanged in per-TON terms
     baleTieMinutes: 0.17, // ≈ 10 s at 1×
     baleFillVariance: 0.3, // each bale fills at 70–130% of a nominal bale
-    wrapSpeedKmh: 7, // an inline wrapper stops at every bale
-    wrapCostPerAcre: 18, // plastic film (~$6/bale at ~2.7 bales/ac) + the pass
+    wrapMinutesPerBale: 0.66, // ≈ 40 s at 1× (doubled, maintainer request, 2026-08-14 — was 0.33/≈20s)
+    wrapCostPerAcre: 18, // plastic film (~$9/bale at ~2.0 bales/ac, 2026-08-15 — same bale count as the dry route now) + the pass
     // 0.2%/mo ≈ 1.2% over a six-month storage season, inside the real 2–5%.
     // Against the Bale Area's 2.5%/mo this is the whole reason to wrap.
     wrappedSpoilPctPerMonth: 0.002,
@@ -1236,104 +1307,107 @@ export const gameConfig: GameConfig = {
     // window rather than researched like the rest of this block.
     silageAgingMonths: 2,
   },
+  // ═══════════════════════════════════════════════════════════════════════
+  // BALE PRODUCTS — full repricing pass, 2026-08-15 (maintainer request:
+  // "review all the current bale products for balance... use real world
+  // market data"). Replaces the DM-content/field-loss modeling the previous
+  // passes used with four maintainer rules, checked against USDA/extension
+  // market data (hay/alfalfa/straw/baleage/corn-silage pricing, real round
+  // vs. square bale weights):
+  //
+  //   1. Square bales sell at the SAME price per TON as round — real hay
+  //      markets price by tonnage/quality, not bale shape (confirmed: no
+  //      clean per-ton round-vs-square premium in the USDA data). Square is
+  //      1.6x the round bale's WEIGHT (2026-08-15, up from 1.2x) — real
+  //      large square balers (4x4x8) commonly run up to that much heavier
+  //      than a round bale of the same crop.
+  //   2. Grass Silage, Alfalfa Silage, and Corn Silage are priced
+  //      independently — no averaging across crops (the old generic
+  //      "silageBale" merged grass+alfalfa into one bucket; that's gone).
+  //   3. Silage/baleage is ALWAYS priced above the dry form it came from —
+  //      a "finished, ready-to-feed, no spoilage risk" premium rather than
+  //      the dry-matter-content discount a strict water-weight comparison
+  //      would give it. Real markets support pricing it either way
+  //      depending what's being compared (DM-adjusted, wetter is cheaper;
+  //      per ton of finished feed product, haylage/baleage often prices
+  //      above hay) — this game deliberately takes the second reading.
+  //      +15% dry→fresh-wrapped, +10% fresh-wrapped→aged (compounds to
+  //      +26.5% dry→aged).
+  //   4. A crop's dry and wrapped routes make the SAME bale COUNT per acre
+  //      — confirmed the sim never actually used the old wrapped-bale
+  //      "+8%, avoids field loss" bonus for real bale counts (it only fed a
+  //      cosmetic Market-tab stat that didn't match what happened in the
+  //      field), so it's gone. `balesPerAcre` is identical across a crop's
+  //      dry/fresh-wrapped/aged bales of the same SHAPE now.
+  //
+  // Anchors (Nov 2024 USDA Agricultural Prices, hay/forage extension
+  // pricing guides): grass "other" hay ~$147-150/t, alfalfa hay ~$165-235/t
+  // depending on quality (average-to-premium dairy), straw ~$52/t including
+  // baling cost, corn stover $50-60/t delivered. Hay markets are genuinely
+  // volatile year to year (national alfalfa avg fell 43% from 2023 to
+  // 2024) — these are a reasonable point-in-time anchor, not a promise.
   baleProducts: {
     // LEGACY (2026-07-23): corn no longer produces forage, so no new stover is
     // ever made. Kept so bales already in a save keep a name, price and tint.
-    // --- REALISM PASS 2026-07-25, two changes at once, so read these per TON.
-    //
-    // (a) BALE WEIGHT. A round bale is 0.75 t (real 5x6 dry hay = 1200–1600 lb,
-    //     not the 2000 lb it was) and a large square is 0.9 t (real 3x4x8 =
-    //     ~1800 lb, not 3000). `balesPerAcre` rose to keep the TONNAGE off an
-    //     acre where it was — except straw, whose 1.8 t/ac was itself over a
-    //     real 1.2–1.5 recoverable, and which now lands at 1.35 t/ac.
-    // (b) PRICE. Every forage product was underpriced 35–50% per ton, which made
-    //     grass a trap crop at ~$98/ac/yr against corn's $445. These are true
-    //     market rates (maintainer call): hay $130/t, alfalfa $200/t, straw $60/t.
-    //
-    // Alfalfa came out of (b) as the highest-margin crop in the game by a wide
-    // margin (~$773/ac/yr against corn's $445), because its real GROSS is that
-    // high and the sim modelled none of hay's real downside. Two of those are
-    // now priced in (maintainer decision, 2026-07-25):
-    //   - storage loss is real — see `buildings.baleArea.spoilPctPerMonth`;
-    //   - the rest is taken straight off alfalfa's yield, −15% on
-    //     `balesPerAcre` (2.13 → 1.81 round, 1.78 → 1.51 square), standing in
-    //     for the rain-ruined cuttings and leaf shatter the sim doesn't
-    //     simulate. Its PRICE stays at the true market $200/t, which is the
-    //     part that had to stay honest.
-    // 4.07 t/ac/yr over three cuttings is still inside the real 4–6 range.
+    // $50.67/t is already inside the real $50-60/t delivered range —
+    // unchanged by this pass.
     cornStover: { name: "Corn Stover", pricePerBale: 38, balesPerAcre: 3.33, color: "hay", tonsPerBale: 0.75 },
-    // Grass hay: 1.5 t/ac/cutting at $130/t.
-    hay: { name: "Round Grass Bale", pricePerBale: 98, balesPerAcre: 2.0, color: "hay", tonsPerBale: 0.75 },
-    // Alfalfa hay: 1.36 t/ac/cutting at $200/t — roughly 1.5x grass, as in life.
+    // Grass hay: $150/t (real "other hay" average, Nov 2024) x 0.75 t/bale.
+    // 1.5 t/ac/cutting, unchanged.
+    hay: { name: "Round Grass Bale", pricePerBale: 113, balesPerAcre: 2.0, color: "hay", tonsPerBale: 0.75 },
+    // Alfalfa hay: $200/t (between the real "average" ~$170-180 forecast and
+    // "premium/dairy" ~$235 quote — good-not-elite quality) x 0.75 t/bale —
+    // works out to the SAME $150 round-bale price as before this pass, pure
+    // coincidence of the new anchor. 1.36 t/ac/cutting, unchanged.
     alfalfaHay: { name: "Round Alfalfa Bale", pricePerBale: 150, balesPerAcre: 1.81, color: "alfalfa", tonsPerBale: 0.75 },
-    // Small-grain straw — bedding, not fodder: 1.35 t/ac at $60/t.
+    // Small-grain straw — bedding, not fodder: $60/t (real ~$52/t incl.
+    // baling cost — kept at the prior anchor, already close) x 0.75 t/bale.
+    // 1.35 t/ac, unchanged.
     straw: { name: "Straw", pricePerBale: 45, balesPerAcre: 1.8, color: "hay", tonsPerBale: 0.75 },
-    // Unraked cut forage (currently unreachable — baling always follows a rake).
-    forage: { name: "Forage", pricePerBale: 53, balesPerAcre: 2.0, color: "hay", tonsPerBale: 0.75 },
-    // --- SQUARE variants (2026-07-24). Each is its round twin at 1.2x the
-    // weight (0.9 t vs 0.75 t), so 1/1.2 the bales per acre — same tonnage off
-    // the same ground — and ~10% more per TON, because squares stack tight on a
-    // trailer and in a barn. The Square Baler is the only way to make them.
-    haySquare: { name: "Square Grass Bale", pricePerBale: 129, balesPerAcre: 1.67, color: "hay", tonsPerBale: 0.9, square: true },
-    alfalfaHaySquare: { name: "Square Alfalfa Bale", pricePerBale: 198, balesPerAcre: 1.51, color: "alfalfa", tonsPerBale: 0.9, square: true },
-    strawSquare: { name: "Straw (Square)", pricePerBale: 59, balesPerAcre: 1.5, color: "hay", tonsPerBale: 0.9, square: true },
-    // --- BALEAGE (2026-07-31, silage Phase 1). Wrapped round bales.
-    //
-    // These are priced in DRY MATTER, which is the only honest way to compare
-    // them with dry hay — feed is bought on DM, and baleage is half water.
-    //   dry round bale  0.75 t @ ~15% moisture = 0.64 t DM
-    //   baleage bale    1.00 t @ ~50% moisture = 0.50 t DM   (5x5, real range
-    //                                            1400–2200 lb)
-    // So a baleage bale carries LESS feed than a dry one, and an acre makes
-    // MORE of them. Matching grass hay's 1.28 t DM/ac needs 2.56 baleage
-    // bales; +8% for the field loss baleage genuinely avoids (no 3-day
-    // dry-down, far less leaf shatter — the same losses alfalfa's −15% yield
-    // haircut stands in for) lands at 2.7. Alfalfa likewise 1.16 t DM/ac →
-    // 2.32, +8% → 2.5.
-    //
-    // PRICE is the dry twin's value per ton of DM, converted back to as-fed:
-    //   grass hay   $130/t as-fed ÷ 0.85 = $153/t DM → x0.50 = $76/t as-fed
-    //   alfalfa hay $200/t as-fed ÷ 0.85 = $235/t DM → x0.50 = $118/t as-fed
-    // which is right on the real haylage market. At 1 t/bale that IS the price
-    // per bale.
-    //
-    // What that makes of the decision (the point of the feature): an acre of
-    // grass grosses 2.7 x $76 = $205 as baleage against 2.0 x $98 = $196 as
-    // dry hay, and wrapping costs ~$18/ac in plastic — so selling STRAIGHT off
-    // the field, dry hay wins by a nose. Baleage wins the moment the bales have
-    // to sit: dry hay in a Bale Area loses 2.5%/mo, ~14% over a storage season,
-    // while wrapped bales lose almost nothing. A Bale Barn is the other answer
-    // to the same problem, so the wrapper and the barn deliberately COMPETE —
-    // buy the cheap outdoor pad and wrap, or buy the barn and bale dry.
-    hayBaleage: { name: "Round Grass Bale (wrapped)", pricePerBale: 76, balesPerAcre: 2.7, color: "wrapped", tonsPerBale: 1.0, wrapped: true },
-    alfalfaBaleage: { name: "Round Alfalfa Bale (wrapped)", pricePerBale: 118, balesPerAcre: 2.5, color: "wrapped", tonsPerBale: 1.0, wrapped: true },
-    // SQUARE baleage (2026-08-13, Grass/Alfalfa Silage crops) — same
-    // dry->wrapped transform the round bales got (1.2x weight, 1/1.2 the
-    // bales/ac for the same tonnage, +10%/ton for how squares stack), applied
-    // on top of the round baleage figures above rather than re-derived from
-    // DM math. Placeholder-tunable like the rest of this pairing.
-    haySquareBaleage: { name: "Square Grass Bale (wrapped)", pricePerBale: 100, balesPerAcre: 2.25, color: "wrapped", tonsPerBale: 1.2, square: true, wrapped: true },
-    alfalfaHaySquareBaleage: { name: "Square Alfalfa Bale (wrapped)", pricePerBale: 156, balesPerAcre: 2.08, color: "wrapped", tonsPerBale: 1.2, square: true, wrapped: true },
-    // GENERIC aged silage bale (2026-08-13) — what a crop-specific wrapped
-    // bale becomes after sitting `forage.silageAgingMonths` unwrapped-and-
-    // -ungathered (see `resolveAgedBaleProduct`, sim/farming.ts). Never
-    // produced directly by a baler; priced as a straight average of the
-    // grass/alfalfa wrapped prices since the crop identity is gone by then.
-    silageBale: { name: "Round Silage Bale (wrapped)", pricePerBale: 97, balesPerAcre: 2.6, color: "wrapped", tonsPerBale: 1.0, wrapped: true },
-    silageBaleSquare: { name: "Square Silage Bale (wrapped)", pricePerBale: 128, balesPerAcre: 2.17, color: "wrapped", tonsPerBale: 1.2, square: true, wrapped: true },
+    // --- SQUARE variants. Same $/ton as round (rule 1) — 1.6x the WEIGHT,
+    // so 1/1.6 the bales per acre for the same tonnage off the same ground.
+    // The Square Baler is the only way to make them.
+    haySquare: { name: "Square Grass Bale", pricePerBale: 180, balesPerAcre: 1.25, color: "hay", tonsPerBale: 1.2, square: true },
+    alfalfaHaySquare: { name: "Square Alfalfa Bale", pricePerBale: 240, balesPerAcre: 1.13, color: "alfalfa", tonsPerBale: 1.2, square: true },
+    strawSquare: { name: "Straw (Square)", pricePerBale: 72, balesPerAcre: 1.13, color: "hay", tonsPerBale: 1.2, square: true },
+    // --- BALEAGE (wrapped bales). Only Grass/Alfalfa make it (straw is dry
+    // residue, nothing to ferment) — see `BALEAGE_OF`, sim/farming.ts.
+    // +15% over the dry twin's $/ton (rule 3); SAME balesPerAcre as the dry
+    // twin of the same shape (rule 4 — same bales, just sealed instead of
+    // dried).
+    //   grass:   $150/t x1.15 = $172.50/t  ->  round $173, square $276
+    //   alfalfa: $200/t x1.15 = $230.00/t  ->  round $230, square $368
+    hayBaleage: { name: "Round Grass Bale (Baleage)", pricePerBale: 173, balesPerAcre: 2.0, color: "wrapped", tonsPerBale: 1.0, wrapped: true },
+    alfalfaBaleage: { name: "Round Alfalfa Bale (Baleage)", pricePerBale: 230, balesPerAcre: 1.81, color: "wrapped", tonsPerBale: 1.0, wrapped: true },
+    haySquareBaleage: { name: "Square Grass Bale (Baleage)", pricePerBale: 276, balesPerAcre: 1.25, color: "wrapped", tonsPerBale: 1.6, square: true, wrapped: true },
+    alfalfaHaySquareBaleage: { name: "Square Alfalfa Bale (Baleage)", pricePerBale: 368, balesPerAcre: 1.13, color: "wrapped", tonsPerBale: 1.6, square: true, wrapped: true },
+    // --- AGED BALEAGE (2026-08-15, replacing the old crop-agnostic
+    // "silageBale"/"silageBaleSquare"): what baleage becomes after sitting
+    // wrapped for `forage.silageAgingMonths` — see `resolveAgedBaleProduct`,
+    // sim/farming.ts. Keeps crop identity now (rule 2). +10% over the
+    // crop's OWN fresh baleage (rule 3, compounding with the +15% above to
+    // +26.5% over dry); same balesPerAcre as the rest of the family (rule 4).
+    //   grass:   $172.50/t x1.10 = $189.75/t  ->  round $190, square $304
+    //   alfalfa: $230.00/t x1.10 = $253.00/t  ->  round $253, square $405
+    hayBaleageAged: { name: "Round Grass Bale (Aged Baleage)", pricePerBale: 190, balesPerAcre: 2.0, color: "wrapped", tonsPerBale: 1.0, wrapped: true },
+    alfalfaBaleageAged: { name: "Round Alfalfa Bale (Aged Baleage)", pricePerBale: 253, balesPerAcre: 1.81, color: "wrapped", tonsPerBale: 1.0, wrapped: true },
+    haySquareBaleageAged: { name: "Square Grass Bale (Aged Baleage)", pricePerBale: 304, balesPerAcre: 1.25, color: "wrapped", tonsPerBale: 1.6, square: true, wrapped: true },
+    alfalfaHaySquareBaleageAged: { name: "Square Alfalfa Bale (Aged Baleage)", pricePerBale: 405, balesPerAcre: 1.13, color: "wrapped", tonsPerBale: 1.6, square: true, wrapped: true },
   },
 
-  // Chopped silage, priced per ton AS FED at ~40% dry matter (chopped forage
-  // ensiles wetter than baleage's ~50%). Same DM anchors as the bale ladder:
-  //   grass    $153/t DM x 0.40 = $61/t     alfalfa $235/t DM x 0.40 = $94/t
-  // Corn silage is its own market — real standing/delivered rates run $45-60/t
-  // as-fed, and at 20 t/ac that grosses ~$1,100 against grain corn's ~$990,
-  // which is the ~1.15x of the grain it would have made that the real trade
-  // sits at. See `CropConfig.silageTonsPerAcre` for the yields.
+  // Chopped bunker silage. Corn Forage is the ONLY crop that ever chops into
+  // a bunker (2026-08-15 — confirmed via `crops[x].silageProduct`; nothing
+  // else has had a route onto a field since the 2026-08-13 Silage rework),
+  // so this is just its two aging stages, not a crop-comparison table:
+  //   cornForage (fresh chopped) -> forage.silageAgingMonths -> cornSilage (cured)
+  // Renamed from "cornSilage"/"silage" in the same pass (those ids had the
+  // relationship backwards from their own display names). $50/t fresh is
+  // inside the real $43-53/t standing-to-delivered range (2024 estimates);
+  // $55/t cured is +10% (rule 3 — silage always priced above what it aged
+  // from — same +10% step the bale side's aging uses).
   silageProducts: {
+    cornForage: { name: "Corn Forage", emoji: "🌽", pricePerTon: 50 },
     cornSilage: { name: "Corn Silage", emoji: "🌽", pricePerTon: 55 },
-    haylage: { name: "Haylage", emoji: "🌱", pricePerTon: 61 },
-    alfalfaHaylage: { name: "Alfalfa Haylage", emoji: "☘️", pricePerTon: 94 },
   },
   buildings: {
     silo: {
@@ -1366,10 +1440,11 @@ export const gameConfig: GameConfig = {
     // ~$20-25/ton of capacity — concrete walls and a slab. A grain silo runs
     // $2.70-3.50 per BUSHEL, roughly $100/ton of corn, so bulk forage storage
     // being far cheaper per ton is right.
+    // Doubled 2026-08-14 (maintainer request).
     silageBunker: {
-      small: { price: 30_000, capacityTons: 1_200 },
-      medium: { price: 55_000, capacityTons: 2_500 },
-      large: { price: 95_000, capacityTons: 5_000 },
+      small: { price: 30_000, capacityTons: 2_400 },
+      medium: { price: 55_000, capacityTons: 5_000 },
+      large: { price: 95_000, capacityTons: 10_000 },
     },
   },
   yieldRangeNarrowing: 0.85,

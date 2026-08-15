@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { baleFeatureCollection, baleStateKey, baleProductOf, MAX_BALE_FEATURES } from "../src/field/baleLayer";
+import { baleFeatureCollection, baleStateKey, baleProductOf, wrappedBaleProductOf, MAX_BALE_FEATURES } from "../src/field/baleLayer";
 import { setProjection } from "../src/geo/coords";
 import type { Field } from "../src/state/saveState";
 import type { Meters } from "../src/geo/coords";
@@ -91,5 +91,39 @@ describe("bale state key", () => {
 
   it("is empty with no bales anywhere", () => {
     expect(baleStateKey([field("f1", [])])).toBe("");
+  });
+});
+
+describe("wrapped pool rendering (2026-08-14) — a field mid-wrap shows a genuine mix", () => {
+  // The Silage crops' bales share plain Grass/Alfalfa's "hay"/"alfalfaHay"/
+  // "haySquare" ids again (2026-08-15 product-list cleanup dropped the
+  // one-day-old distinct "…Unwrapped" ids — see the BaleProduct union's
+  // comment, config/gameConfig.ts) — these tests are still exercising a
+  // genuinely unwrapped pool, just under the shared name now.
+  it("derives the wrapped product from the unwrapped one, not a stored field", () => {
+    expect(wrappedBaleProductOf(field("f1", [], "hay"))).toBe("hayBaleage");
+    expect(wrappedBaleProductOf(field("f1", [], "alfalfaHay"))).toBe("alfalfaBaleage");
+    expect(wrappedBaleProductOf(field("f1", [], "haySquare"))).toBe("haySquareBaleage");
+  });
+
+  it("falls back to the unwrapped product itself if it somehow isn't wrappable — draws something, not nothing", () => {
+    expect(wrappedBaleProductOf(field("f1", [], "straw"))).toBe("straw");
+  });
+
+  it("emits BOTH piles as separate features, each with its own product", () => {
+    const f = field("f1", [[1, 1], [2, 2]], "hay");
+    f.wrappedBaleLocations = [[3, 3]];
+    const fc = baleFeatureCollection([f]);
+    expect(fc.features).toHaveLength(3);
+    const products = fc.features.map((feat) => feat.properties?.product);
+    expect(products.filter((p) => p === "hay")).toHaveLength(2);
+    expect(products.filter((p) => p === "hayBaleage")).toHaveLength(1);
+  });
+
+  it("counts toward the state key separately, so a bale flipping pools still repaints", () => {
+    const unwrapped = field("f1", [[1, 1], [2, 2]], "hay");
+    const f = field("f1", [[1, 1]], "hay");
+    f.wrappedBaleLocations = [[2, 2]]; // one of the two just got sealed
+    expect(baleStateKey([f])).not.toBe(baleStateKey([unwrapped]));
   });
 });

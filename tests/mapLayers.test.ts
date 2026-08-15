@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { validateStyleMin } from "@maplibre/maplibre-gl-style-spec";
 import type { LayerSpecification, StyleSpecification } from "maplibre-gl";
 import { fieldLabelLayer } from "../src/field/fields";
-import { baleSymbolLayer } from "../src/field/baleLayer";
+import { baleSymbolLayer, ICON_PX } from "../src/field/baleLayer";
 
 /**
  * Map layers are the one part of this codebase that fails INVISIBLY: a symbol
@@ -89,6 +89,13 @@ describe("bale symbol layer", () => {
 
   it("picks its icon per feature, so one layer serves every bale product", () => {
     expect((layer.layout as Record<string, unknown>)["icon-image"]).toEqual(["get", "product"]);
+  });
+
+  it("sits nudged up ~25% of its own height, not centered on the drop point", () => {
+    // (2026-08-14, maintainer request). Negative Y = up, in icon-pixel units
+    // (ICON_PX) so it scales automatically with the layer's icon-size stops.
+    const layout = layer.layout as Record<string, unknown>;
+    expect(layout["icon-offset"]).toEqual([0, -ICON_PX * 0.25]);
   });
 });
 

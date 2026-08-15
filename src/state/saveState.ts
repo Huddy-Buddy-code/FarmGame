@@ -194,9 +194,33 @@ export interface Field {
    * (exactly where dropped, across save/reload) until the player sells them.
    * Count = `baleLocations.length`. */
   baleLocations?: Meters[];
-  /** What the field's dropped bales ARE (2026-07-13) — drives sale price + the
-   * marker tint. Set when a bale run completes (corn→cornStover, grass→hay,
-   * alfalfa→alfalfaHay). Undefined = corn-stover default (legacy saves). */
+  /**
+   * Bales the Wrap task has already sealed, at the same drop spot they came
+   * from `baleLocations` (2026-08-14) — Wrap is a per-bale task now (the
+   * tractor visits each one and seals it in place, like Hay-Spikes visiting
+   * each one to collect it), not a field-wide sweep, so a field genuinely
+   * holds a MIX of unwrapped (`baleLocations`) and wrapped
+   * (`wrappedBaleLocations`) bales while a wrap run is in progress — the map
+   * icon differs per pile (`baleLayer.ts`). Merged back into `baleLocations`
+   * (as the WRAPPED product) once the wrap task finishes clearing
+   * `baleLocations` — see `applyWrapDone` (sim/farming.ts) — at which point
+   * this is cleared and hauling proceeds exactly as it does for any other
+   * bale product. A wrap task force-canceled mid-run leaves the two piles
+   * split; nothing hauls `wrappedBaleLocations` until a later wrap task
+   * finishes the rest and triggers that merge (documented simplification,
+   * not a bug — same "no true per-batch tracking" tradeoff `SaveState.
+   * silage`/storedBales already make elsewhere).
+   */
+  wrappedBaleLocations?: Meters[];
+  /** What the field's dropped (UNWRAPPED) bales ARE (2026-07-13) — drives
+   * sale price + the marker tint for `baleLocations`. Set when a bale run
+   * completes (corn→cornStover, grass→hay, alfalfa→alfalfaHay). Undefined =
+   * corn-stover default (legacy saves). Stays the UNWRAPPED id for a Silage
+   * crop even as bales move into `wrappedBaleLocations` one at a time — that
+   * pool's product is always `baleageProductFor(baleProduct)` (derived, not
+   * stored), since a field only ever has one crop/product identity per bale
+   * run. Only flips to the wrapped id once `applyWrapDone` merges everything
+   * back (or immediately, for a Combi Baler's already-sealed bales). */
   baleProduct?: BaleProduct;
   /**
    * When this field's current bales were dropped (2026-07-31) — the clock on
@@ -212,9 +236,9 @@ export interface Field {
   /** When this field's current bales became WRAPPED (2026-08-13) — either
    * straight off a Combi Baler or via a standalone Wrap task. Drives
    * `resolveAgedBaleProduct` (sim/farming.ts): once `forage.silageAgingMonths`
-   * have passed, a crop-specific wrapped product (e.g. "Round Alfalfa Bale
-   * (wrapped)") is sold/hauled as the generic "Silage Bale (wrapped)"
-   * instead. Undefined = not wrapped, or a legacy save. */
+   * have passed, a fresh-wrapped product (e.g. "Round Alfalfa Bale
+   * (Baleage)") is sold/hauled as its own Aged Baleage twin ("Round Alfalfa
+   * Bale (Aged Baleage)") instead. Undefined = not wrapped, or a legacy save. */
   wrappedAt?: SimTime;
   /** Perennial forage crops only (grass/alfalfa): how many of this year's
    * cuttings have been mowed, and which campaign year that count belongs to
@@ -286,10 +310,35 @@ export interface Building {
    * 1. Cleared when a product's pile empties, so an emptied store can't carry
    * stale debt into the next load. See `tickBaleSpoilage` (sim/buildings.ts). */
   spoilAccrued?: Partial<Record<BaleProduct, number>>;
-  /** Bale-storage-only (optional): dedicate this store to ONE product — only
-   * that product hauls in. Unassigned (undefined) accepts any product (the
-   * default; mirrors an unassigned silo but bales may then be mixed). */
-  assignedProduct?: BaleProduct;
+  /** Bale-storage-only (2026-08-14): when this building's pile of a wrapped
+   * product was first noticed non-empty, for aging it into its own Aged
+   * Baleage twin after `forage.silageAgingMonths`. Same
+   * "whole pile, not true per-arrival batches" tradeoff as `spoilAccrued`.
+   * Cleared when a product's pile empties or finishes aging. See
+   * `tickBaleAging` (sim/buildings.ts); `silageAgingStartedAt` below is the
+   * silage-bunker counterpart. */
+  baleAgingStartedAt?: Partial<Record<BaleProduct, number>>;
+  /** Silage-bunker-only (2026-08-15 — bunkers moved from one farm-wide pool
+   * to real per-building storage, mirroring bale storage below, so
+   * "dedicate this bunker to one product" could be a genuine capacity
+   * restriction and not just a label). Chopped silage physically stored
+   * here, per product — a bunker can hold a mix same as a bale store.
+   * Filled by the chop relay (`sim/tasks.ts`'s unloadHarvester silage runs)
+   * and by the Sell task's loading leg. Caps at `bunkerCapacityOf(size)`. */
+  storedSilage?: Partial<Record<SilageProduct, number>>;
+  /** Silage-bunker-only (2026-08-15): the silage-bunker counterpart of
+   * `baleAgingStartedAt` — when this building's pile of a crop-specific
+   * silage product was first noticed non-empty, for aging it into the
+   * generic "Silage" after `forage.silageAgingMonths`. See
+   * `tickSilageAging` (sim/buildings.ts). Never set for "silage" itself —
+   * it's already the aged-into product, nothing left to age. */
+  silageAgingStartedAt?: Partial<Record<SilageProduct, number>>;
+  /** Bale-storage or silage-bunker (optional): dedicate this store to ONE
+   * product — only that product hauls in, and its capacity counts toward
+   * that product alone. Unassigned (undefined) accepts any product (the
+   * default; mirrors an unassigned silo but the store may then hold a mix,
+   * unlike a silo). */
+  assignedProduct?: BaleProduct | SilageProduct;
 }
 
 /** What an agent is doing right now (brief §9 state machine — "drive home at
@@ -429,6 +478,15 @@ export interface FarmTask {
   baleProduct?: BaleProduct;
   haulPhase?: "toBale" | "loading" | "toTrailer" | "unloadToTrailer" | "toStorage" | "dumping" | "waiting";
   trailerPhase?: "toEntrance" | "waiting" | "toStorage" | "dumping";
+  /** wrap-only (2026-08-14): a single tractor visiting each unwrapped bale in
+   * turn, same shape as Hay-Spikes' collector brain minus the cargo/delivery
+   * half — sealing happens IN PLACE, nothing gets carried anywhere. "toBale"
+   * drives to the nearest unwrapped bale (locked for the trip, like Hay-
+   * Spikes' `haulTargetRuntime`, so it doesn't oscillate as it moves);
+   * "wrapping" pauses there for `forage.wrapMinutesPerBale`, then moves that
+   * bale from `baleLocations` to `wrappedBaleLocations`. Reuses the shared
+   * `phaseTimer` field for the pause, same as unloadHarvester/haulBales. */
+  wrapPhase?: "toBale" | "wrapping";
   /** Sim-minutes left in the trailer helper's current load/dump pause (the
    * spikes tractor uses `phaseTimer`; the trailer needs its own so both can
    * pause simultaneously). */
@@ -546,9 +604,18 @@ export interface SaveState {
   parcels: Parcel[];
   fields: Field[];
   grain: GrainBin;
-  /** Chopped silage in the farm's bunkers, tons per product (2026-07-31).
-   * Optional so saves made before silage still load. */
+  /** LEGACY (pre-2026-08-15): chopped silage pooled farm-wide, tons per
+   * product. Bunkers moved to real per-building storage
+   * (`Building.storedSilage`) so a bunker could be dedicated to one product
+   * as a genuine capacity restriction, the way Bale Storage already works.
+   * Nothing writes here anymore — `migrateLegacySilage` (sim/buildings.ts)
+   * empties this into the farm's first bunker the first time an old save
+   * loads, so existing stock isn't silently lost. Kept only so that
+   * migration has something to read; do not reintroduce writes to it. */
   silage?: SilageStore;
+  /** LEGACY (pre-2026-08-15) — see `silage` above. Replaced by
+   * `Building.silageAgingStartedAt`, per bunker. */
+  silageAging?: Partial<Record<SilageProduct, SimTime>>;
   /** Placed buildings (silos, barns, farm yard). */
   buildings: Building[];
   agents: Agent[];
@@ -613,7 +680,8 @@ export function newGame(): SaveState {
     fields: [],
     // Every crop key present from day one; loads backfill new keys in main.ts.
     grain: Object.fromEntries((Object.keys(gameConfig.crops) as CropId[]).map((c) => [c, 0])) as GrainBin,
-    silage: { cornSilage: 0, haylage: 0, alfalfaHaylage: 0 },
+    // No `silage` seed — that field is LEGACY (per-bunker storage now, see
+    // `Building.storedSilage`); a fresh game has nothing to migrate.
     buildings: [],
     agents: [],
     implements: [],

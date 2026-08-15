@@ -9,10 +9,11 @@
  * Round Baler and Medium Square Baler". Both being Medium is only expressible
  * with shape as the kind.
  *
- * A square bale is its round twin at 1.2x the weight (0.9 t vs 0.75 t after the
- * 2026-07-25 bale-weight pass; it was 1.5x when rounds were a full ton): fewer per acre, more per
- * bale, plus ~10% per ton because squares stack tight. Storage counts a bale as
- * a bale either way, per the maintainer's call.
+ * A square bale is its round twin at 1.6x the weight (1.2 t vs 0.75 t after the
+ * 2026-08-15 bale-balance pass): fewer per acre, more per bale, same tonnage off
+ * the same ground, and the SAME price per ton — real hay markets don't pay a
+ * shape premium (rule 1). Storage counts a bale as a bale either way, per the
+ * maintainer's call.
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -60,7 +61,7 @@ describe("shape is the baler KIND, not a size tier", () => {
 
 describe("a square bale is its round twin, heavier", () => {
   for (const [round, square] of ROUND_TO_SQUARE) {
-    it(`${square} weighs more, comes off thinner, and is worth more than ${round}`, () => {
+    it(`${square} weighs more, comes off thinner, and costs more per bale than ${round}`, () => {
       const r = gameConfig.baleProducts[round];
       const q = gameConfig.baleProducts[square];
       expect(q.square).toBe(true);
@@ -70,11 +71,11 @@ describe("a square bale is its round twin, heavier", () => {
       // Roughly the same TONNAGE comes off the acre either way — the shape
       // changes how it's packaged, not how much grew.
       expect(q.balesPerAcre * q.tonsPerBale).toBeCloseTo(r.balesPerAcre * r.tonsPerBale, 1);
-      // ...but a ton of it is worth a little more, because squares stack.
+      // ...and it's worth the SAME per ton (rule 1) — no shape premium, modulo
+      // whole-dollar pricePerBale rounding (hay: $150.67/t round vs $150/t square).
       const perTonRound = r.pricePerBale / r.tonsPerBale;
       const perTonSquare = q.pricePerBale / q.tonsPerBale;
-      expect(perTonSquare).toBeGreaterThan(perTonRound);
-      expect(perTonSquare).toBeLessThan(perTonRound * 1.25); // a premium, not a different economy
+      expect(Math.abs(perTonSquare - perTonRound) / perTonRound).toBeLessThan(0.01);
     });
   }
 

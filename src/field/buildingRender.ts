@@ -180,6 +180,13 @@ export function updateBuildingMarkers(
         .addTo(map);
       buildingMarkers.set(building.id, marker);
     }
+    // Re-set every call, not just on creation (2026-08-14) — a relocated
+    // building mutates `building.pos` in place and calls this same refresh,
+    // but an existing marker was never told to move; it sat at its old
+    // screen position until a reload rebuilt `buildingMarkers` from empty.
+    // This function isn't on the per-tick path (only discrete events: buy/
+    // sell/relocate/init), so an unconditional `setLngLat` here is cheap.
+    marker.setLngLat(toLngLat(building.pos));
     const artKey = `${building.kind}|${building.size ?? ""}`;
     if (markerArtKey.get(building.id) !== artKey) {
       markerArtKey.set(building.id, artKey);

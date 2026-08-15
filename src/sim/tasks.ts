@@ -20,7 +20,7 @@
  * map, no DOM, so it's unit-testable like farming.ts.
  */
 
-import { gameConfig, SIZE_RANK, FEET_TO_METERS, tonsPerBushel } from "../config/gameConfig";
+import { gameConfig, SIZE_RANK, FEET_TO_METERS, tonsPerBushel, SILAGE_PRODUCTS } from "../config/gameConfig";
 // Re-exported: it lives in the config (a pure lookup) so `sim/buildings.ts` can
 // use it without importing this module, which would be a cycle.
 export { tonsPerBushel };
@@ -36,20 +36,21 @@ import {
   applyChopDone, silageProductForField, silageTonsPerAcreFor, cropMakesSilage, isChopOnlyCrop,
   applyMowDone, hasStandingCrop, inWeedingWindow, canFertilizeNow,
   isPerennial, balesPerAcreForField, canSeedPerennial, productivityMultiplier, baleProductForField, baleTonsOf,
+  stampBaleProduct,
 } from "./farming";
 import { buildCoveragePath, buildHeadlandCoveragePath, sampleAt, acresDoneAt, distanceAtAcres, TASK_HEADLANDS } from "./coverage";
 import type { CoveragePath } from "./coverage";
 import {
   nearestFarmYard, nearestSiloForCrop, siloCapacityForCrop,
   nearestBaleStorageFor, haulBalesInto, nearestSellPointFor,
-  silageRoomTons, nearestBunker, storeSilage,
+  nearestSilageBunkerFor, storeSilage,
 } from "./buildings";
 import type { Building } from "../state/saveState";
 import { planRoute } from "./roadNet";
 import type { RoadNetwork } from "./roadNet";
 import { recordCash } from "./ledger";
 import { recordFieldCash, recordFieldCrop } from "./fieldLedger";
-import { grainUnitPrice, baleUnitPrice, monthOf, SELLABLE_GRAINS } from "./market";
+import { grainUnitPrice, baleUnitPrice, silageUnitPrice, monthOf, SELLABLE_GRAINS } from "./market";
 import { effectiveMonthFor, plowDueAt, plantDueAt } from "./schedule";
 
 const ACRE_M2 = 4046.8564224;
@@ -173,10 +174,10 @@ const EQUIPMENT_NAME: Record<EquipmentKind, string> = {
 };
 const IMPLEMENT_NAME: Record<ImplementKind, string> = {
   plow: "Plow", planter: "Planter", sprayer: "Sprayer", rake: "Rake", bailer: "Round Baler",
-  grainTrailer: "Grain Trailer", mower: "Mower", mulcher: "Mulcher", haySpikes: "Hay Spikes", baleTrailer: "Bale Trailer",
+  grainTrailer: "Grain Trailer", mower: "Mower", mulcher: "Mulcher", haySpikes: "Hay Spike", baleTrailer: "Bale Trailer",
   cornHeader: "Corn Header", grainHeader: "Grain Header", squareBaler: "Square Baler",
-  baleWrapper: "Bale Wrapper", combiBaler: "Combi Baler",
-  forageWagon: "Forage Wagon", rowCropHead: "Row-Crop Head", pickupHead: "Pickup Head",
+  baleWrapper: "Bale Wrapper", combiBaler: "Round Baler with Wrapper",
+  forageWagon: "Forage Wagon", rowCropHead: "Forage Row-Crop Header", pickupHead: "Forage Pickup Header",
 };
 
 /**
@@ -189,6 +190,16 @@ const IMPLEMENT_NAME: Record<ImplementKind, string> = {
  *
  * Goes false the instant the same-month window shuts, so a field whose wrap
  * never happened releases its bales to the haulers instead of stranding them.
+ *
+ * Does NOT go false just because no Bale Wrapper is currently owned (removed
+ * 2026-08-14, maintainer report: a Silage-crop field with a plain baler and
+ * no wrapper was hauling off unwrapped — the exact bales the mechanic exists
+ * to hold back). A field in this state instead stays held, and the wrap task
+ * `tryEnqueue` puts in the queue sits there — correctly visible in the Work
+ * Queue's blocked-work list (`TASK_IMPLEMENT.wrap` is set, so `blockedWork()`
+ * already reports a queued task no owned implement can perform) rather than
+ * silently downgrading the bales to hay. Buying a wrapper (or the window
+ * closing — see above) is what resolves it.
  */
 export function wrapPending(save: SaveState, field: Field, now: SimTime): boolean {
   if (tasksFor(save, field.id, "wrap").length > 0) return true;
@@ -197,11 +208,11 @@ export function wrapPending(save: SaveState, field: Field, now: SimTime): boolea
   // (2026-08-13). `activePlan(field).wrap` still works as an explicit
   // override for anything else that might set it.
   if (!activePlan(field).wrap && !cropProducesWrappedBale(field.crop)) return false;
-  if (!save.implements.some((i) => i.kind === "baleWrapper")) return false;
-  // `canWrapBales` carries the same-month rule and the product check.
-  // `now` is threaded in rather than read off `save.clock` — that field is a
-  // creation-time placeholder that nothing ever updates, so trusting it would
-  // silently evaluate the whole window against month zero.
+  // `canWrapBales` carries the same-month rule and the already-wrapped check
+  // (a Combi Baler seals as it rolls, so its bales never reach here needing
+  // anything further). `now` is threaded in rather than read off `save.clock`
+  // — that field is a creation-time placeholder nothing ever updates, so
+  // trusting it would silently evaluate the whole window against month zero.
   return canWrapBales(field, now);
 }
 
@@ -381,7 +392,7 @@ function headerKindForTask(save: SaveState, task: FarmTask): ImplementKind | und
 /** The chopper head a chop task needs, from the crop in its field. A perennial
  * has already been mowed by the time the chopper arrives, so `crop` is still
  * set on the stand; an annual reads `lastCrop` once cleared. */
-function chopHeadKindForTask(save: SaveState, task: FarmTask): ImplementKind | undefined {
+export function chopHeadKindForTask(save: SaveState, task: FarmTask): ImplementKind | undefined {
   const field = save.fields.find((f) => f.id === task.fieldId);
   const crop = task.crop ?? field?.crop ?? field?.lastCrop;
   return crop ? chopHeadKind(crop) : undefined;
@@ -426,8 +437,15 @@ export function implementWidthM(impl: Implement): number {
   return IMPLEMENT_CONFIG[impl.kind][impl.size].widthFt * FEET_TO_METERS;
 }
 
-/** Can a tractor of `tractorSize` pull an implement of `implSize`? (its class or smaller) */
-export function canPull(tractorSize: EquipmentSize, implSize: EquipmentSize): boolean {
+/** Can a tractor of `tractorSize` pull an implement of `implSize`? (its class
+ * or smaller) — except the Hay Spike (`implKind`, optional so existing
+ * 2-arg callers/tests are unaffected), which breaks that rule on purpose
+ * (maintainer request, 2026-08-14): a bale spear needs no real horsepower,
+ * so it's open to Small AND Medium tractors regardless of its own "medium"
+ * shop size, but capped away from Large — the one machine on the farm that
+ * DOESN'T get to do a smaller tractor's errand just because it's bigger. */
+export function canPull(tractorSize: EquipmentSize, implSize: EquipmentSize, implKind?: ImplementKind): boolean {
+  if (implKind === "haySpikes") return tractorSize !== "large";
   return SIZE_RANK[implSize] <= SIZE_RANK[tractorSize];
 }
 
@@ -640,7 +658,7 @@ export function attachImplement(save: SaveState, tractorId: string, implId: stri
   if (!tractor || tractor.kind !== "tractor") throw new Error(`No such tractor`);
   if (!impl) throw new Error(`No such implement`);
   if (tractor.state !== "idle") throw new Error(`${tractor.name} is mid-job`);
-  if (!tractor.size || !canPull(tractor.size, impl.size)) {
+  if (!tractor.size || !canPull(tractor.size, impl.size, impl.kind)) {
     throw new Error(`${tractor.name} can't pull a ${SIZE_LABEL[impl.size].toLowerCase()} ${IMPLEMENT_NAME[impl.kind].toLowerCase()}`);
   }
   // One implement per tractor: detach whatever the tractor currently holds, and
@@ -669,7 +687,7 @@ function attachedImplement(save: SaveState, tractorId: string, kind: ImplementKi
  * that fits first). */
 function availableImplementFor(save: SaveState, tractor: Agent, kind: ImplementKind): Implement | undefined {
   return save.implements
-    .filter((i) => i.kind === kind && !i.attachedTo && tractor.size && canPull(tractor.size, i.size))
+    .filter((i) => i.kind === kind && !i.attachedTo && tractor.size && canPull(tractor.size, i.size, kind))
     .sort((a, b) => SIZE_RANK[b.size] - SIZE_RANK[a.size])[0];
 }
 
@@ -691,7 +709,11 @@ function tractorCanUse(save: SaveState, tractor: Agent, kind: ImplementKind): bo
  * 2026-07-24).
  */
 function parksInBarn(agent: Agent): boolean {
-  return agent.kind === "tractor" || agent.kind === "harvester" || agent.kind === "windrower";
+  // forageHarvester joined 2026-08-14 — same class of bug the windrower had
+  // (maintainer report): a machine kind added after this predicate existed
+  // just never got listed, so it stood exactly where it finished its last
+  // job forever instead of driving home.
+  return agent.kind === "tractor" || agent.kind === "harvester" || agent.kind === "windrower" || agent.kind === "forageHarvester";
 }
 
 /** A tractor free to be given a new job right now. */
@@ -735,11 +757,11 @@ function preferredTractorFor(save: SaveState, kind: ImplementKind): Agent | null
   candidates.sort((a, b) => SIZE_RANK[b.impl.size] - SIZE_RANK[a.impl.size]);
   for (const { impl, only } of candidates) {
     if (only) {
-      if (canPull(only.size!, impl.size)) return only;
+      if (canPull(only.size!, impl.size, impl.kind)) return only;
       continue;
     }
     const puller = free
-      .filter((a) => canPull(a.size!, impl.size))
+      .filter((a) => canPull(a.size!, impl.size, impl.kind))
       .sort((a, b) => SIZE_RANK[a.size!] - SIZE_RANK[b.size!])[0];
     if (puller) return puller;
   }
@@ -1154,6 +1176,7 @@ export function restartActiveTask(save: SaveState, taskId: string): FarmTask {
   task.haulDest = undefined;
   task.trailerDest = undefined;
   task.sellPhase = undefined;
+  task.wrapPhase = undefined;
   if (task.agentId) clearAgentRoute(task.agentId);
   if (task.trailerAgentId) clearAgentRoute(task.trailerAgentId);
   return task;
@@ -1203,7 +1226,12 @@ function queuedChopWidthFt(save: SaveState, field: Field, task: FarmTask): numbe
 export function estimateTaskHours(save: SaveState, task: FarmTask): number {
   // Not an acres-based job — point-to-point hauling, no coverage path/width.
   // The UI shows its own phase text instead of an acres/hours estimate.
-  if (task.type === "unloadHarvester" || task.type === "haulBales") return 0;
+  // "wrap" joined this list 2026-08-14 (per-bale redesign): calling
+  // `getActivePath` below for it would build a coverage path at the Bale
+  // Wrapper's width, which is 0 (it has none of its own) — the same
+  // zero-swath crash `taskSwathMeters` is now documented to never risk for
+  // "wrap" specifically, because nothing is supposed to call it that way.
+  if (task.type === "unloadHarvester" || task.type === "haulBales" || task.type === "wrap") return 0;
   const field = save.fields.find((f) => f.id === task.fieldId);
   if (!field) return 0;
   const remainingAcres = Math.max(0, task.totalAcres - task.doneAcres);
@@ -1347,8 +1375,8 @@ function isStartable(task: FarmTask, field: Field): boolean {
 
 /** In-field working speed for a task, km/h — rake and baler run at their own
  * (config) speeds so the rake pulls ahead; everything else uses the shared
- * fieldwork speed. */
-function taskFieldSpeedKmh(type: TaskType, agent?: Agent): number {
+ * fieldwork speed. Exported (2026-08-14) for the Work Queue's mph readout. */
+export function taskFieldSpeedKmh(type: TaskType, agent?: Agent): number {
   // The Self-Propelled Windrower is the one speed keyed to the MACHINE rather
   // than the task (2026-07-25): a purpose-built windrower runs its header
   // faster than a tractor pulling a mower over the same ground, and that speed
@@ -1357,7 +1385,9 @@ function taskFieldSpeedKmh(type: TaskType, agent?: Agent): number {
   if (agent?.kind === "windrower") return gameConfig.work.windrowerSpeedKmh;
   if (type === "rake") return gameConfig.forage.rakeSpeedKmh;
   if (type === "bale") return gameConfig.forage.baleSpeedKmh;
-  if (type === "wrap") return gameConfig.forage.wrapSpeedKmh;
+  // "wrap" deliberately has no entry (2026-08-14) — it's a per-bale task now,
+  // driving point to point between bale spots at the shared travel speed
+  // (see the `wrap` tick block), not a coverage pass with its own field speed.
   // The heavy passes got their own speeds 2026-07-24 — the shared default is
   // tuned for planting and spraying and was roughly double a real combine.
   if (type === "harvest") return gameConfig.work.harvestSpeedKmh;
@@ -1399,6 +1429,9 @@ const haulRendezvousRuntime = new Map<string, Meters>();
 // — as it moved, which bale was nearest (and thus which gate the road route
 // used) flipped, so it drove back and forth. Locked until reached + loaded.
 const haulTargetRuntime = new Map<string, Meters>();
+// Same lock, for the Wrap tractor visiting bale spots one at a time
+// (2026-08-14) — see the `wrap` tick block.
+const wrapTargetRuntime = new Map<string, Meters>();
 
 /** Working width (meters) for a task: from the attached implement (plow/
  * planter), or the config combine header width for harvest. */
@@ -1435,7 +1468,10 @@ function taskSwathMeters(save: SaveState, task: FarmTask, agent: Agent): number 
     if (field?.windrowWidthM) return field.windrowWidthM;
     return IMPLEMENT_CONFIG.rake.medium.widthFt * FEET_TO_METERS;
   }
-  if (task.type === "bale" || task.type === "wrap") {
+  // "wrap" deliberately has no entry here (2026-08-14) — it no longer builds
+  // a coverage path (point-to-point between bale spots instead), so this
+  // function is never called for it.
+  if (task.type === "bale") {
     const field = save.fields.find((f) => f.id === task.fieldId);
     if (field?.windrowWidthM) return field.windrowWidthM;
     // Nothing recorded (a legacy save, or a field hand-set up in a test) —
@@ -1480,6 +1516,7 @@ function clearTaskRuntime(taskId: string): void {
   stageGateRuntime.delete(taskId);
   haulRendezvousRuntime.delete(taskId);
   haulTargetRuntime.delete(taskId);
+  wrapTargetRuntime.delete(taskId);
 }
 
 /** Things that happened during a tick, for the UI to toast. */
@@ -1502,6 +1539,7 @@ export function tickTasks(save: SaveState, now: SimTime, dtMinutes: number, rand
   const changed: Field[] = [];
   const events: TaskEvent[] = [];
   dropStrandedHarvests(save);
+  dropStrandedHaulBales(save, now);
   // Before anyone picks their next job: make sure every combine that's sitting
   // with grain has an unload trip AND crew it with a free tractor — so a free
   // tractor rescues the combine instead of starting queued field work
@@ -1561,6 +1599,42 @@ function dropStrandedHarvests(save: SaveState): void {
     if (task.type !== "harvest" || task.status !== "queued") continue;
     const field = save.fields.find((f) => f.id === task.fieldId);
     if (field && field.status === "withered") cancelTask(save, task.id);
+  }
+}
+
+/**
+ * Cancel queued Haul Bales tasks whose field has run dry with nothing more
+ * coming (maintainer report, 2026-08-14: "a Haul Bales job gets stuck in the
+ * queued tasks but there are no bales to haul... keeps auto advance from
+ * happening").
+ *
+ * Same shape of bug as `dropStrandedHarvests`: `isStartable` correctly
+ * requires the target field to still have bales down, but a CREW task (the
+ * 2nd/3rd hauler `queueHaulBales` spawns while a field still has plenty)
+ * can sit queued, with no agent yet, right up until a sibling hauler
+ * already on the field clears the very last bale before this one ever gets
+ * picked up. After that `isStartable` is permanently false and nothing was
+ * ever canceling it — it just sat in the Work Queue forever, un-startable,
+ * tripping every check that treats "a task exists" as "there's still work
+ * to do" (Skip Month's auto-advance idle gate among them).
+ *
+ * Only cancels once nothing could still put bales back: no active/queued
+ * `bale` run still adding to the pile, and no wrap in progress
+ * (`wrapPending`) that will hand sealed bales back to the field once it
+ * finishes. A task genuinely just waiting its turn is left alone.
+ */
+function dropStrandedHaulBales(save: SaveState, now: SimTime): void {
+  for (const task of [...save.tasks]) {
+    if (task.type !== "haulBales" || task.status !== "queued") continue;
+    const field = save.fields.find((f) => f.id === task.fieldId);
+    if (!field) {
+      cancelTask(save, task.id); // field itself is gone — nothing to haul, ever
+      continue;
+    }
+    if ((field.baleLocations?.length ?? 0) > 0) continue;
+    if (save.tasks.some((t) => t.type === "bale" && t.fieldId === field.id && (t.status === "active" || t.status === "queued"))) continue;
+    if (wrapPending(save, field, now)) continue;
+    cancelTask(save, task.id);
   }
 }
 
@@ -1951,10 +2025,10 @@ export function queueHaulBales(save: SaveState, fieldId: string, now: SimTime): 
     doneAcres: 0,
     status: "queued",
     costPaid: 0,
-    // Ages a wrapped crop-specific product into the generic "Silage Bale
-    // (wrapped)" if it's sat wrapped long enough (2026-08-13) — see
-    // `resolveAgedBaleProduct`. This is the one choke point every field's
-    // bales pass through on their way off the field.
+    // Ages a wrapped product into its Aged Baleage twin if it's sat wrapped
+    // long enough (2026-08-13) — see `resolveAgedBaleProduct`. This is the
+    // one choke point every field's bales pass through on their way off
+    // the field.
     baleProduct: resolveAgedBaleProduct(field, now) ?? "cornStover",
     haulPhase: "toBale",
   };
@@ -2033,10 +2107,28 @@ function shareableTrailerOn(save: SaveState, fieldId: string): string | undefine
 }
 
 /** Pull a Bale-Trailer into a Haul Bales job as the hauler half of the relay:
- * SHARE an already-paired trailer on this field if one has room (2026-08-13,
- * capped at `maxSpikesPerTrailer`), else pull in an idle tractor+Bale-Trailer
- * (auto-hitching a loose trailer if the spare tractor has none). No-op if
- * neither is available — the Hay-Spikes tractor then hauls direct.
+ * recruit an idle tractor+Bale-Trailer of its OWN (auto-hitching a loose
+ * trailer if the spare tractor has none) if one's available, else SHARE an
+ * already-paired trailer on this field that has room (2026-08-13, capped at
+ * `maxSpikesPerTrailer`). No-op if neither is available — the Hay-Spikes
+ * tractor then hauls direct.
+ *
+ * RECRUIT BEFORE YOU SHARE (2026-08-15 fix — was the other way round).
+ * Sharing first meant a farm that owned TWO Bale Trailers still only ever
+ * put one to work: the second Hay-Spikes rig always found room on the first
+ * trailer (below `maxSpikesPerTrailer`) and grabbed it before ever checking
+ * whether a whole second trailer rig sat idle, silently halving the field's
+ * haul throughput and parking real, paid-for equipment (maintainer report:
+ * "two tractors and two trailers... stacked... fill with the same 30 bale
+ * capacity when two trailers working should handle 60" — the "stacked" part
+ * was both Hay-Spikes rigs converging on the ONE shared trailer's fixed
+ * rendezvous point instead of each running its own). Sharing is now purely
+ * the fallback for when the farm has fewer trailers than Hay-Spikes rigs —
+ * exactly the case `maxSpikesPerTrailer` was originally built for
+ * (2026-08-13/14: "two hay spikes to support 1 trailer") — which still
+ * works unchanged: by the time a SECOND rig looks for a trailer, the only
+ * one on the farm is already busy (`!a.taskId` excludes it), so recruiting
+ * fails and it falls through to sharing, exactly as before.
  *
  * A newly-hitched trailer parks at a FIXED point (the nearest remaining
  * bale, locked in `haulRendezvousRuntime`) and every Hay-Spikes tractor
@@ -2049,11 +2141,6 @@ function shareableTrailerOn(save: SaveState, fieldId: string): string | undefine
 const TRAILER_RELAY_ENABLED = true;
 function assignTrailerHelper(save: SaveState, task: FarmTask, spikesAgent: Agent): void {
   if (!TRAILER_RELAY_ENABLED) return;
-  const shared = shareableTrailerOn(save, task.fieldId);
-  if (shared) {
-    task.trailerAgentId = shared;
-    return;
-  }
   const helper = save.agents.find(
     (a) =>
       a.kind === "tractor" &&
@@ -2063,22 +2150,27 @@ function assignTrailerHelper(save: SaveState, task: FarmTask, spikesAgent: Agent
       !!a.size &&
       (!!attachedImplement(save, a.id, "baleTrailer") || !!availableImplementFor(save, a, "baleTrailer")),
   );
-  if (!helper) return;
-  if (!attachedImplement(save, helper.id, "baleTrailer")) {
-    const trailer = availableImplementFor(save, helper, "baleTrailer");
-    if (!trailer) return;
-    for (const i of save.implements) if (i.attachedTo === helper.id) i.attachedTo = undefined;
-    trailer.attachedTo = helper.id;
+  if (helper) {
+    if (!attachedImplement(save, helper.id, "baleTrailer")) {
+      // Guaranteed to exist — the `helper` filter above already required
+      // either an attached trailer or an available one to hitch.
+      const trailer = availableImplementFor(save, helper, "baleTrailer")!;
+      for (const i of save.implements) if (i.attachedTo === helper.id) i.attachedTo = undefined;
+      trailer.attachedTo = helper.id;
+    }
+    const trailer = attachedImplement(save, helper.id, "baleTrailer")!;
+    trailer.cargoBales ??= 0;
+    trailer.cargoBaleProduct = task.baleProduct;
+    task.trailerAgentId = helper.id;
+    task.trailerPhase = "toEntrance";
+    helper.taskId = task.id;
+    helper.state = "traveling";
+    // The rendezvous bale is locked lazily the first time the trailer stages
+    // (in its brain), so it's picked relative to where the trailer enters.
+    return;
   }
-  const trailer = attachedImplement(save, helper.id, "baleTrailer")!;
-  trailer.cargoBales ??= 0;
-  trailer.cargoBaleProduct = task.baleProduct;
-  task.trailerAgentId = helper.id;
-  task.trailerPhase = "toEntrance";
-  helper.taskId = task.id;
-  helper.state = "traveling";
-  // The rendezvous bale is locked lazily the first time the trailer stages
-  // (in its brain), so it's picked relative to where the trailer enters.
+  const shared = shareableTrailerOn(save, task.fieldId);
+  if (shared) task.trailerAgentId = shared;
 }
 
 /** Where a bale hauler should head with its load: the nearest Bale Storage
@@ -2200,10 +2292,9 @@ function relayCapacityTons(trailer: Implement, task: FarmTask): number {
  * Point, else nowhere (the caller waits, and the UI reports it). */
 function chooseRelayDest(save: SaveState, task: FarmTask, from: Meters): { pos: Meters; sell: boolean } | undefined {
   if (isSilageRun(task)) {
-    if (silageRoomTons(save) > 1e-9) {
-      const bunker = nearestBunker(save, from);
-      if (bunker) return { pos: bunker.pos, sell: false };
-    }
+    const product = task.silageProduct ?? "cornForage";
+    const bunker = nearestSilageBunkerFor(save, product, from);
+    if (bunker) return { pos: bunker.pos, sell: false };
     const sellPt = nearestSellPointFor(save, from);
     if (sellPt) return { pos: sellPt.pos, sell: true };
     return undefined;
@@ -2213,10 +2304,13 @@ function chooseRelayDest(save: SaveState, task: FarmTask, from: Meters): { pos: 
 }
 
 /** Tip a load into storage. Returns the tons ACCEPTED — a partial accept means
- * the store filled mid-dump and the rest needs rerouting. */
-function depositRelayLoad(save: SaveState, task: FarmTask, trailer: Implement, tons: number): number {
+ * the store filled mid-dump and the rest needs rerouting. `from` is the
+ * trailer's current position — for silage, it's used to deposit into the
+ * SPECIFIC bunker the wagon actually just drove to (via `chooseRelayDest`),
+ * only spilling into a farther one if that bunker filled mid-dump. */
+function depositRelayLoad(save: SaveState, task: FarmTask, trailer: Implement, tons: number, from: Meters): number {
   if (isSilageRun(task)) {
-    return storeSilage(save, task.silageProduct ?? "cornSilage", tons);
+    return storeSilage(save, task.silageProduct ?? "cornForage", tons, from);
   }
   const crop = trailer.cargoCrop!;
   const room = Math.max(0, siloCapacityForCrop(save, crop) - save.grain[crop]);
@@ -2229,7 +2323,7 @@ function depositRelayLoad(save: SaveState, task: FarmTask, trailer: Implement, t
  * full or missing. */
 function sellRelayLoad(save: SaveState, task: FarmTask, trailer: Implement, tons: number, now: SimTime): void {
   if (isSilageRun(task)) {
-    sellHauledSilage(save, task.silageProduct ?? "cornSilage", tons, now);
+    sellHauledSilage(save, task.silageProduct ?? "cornForage", tons, now);
     return;
   }
   sellHauledGrain(save, trailer.cargoCrop!, tons, now);
@@ -2251,12 +2345,18 @@ function chooseGrainDest(save: SaveState, crop: CropId, from: Meters): { pos: Me
  * as selling from a silo; recorded so it shows in the Completed list + cashflow.
  * (Per-field revenue is already booked at harvest time — no field attribution
  * happens here.) */
-/** The silage counterpart: tip a wagon-load at a Sell Point for cash when the
- * bunkers are full or the farm has none (2026-07-31). Flat per-ton price. */
+/** The silage counterpart: tip a wagon-load at a Sell Point for cash — either
+ * a genuine sale via the "sell" task (2026-08-15, storage → market, same as
+ * grain/bales), or the chop-relay's own fallback when the bunkers are full or
+ * the farm has none (2026-07-31). Full SEASONAL price (2026-08-15 — was a
+ * flat config-listed price with no seasonal swing; see the pricing note on
+ * `gameConfig.silageProducts.silage` for why that changed), same as hauling
+ * grain or bales the same way. */
 function sellHauledSilage(save: SaveState, product: SilageProduct, tons: number, now: SimTime): void {
   if (tons <= 1e-9) return;
   const cfg = gameConfig.silageProducts[product];
-  const revenue = Math.round(tons * cfg.pricePerTon);
+  const unit = silageUnitPrice(product, monthOf(now));
+  const revenue = Math.round(tons * unit);
   save.money += revenue;
   recordCash(save, "cropRevenue", cfg.name, revenue);
   appendCompletedTask(save, {
@@ -2296,20 +2396,39 @@ function isGrainProduct(product: string): product is CropId {
   return (SELLABLE_GRAINS as string[]).includes(product);
 }
 
+/** Is this market product bunker silage (sold by the ton, stored per
+ * bunker — 2026-08-15)? Named distinctly from `isSilageRun`, which checks a
+ * chop-relay TASK's cargo kind, not a sell-run PRODUCT id — unrelated
+ * systems that happen to share a vocabulary. */
+function isSilageProduct(product: string): product is SilageProduct {
+  return (SILAGE_PRODUCTS as string[]).includes(product);
+}
+
 /** How much of `product` is sitting in storage, ready for a sell run. Grain
- * pools farm-wide in the bin; bales are counted per storage building. Loose
+ * pools farm-wide in the bin; silage and bales are both counted per storage
+ * building (silage moved off its old farm-wide pool 2026-08-15, matching
+ * bales, so a bunker could be dedicated to one product for real). Loose
  * bales still lying in a field are NOT included — those are the bale-haul
  * job's business, and it already knows how to divert to a Sell Point. */
 export function sellableStock(save: SaveState, product: string): number {
   if (isGrainProduct(product)) return save.grain[product] ?? 0;
+  if (isSilageProduct(product)) {
+    let n = 0;
+    for (const b of save.buildings) n += b.storedSilage?.[product] ?? 0;
+    return n;
+  }
   let n = 0;
   for (const b of save.buildings) n += b.storedBales?.[product as BaleProduct] ?? 0;
   return n;
 }
 
-/** The implement a sell run needs for this product. */
+/** The implement a sell run needs for this product — a Forage Wagon for
+ * silage (2026-08-15), the same implement that already carries it from
+ * field to bunker. */
 function sellTrailerKind(product: string): ImplementKind {
-  return isGrainProduct(product) ? "grainTrailer" : "baleTrailer";
+  if (isGrainProduct(product)) return "grainTrailer";
+  if (isSilageProduct(product)) return "forageWagon";
+  return "baleTrailer";
 }
 
 /**
@@ -2349,10 +2468,15 @@ export function queueSellRun(save: SaveState, product: string): FarmTask | undef
 }
 
 /** Where a sell run picks its load up: the nearest silo assigned to the crop,
- * or the nearest bale store actually holding the product. */
+ * the nearest bunker actually holding the silage product, or the nearest
+ * bale store actually holding the bale product. */
 function sellSourcePos(save: SaveState, product: string, from: Meters): Meters | undefined {
   if (isGrainProduct(product)) {
     return nearestSiloForCrop(save, product, from)?.pos;
+  }
+  if (isSilageProduct(product)) {
+    const bunkers = save.buildings.filter((b) => b.kind === "silageBunker" && (b.storedSilage?.[product] ?? 0) > 0);
+    return nearestByPos(bunkers, from)?.pos;
   }
   const stores = save.buildings.filter(
     (b) => (b.kind === "baleBarn" || b.kind === "baleArea") && (b.storedBales?.[product as BaleProduct] ?? 0) > 0,
@@ -2367,6 +2491,24 @@ function loadForSale(save: SaveState, product: string, capacity: number, from: M
     const take = Math.min(capacity, save.grain[product] ?? 0);
     if (take > 0) save.grain[product] -= take;
     return take;
+  }
+  if (isSilageProduct(product)) {
+    // Drain the nearest bunker first, topping up from others if there's
+    // still room on the wagon — same pattern as bales below.
+    let left = capacity;
+    let loaded = 0;
+    const bunkers = save.buildings
+      .filter((b) => b.kind === "silageBunker" && (b.storedSilage?.[product] ?? 0) > 0)
+      .sort((a, b) => dist2(a.pos, from) - dist2(b.pos, from));
+    for (const bunker of bunkers) {
+      if (left <= 0) break;
+      const have = bunker.storedSilage![product] ?? 0;
+      const take = Math.min(left, have);
+      bunker.storedSilage![product] = have - take;
+      left -= take;
+      loaded += take;
+    }
+    return loaded;
   }
   // Bales: drain the nearest store first, topping up from others if there's
   // still room on the trailer — a full load beats a short one.
@@ -2602,9 +2744,16 @@ function tickAgent(
   rand: () => number,
 ): void {
   let budget = dtMinutes;
-  // Guard against a pathological no-progress loop; a handful of transitions per
-  // tick is the realistic ceiling.
-  for (let guard = 0; budget > 1e-9 && guard < 50; guard++) {
+  // Guard against a pathological no-progress loop. A handful of transitions
+  // per tick is the realistic ceiling at normal speed, but the Skip Month/
+  // Spring montage (main.ts's `runMontage`) can legitimately hand a single
+  // tick a large `dtMinutes` — e.g. draining a long haul-bale or wrap-bale
+  // backlog, where each transition is only ~0.17-0.66 sim-minutes (see
+  // `hauling.loadMinutes`/`dumpMinutes`, `forage.wrapMinutesPerBale`). 500
+  // gives that headroom (worst case ~350 transitions to drain the montage's
+  // own capped chunk size, see `MONTAGE_MAX_CHUNK_MINUTES`) without making a
+  // genuinely stuck agent spin unreasonably long before the guard kicks in.
+  for (let guard = 0; budget > 1e-9 && guard < 500; guard++) {
     const task = agent.taskId ? save.tasks.find((t) => t.id === agent.taskId) : undefined;
 
     if (!task) {
@@ -2741,9 +2890,27 @@ function tickAgent(
     // it must be handled before the field lookup further down.
     if (task.type === "sell") {
       const product = task.sellProduct!;
+      // Re-offer this product to the crew-scaling gate EVERY TICK a sell run
+      // is active for it (2026-08-15, maintainer request: "allow for
+      // multiple machines to work on a Sell task, selling the same
+      // product") — same fix as `queueHaulBales` got earlier today.
+      // `queueSellRun`'s own crew-growth logic (crew cap, "every existing
+      // hauler already crewed", a free tractor+trailer actually available)
+      // was already correct — it's what already lets a haul-bales crew grow
+      // — but nothing ever called it again once the FIRST sell task for a
+      // product started, so a second machine never joined an in-progress
+      // run no matter how true the growth conditions stayed. Safe to call
+      // redundantly (once per active task per tick, so twice a tick with a
+      // 2-machine crew already running): it decides per-call whether
+      // growing is actually warranted.
+      queueSellRun(save, product);
       const kind = sellTrailerKind(product);
       const trailer = save.implements.find((i) => i.attachedTo === agent.id && i.kind === kind);
-      const carried = isGrainProduct(product) ? trailer?.cargoTons ?? 0 : trailer?.cargoBales ?? 0;
+      // Grain and silage are both hauled by the ton (`cargoTons`); bales are
+      // counted (`cargoBales`) — silage joined 2026-08-15, reusing grain's
+      // cargo field rather than adding a third one.
+      const tonsBased = isGrainProduct(product) || isSilageProduct(product);
+      const carried = tonsBased ? trailer?.cargoTons ?? 0 : trailer?.cargoBales ?? 0;
       if (!trailer) {
         // Trailer detached mid-run — don't strand the tractor.
         finishSell(save, task, agent, events);
@@ -2766,11 +2933,16 @@ function tickAgent(
           const cap = isGrainProduct(product)
             // Volume, so the tonnage depends on what's being hauled (2026-07-24).
             ? grainTrailerCapacityTons(trailer.size, product)
-            : baleTrailerCapacityBales(trailer.size);
+            : isSilageProduct(product)
+              ? gameConfig.equipment.forageWagon[trailer.size].capacityTons
+              : baleTrailerCapacityBales(trailer.size);
           const got = loadForSale(save, product, cap - carried, agent.pos);
           if (isGrainProduct(product)) {
             trailer.cargoTons = (trailer.cargoTons ?? 0) + got;
             trailer.cargoCrop = product;
+          } else if (isSilageProduct(product)) {
+            trailer.cargoTons = (trailer.cargoTons ?? 0) + got;
+            trailer.cargoSilage = product;
           } else {
             trailer.cargoBales = (trailer.cargoBales ?? 0) + got;
             trailer.cargoBaleProduct = product as BaleProduct;
@@ -2790,6 +2962,10 @@ function tickAgent(
           sellHauledGrain(save, product, trailer.cargoTons ?? 0, now);
           trailer.cargoTons = 0;
           trailer.cargoCrop = undefined;
+        } else if (isSilageProduct(product)) {
+          sellHauledSilage(save, product, trailer.cargoTons ?? 0, now);
+          trailer.cargoTons = 0;
+          trailer.cargoSilage = undefined;
         } else {
           sellHauledBales(save, product as BaleProduct, trailer.cargoBales ?? 0, now);
           trailer.cargoBales = 0;
@@ -2954,7 +3130,7 @@ function tickAgent(
           finishUnload(save, task, agent, events);
           continue;
         }
-        const amount = depositRelayLoad(save, task, trailer, trailer.cargoTons ?? 0);
+        const amount = depositRelayLoad(save, task, trailer, trailer.cargoTons ?? 0, agent.pos);
         trailer.cargoTons = (trailer.cargoTons ?? 0) - amount;
         if ((trailer.cargoTons ?? 0) > 1e-9) {
           // Silo filled up mid-dump — reroute the rest (another silo, or a Sell
@@ -3099,6 +3275,22 @@ function tickAgent(
         finishHaul(save, task, agent, events);
         continue;
       }
+
+      // Re-offer the field to the crew-scaling gate EVERY TICK a haul is
+      // active on it (2026-08-14 fix), not just at the moments something new
+      // happened to it (a bale dropping, wrap finishing, the manual button).
+      // Without this, a field with a large already-down backlog and only one
+      // Hay-Spikes rig working it never grew a second one — the crew-size/
+      // trailer-sharing conditions in `queueHaulBales` could all be true, but
+      // nothing was ever calling it again to notice, once the one-time
+      // trigger that started the first task had already fired and passed.
+      // Mirrors `ensureUnloadTask`'s existing pattern for the grain-cart crew
+      // (called every tick a harvester carries grain, not just once) — safe
+      // to call redundantly, since `queueHaulBales`'s own gates (crew cap,
+      // "every existing hauler already crewed", bales-vs-haulers, wrap
+      // pending, etc.) already decide per-call whether adding one is
+      // actually warranted.
+      queueHaulBales(save, haulField.id, now);
 
       // How big this job is, for the Work Queue's progress bar (2026-07-25).
       // A HIGH-WATER MARK rather than a count taken at task creation, because
@@ -3481,7 +3673,10 @@ function tickAgent(
       continue;
     }
 
-    if (agent.state === "traveling") {
+    // "wrap" skips this (2026-08-14) — it has no coverage path to start at
+    // any more; its own dedicated block below drives point-to-point to the
+    // nearest bale instead, same as Hay-Spikes' collector leg.
+    if (agent.state === "traveling" && task.type !== "wrap") {
       // Drive to the field's coverage-path START (not the centroid), so work
       // begins exactly where the first lane does.
       const path = getActivePath(save, task, field, agent);
@@ -3561,9 +3756,28 @@ function tickAgent(
         // already staggers the spacing, so drops stay on the driven lane.
         const inside = pointInPolygon(agent.pos, field.boundary);
         const drop = inside ? agent.pos : (baleLastInside.get(task.id) ?? agent.pos);
+        const firstBaleOfRun = (field.baleLocations?.length ?? 0) === 0;
         (field.baleLocations ??= []).push([drop[0], drop[1]]);
         baler.cargoTons = Math.max(0, baler.cargoTons - baleTarget);
         baleTargetRuntime.delete(task.id); // re-roll the next bale's fill distance
+        // The wrapper trails the baler (2026-08-14, maintainer request) —
+        // same "starts once the lead machine has produced something to work
+        // on" shape as the rake/baler relay (`field.windrowed` flips true at
+        // rake PICKUP, not completion). Stamp `field.baleProduct`/`baledAt`
+        // on the FIRST bale — `wrap`'s enqueue validation (`canWrapBales`)
+        // needs a real product to check, which `applyBaleDone` used to only
+        // set at the run's COMPLETION, so a wrap attempted any earlier than
+        // that always failed silently. `tryEnqueue` runs on every drop
+        // rather than gating on "is this the first one" too — its catch
+        // makes every call after the first a harmless no-op ("already has a
+        // wrap task queued"). Unlike the rake/baler pair, `wrap` can't
+        // structurally outrun `bale` at all now (2026-08-14 redesign): it
+        // visits EXISTING bale spots one at a time (see the `wrap` tick
+        // block) rather than sweeping a coverage path at its own speed, so
+        // there's nothing to "catch up to" — it just waits when it runs out
+        // of unwrapped bales and baling is still adding more.
+        if (firstBaleOfRun) stampBaleProduct(field, square, now, wrapping);
+        if (cropProducesWrappedBale(field.crop ?? field.lastCrop)) tryEnqueue(save, field, "wrap", now);
         // Collectable the moment it hits the ground (maintainer request,
         // 2026-07-24) — a hauler no longer waits for the baler to finish the
         // whole field, which on a big one meant the entire crop lying out while
@@ -3636,6 +3850,112 @@ function tickAgent(
           queueHaulBales(save, field.id, now);
         }
       }
+      continue;
+    }
+
+    // WRAP (2026-08-14 redesign, maintainer report: "not a back & forth
+    // task... the tractor seeks out Round Bales and Square Bales and wraps
+    // them, converting them from unwrapped product to wrapped product...
+    // Then the Bale is hauled out"). Single-agent collector brain, same
+    // "lock the nearest target for the whole trip" shape as Hay-Spikes
+    // (`haulTargetRuntime` below) minus the cargo/delivery half — sealing
+    // happens IN PLACE, nothing gets carried anywhere.
+    if (task.type === "wrap") {
+      const wrapField = save.fields.find((f) => f.id === task.fieldId);
+      if (!wrapField) {
+        // Field sold mid-wrap — nothing left to reference. Drop the job.
+        // `finishHaul` is generic enough to reuse here (frees whichever
+        // agent this task actually owns; wrap has no trailerAgentId, which
+        // it already handles as a no-op).
+        finishHaul(save, task, agent, events);
+        continue;
+      }
+      const speed = (gameConfig.work.travelSpeedKmh * 1000) / 60; // meters per sim-minute
+
+      if (task.wrapPhase === "wrapping") {
+        agent.state = "working";
+        const timer = task.phaseTimer ?? gameConfig.forage.wrapMinutesPerBale;
+        const used = Math.min(timer, budget);
+        budget -= used;
+        if (timer - used > 1e-9) {
+          task.phaseTimer = timer - used;
+          continue;
+        }
+        task.phaseTimer = undefined;
+        const locs = wrapField.baleLocations ?? [];
+        if (locs.length > 0) {
+          const idx = nearestBaleIndex(locs, agent.pos);
+          const [sealed] = locs.splice(idx, 1);
+          const wrapped = (wrapField.wrappedBaleLocations ??= []);
+          wrapped.push(sealed!);
+          // Starts the aging clock toward its own Aged Baleage twin
+          // (`resolveAgedBaleProduct`) from the truthful moment — the FIRST
+          // bale actually sealed, not whenever this batch happens to finish.
+          if (wrapped.length === 1) wrapField.wrappedAt = now;
+        }
+        wrapTargetRuntime.delete(task.id);
+        task.wrapPhase = "toBale";
+        // No `changed.push` here (2026-08-14 perf fix) — wrapping never
+        // touches `field.status`/texture, only the bale MARKERS, which
+        // main.ts already refreshes every tick on its own cheap diff
+        // (`updateBaleMarkers` → `baleStateKey`, independent of `changed`).
+        // Pushing here queued a full canvas texture repaint (`renderField`)
+        // per BALE — up to hundreds per field per wrap run — which is what
+        // bogged the game down mid-wrap (maintainer report).
+        continue;
+      }
+
+      const remaining = wrapField.baleLocations ?? [];
+      if (remaining.length > 0) {
+        // Lock onto one target bale for the whole trip — re-picking "nearest"
+        // every tick oscillates as the agent moves (same fix Hay-Spikes'
+        // `haulTargetRuntime` already made, 2026-07-17).
+        let target = wrapTargetRuntime.get(task.id);
+        if (!target || !remaining.some((l) => samePos(l, target!))) {
+          const b = remaining[nearestBaleIndex(remaining, agent.pos)]!;
+          target = [b[0], b[1]];
+          wrapTargetRuntime.set(task.id, target);
+        }
+        if (!samePos(agent.pos, target)) {
+          task.wrapPhase = "toBale";
+          agent.state = "traveling";
+          budget = driveToward(save, agent, target, speed, budget);
+          continue;
+        }
+        wrapTargetRuntime.delete(task.id); // reached it — free the lock
+        task.wrapPhase = "wrapping";
+        task.phaseTimer = gameConfig.forage.wrapMinutesPerBale;
+        agent.state = "working";
+        continue;
+      }
+
+      // Nothing left to seal right now. If baling is still adding to this
+      // field (the wrapper trailing the baler, see the `bale` drop branch
+      // above), park and wait for the next one instead of declaring victory
+      // early — mirrors how the rake/baler relay's follower doesn't finish
+      // just because it caught up to the leader.
+      wrapTargetRuntime.delete(task.id);
+      if (save.tasks.some((t) => t.type === "bale" && t.fieldId === wrapField.id && t.status === "active")) {
+        agent.state = "working";
+        budget = 0;
+        continue;
+      }
+
+      // Truly done: merge the sealed pile back into `baleLocations` as the
+      // wrapped product (`applyWrapDone`), then release the field to hauling
+      // exactly like any other bale product — no special casing downstream.
+      // No `changed.push` (see the perf-fix comment above) — this touches
+      // `baleProduct`/`baleLocations`, never the field's texture/status.
+      const sealedCount = wrapField.wrappedBaleLocations?.length ?? 0;
+      applyWrapDone(wrapField);
+      recordCompletion(save, task, wrapField, agent, now, { bales: sealedCount });
+      events.push({ kind: "finished", task, agent });
+      clearTaskRuntime(task.id);
+      save.tasks.splice(save.tasks.indexOf(task), 1);
+      agent.taskId = undefined;
+      clearAgentRoute(agent.id);
+      agent.state = "idle";
+      queueHaulBales(save, wrapField.id, now);
       continue;
     }
 
@@ -3786,9 +4106,9 @@ function tickAgent(
       if (task.type === "harvest" && agent.lastCrop && (agent.grainOnboard ?? 0) > 1e-9) {
         ensureUnloadTask(save, agent, agent.lastFieldId ?? field.id, agent.lastCrop, events);
       }
-      // The bales are sealed now, so the haul that `wrapPending` was holding
-      // back can finally go — and it'll carry baleage rather than hay.
-      if (task.type === "wrap") queueHaulBales(save, field.id, now);
+      // "wrap" never reaches here (2026-08-14) — its own dedicated block
+      // above always `continue`s, including the haul it queues on
+      // completion; this generic coverage-path block is unreachable for it.
     }
   }
 }
@@ -3853,11 +4173,9 @@ function completeTask(task: FarmTask, field: Field, now: SimTime, rand: () => nu
       // price and the tonnage, for everything downstream.
       applyBaleDone(field, square, now, wrapping);
       break;
-    case "wrap":
-      // Seals every bale lying in the field into baleage. The count doesn't
-      // change — wrapping doesn't make bales, it preserves the ones there.
-      applyWrapDone(field, now);
-      break;
+    // "wrap" deliberately has no case here (2026-08-14) — it no longer runs
+    // through the generic coverage-path completion this switch serves; its
+    // own dedicated tick block calls `applyWrapDone` directly.
     case "chop":
       // Silage banked into the chopper's buffer as it drove and left on a
       // wagon; this settles the field. On corn that means cleared with NO
@@ -4163,7 +4481,7 @@ export function blockedWork(save: SaveState): BlockedWork[] {
     // small-only fleet is just as stuck as not owning one. Headers ride on the
     // COMBINE, so they're checked against combines rather than tractors.
     const carrier = task.type === "harvest" ? "harvester" : task.type === "chop" ? "forageHarvester" : "tractor";
-    if (kind && !save.agents.some((a) => a.kind === carrier && a.size && save.implements.some((i) => i.kind === kind && canPull(a.size!, i.size)))) {
+    if (kind && !save.agents.some((a) => a.kind === carrier && a.size && save.implements.some((i) => i.kind === kind && canPull(a.size!, i.size, kind)))) {
       out.push({
         fieldId: task.fieldId, type: task.type,
         reason: `No ${carrier === "harvester" ? "combine" : carrier === "forageHarvester" ? "forage harvester" : "tractor"} big enough for the ${IMPLEMENT_NAME[kind]}`,

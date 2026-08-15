@@ -258,3 +258,92 @@ describe("resetQueuedTask (2026-08-13)", () => {
     expect(() => resetQueuedTask(save, "nope", APRIL_1)).toThrow(/not found/);
   });
 });
+
+describe("stranded Haul Bales tasks are dropped automatically (2026-08-14)", () => {
+  // Maintainer report: "a Haul Bales job gets stuck in the queued tasks but
+  // there are no bales to haul and the task hangs up and keeps the auto
+  // advance from happening." A queued CREW task (the 2nd/3rd hauler
+  // `queueHaulBales` spawns while a field still has bales) can outlive the
+  // very last bale on the field if a sibling hauler clears it first, before
+  // this one is ever given an agent — `isStartable` then refuses it forever,
+  // but nothing used to cancel a queued task that had gone permanently
+  // un-startable. Fabricate that exact shape directly (a queued haulBales
+  // task pointed at a field with zero bales) rather than driving the whole
+  // crew-scaling system to it, which is what every other haul test already
+  // covers.
+  function haulTask(fieldId: string, over: Partial<FarmTask> = {}): FarmTask {
+    return {
+      id: "stuck-haul", type: "haulBales", fieldId, totalAcres: 1, doneAcres: 0,
+      status: "queued", costPaid: 0, haulPhase: "toBale", ...over,
+    } as FarmTask;
+  }
+
+  it("cancels a queued haul with no agent once its field has no bales and nothing more is coming", () => {
+    const save = newGame();
+    const field = plowableField(); // status irrelevant to haulBales — no bales is what matters
+    field.baleLocations = [];
+    save.fields.push(field);
+    save.tasks.push(haulTask(field.id));
+
+    tickTasks(save, APRIL_1, 10, () => 0.5);
+
+    expect(save.tasks).toHaveLength(0);
+  });
+
+  it("leaves it alone while a bale run is still active on the field — more could still land", () => {
+    const save = newGame();
+    const field = plowableField();
+    field.baleLocations = [];
+    save.fields.push(field);
+    save.tasks.push(haulTask(field.id));
+    save.tasks.push({
+      id: "still-baling", type: "bale", fieldId: field.id, totalAcres: 1, doneAcres: 0,
+      status: "active", costPaid: 0, agentId: "someone",
+    } as FarmTask);
+
+    tickTasks(save, APRIL_1, 10, () => 0.5);
+
+    expect(save.tasks.some((t) => t.id === "stuck-haul")).toBe(true);
+  });
+
+  it("leaves it alone while a wrap is in progress — sealed bales will come back to the field", () => {
+    const save = newGame();
+    const field = plowableField();
+    field.crop = "grassSilage"; // wraps by design — no plan toggle needed
+    field.baleLocations = [];
+    field.wrappedBaleLocations = [[1, 1]]; // sealed, not yet merged back in
+    save.fields.push(field);
+    save.tasks.push(haulTask(field.id));
+    save.tasks.push({
+      id: "still-wrapping", type: "wrap", fieldId: field.id, totalAcres: 1, doneAcres: 0,
+      status: "active", costPaid: 0, agentId: "someone",
+    } as FarmTask);
+
+    tickTasks(save, APRIL_1, 10, () => 0.5);
+
+    expect(save.tasks.some((t) => t.id === "stuck-haul")).toBe(true);
+  });
+
+  it("leaves a genuinely startable queued haul alone — bales are still down", () => {
+    const save = newGame();
+    const field = plowableField();
+    field.baleLocations = [[1, 1], [2, 2]];
+    save.fields.push(field);
+    save.tasks.push(haulTask(field.id));
+
+    tickTasks(save, APRIL_1, 10, () => 0.5);
+
+    // Not asserting it's gone — an agent may or may not have picked it up
+    // yet — only that the stranding check didn't wrongly remove live work.
+    expect(save.tasks.some((t) => t.id === "stuck-haul" || t.type === "haulBales")).toBe(true);
+  });
+
+  it("cancels it outright if the field itself is gone", () => {
+    const save = newGame();
+    save.tasks.push(haulTask("no-such-field"));
+
+    tickTasks(save, APRIL_1, 10, () => 0.5);
+
+    expect(save.tasks).toHaveLength(0);
+  });
+});

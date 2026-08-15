@@ -18,7 +18,9 @@ import type { EquipmentKind } from "./tasks";
 import { recordCash } from "./ledger";
 import type { SimTime } from "./clock";
 import { START_MONTH, MONTHS_PER_YEAR, minutesPerMonth } from "./calendar";
-import { grainInstantPrice, baleInstantPrice, SELLABLE_GRAINS, ALL_MARKET_PRODUCTS, effectiveSellPlan } from "./market";
+import {
+  grainInstantPrice, baleInstantPrice, silageInstantPrice, SELLABLE_GRAINS, ALL_MARKET_PRODUCTS, effectiveSellPlan,
+} from "./market";
 import type { MarketProduct } from "./market";
 import { baleTonsOf, resolveAgedBaleProduct } from "./farming";
 
@@ -55,8 +57,8 @@ export function sellGrain(save: SaveState, crop: CropId, tons: number, _now?: Si
 export function sellBales(save: SaveState, field: Field, now: SimTime): { bales: number; revenue: number } {
   const bales = field.baleLocations?.length ?? 0;
   if (bales <= 0) return { bales: 0, revenue: 0 };
-  // Ages a wrapped crop-specific product into the generic "Silage Bale
-  // (wrapped)" if it's sat wrapped long enough — see `resolveAgedBaleProduct`.
+  // Ages a wrapped product into its Aged Baleage twin if it's sat wrapped
+  // long enough — see `resolveAgedBaleProduct`.
   const productId = resolveAgedBaleProduct(field, now) ?? "cornStover";
   const product = gameConfig.baleProducts[productId];
   const unit = baleInstantPrice(productId); // instant pickup price -- see sellGrain
@@ -132,18 +134,35 @@ export function sellBalesOfProduct(save: SaveState, product: BaleProduct, now: S
 let autoSellSeq = 0;
 
 /**
- * Sell bunker-stored silage (2026-07-31, Phase 2). Flat per-ton price — silage
- * is deliberately outside the seasonal market curve for now: it's a feed
- * product that mostly moves on contract, and the maintainer's Phase 2 brief
- * was to keep the bunker simple.
+ * Sell bunker-stored silage INSTANTLY from the panel — every bunker holding
+ * `product`, not just one (2026-08-15: repriced to match grain/bales'
+ * instant-vs-hauled structure, and moved off the old farm-wide pool to
+ * per-bunker storage — draining across every bunker here is what keeps
+ * "Sell all of this product" meaning the same thing it always did once a
+ * farm might have it split across several). Was a flat config-listed price
+ * with no discount and no seasonal swing at all, a deliberate Phase 2
+ * simplification; superseded now that silage has joined the full
+ * Auto/Manual/Haul system, where the whole point of a Sell task is to earn
+ * the seasonal premium this function deliberately withholds — see
+ * `queueSellRun`/`sim/tasks.ts` for the hauled (full-price) path.
  */
 export function sellSilage(save: SaveState, product: SilageProduct, tons: number, now?: SimTime): SaleResult {
-  const have = save.silage?.[product] ?? 0;
-  const sold = Math.min(Math.max(0, tons), have);
+  let left = Math.max(0, tons);
+  if (left <= 1e-9) return { tons: 0, revenue: 0 };
+  let sold = 0;
+  for (const b of save.buildings) {
+    if (b.kind !== "silageBunker" || left <= 0) continue;
+    const have = b.storedSilage?.[product] ?? 0;
+    if (have <= 0) continue;
+    const take = Math.min(left, have);
+    b.storedSilage![product] = have - take;
+    left -= take;
+    sold += take;
+  }
   if (sold <= 1e-9) return { tons: 0, revenue: 0 };
   const cfg = gameConfig.silageProducts[product];
-  const revenue = Math.round(sold * cfg.pricePerTon);
-  save.silage![product] = have - sold;
+  const unit = silageInstantPrice(product); // instant pickup price -- see sellGrain
+  const revenue = Math.round(sold * unit);
   save.money += revenue;
   recordCash(save, "cropRevenue", cfg.name, revenue);
   appendCompletedTask(save, {
@@ -157,14 +176,20 @@ export function sellSilage(save: SaveState, product: SilageProduct, tons: number
   return { tons: sold, revenue };
 }
 
-/** Every silage product with tons in the bunkers, for the Inventory tab. */
+/** Every silage product with tons in the bunkers, summed across every
+ * bunker, for the Inventory tab. `pricePerTon`/`value` are the current
+ * month's INSTANT price — what clicking Sell actually pays (2026-08-15,
+ * matching `baleInventory`); the Inventory row also offers Haul for the
+ * full seasonal price. */
 export function silageInventory(save: SaveState): { product: SilageProduct; name: string; emoji: string; tons: number; pricePerTon: number; value: number }[] {
   const out: { product: SilageProduct; name: string; emoji: string; tons: number; pricePerTon: number; value: number }[] = [];
   for (const p of SILAGE_PRODUCTS) {
-    const tons = save.silage?.[p] ?? 0;
+    let tons = 0;
+    for (const b of save.buildings) tons += b.storedSilage?.[p] ?? 0;
     if (tons <= 1e-9) continue;
     const cfg = gameConfig.silageProducts[p];
-    out.push({ product: p, name: cfg.name, emoji: cfg.emoji, tons, pricePerTon: cfg.pricePerTon, value: Math.round(tons * cfg.pricePerTon) });
+    const unit = silageInstantPrice(p);
+    out.push({ product: p, name: cfg.name, emoji: cfg.emoji, tons, pricePerTon: Math.round(unit), value: Math.round(tons * unit) });
   }
   return out;
 }
@@ -183,6 +208,13 @@ export function sellAllOfProduct(save: SaveState, product: MarketProduct, now: S
         label: gameConfig.crops[crop].name, tons, revenue, completedAt: now,
       });
     }
+    return;
+  }
+  if ((SILAGE_PRODUCTS as string[]).includes(product)) {
+    // sellSilage already logs its own Completed entry (unlike sellGrain/
+    // sellStoredBalesFrom, which leave that to their callers) — nothing
+    // further to do here.
+    sellSilage(save, product as SilageProduct, Infinity, now);
     return;
   }
   const p = product as BaleProduct;

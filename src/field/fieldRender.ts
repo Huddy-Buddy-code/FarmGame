@@ -188,7 +188,13 @@ export function drawFieldTexture(
           // regrowth already showing, not tan chaff like a combined grain field.
           rows(ctx, w, h, angle, 2.2, dark, 0.9, 0.3);
           rows(ctx, w, h, angle, 2.2, light, 0.6, 0.22, 1); // lit stubble tufts
-          passStripes(ctx, w, h, angle, passPx, 0.06); // mower passes, at mower swath
+          // Banded cutter/mower passes (2026-08-14, maintainer request) —
+          // replaces the flat two-tone `passStripes` treatment with real
+          // light-edge/dark-middle bands at the implement's actual width.
+          // `dark`/`light` are this crop's own palette pair (split above by
+          // family), which is what keeps Grass's bands reading lighter than
+          // Alfalfa's without any extra branching here.
+          bandedRows(ctx, w, h, angle, passPx, dark, light, 0.55);
           canopyMottle(ctx, w, h, seed + 7, dark, light, 0.5, areaScale);
           break;
         }
@@ -350,6 +356,10 @@ function palette(p: FieldPaintParams): { base: string; dark: string; light: stri
       // Perennial forage stands are GREEN at cutting, not golden like grain.
       if (p.crop === "grass" || p.crop === "grassSilage") return { base: "#7f9a4e", dark: "#65803a", light: "#9bb267" }; // lush tall grass
       if (p.crop === "alfalfa" || p.crop === "alfalfaSilage") return { base: "#5f7d40", dark: "#4c6733", light: "#7a9455" }; // deep alfalfa green
+      // Corn (Forage) is chopped whole-plant while still green (2026-08-14,
+      // maintainer report) — it never dries down to the golden grain color
+      // the way Corn does, since it's never left standing for a combine.
+      if (p.crop === "forage") return { base: "#4c6a34", dark: "#3c552a", light: "#628342" }; // deep standing-corn green
       // Per-crop ripe tint (2026-07-22, with the six new annuals) — unlisted
       // crops (corn, wheat, barley…) share the classic golden-grain default.
       const ripe: Partial<Record<CropId, { base: string; dark: string; light: string }>> = {
@@ -363,7 +373,13 @@ function palette(p: FieldPaintParams): { base: string; dark: string; light: stri
     }
     case "harvested":
       // A freshly-cut hay stand is dark green stubble/regrowth, not tan chaff.
-      if (isPerennial(p.crop)) return { base: "#4f6537", dark: "#3f522c", light: "#63794a" };
+      // Split by crop family (2026-08-14, maintainer request) — same relative
+      // grass-is-lighter/alfalfa-is-darker relationship "ready" already has
+      // (just scaled down for the cut/regrowth tone), so the new banded
+      // texture's middle 80% reads as a genuinely different shade per crop,
+      // not the one shared tone both used to get.
+      if (p.crop === "alfalfa" || p.crop === "alfalfaSilage") return { base: "#4f6537", dark: "#3f522c", light: "#63794a" };
+      if (p.crop === "grass" || p.crop === "grassSilage") return { base: "#698040", dark: "#546a30", light: "#819455" };
       return { base: "#b3a375", dark: "#9a8a5e", light: "#c4b489" };
     case "mulched":
       // Greener than stubble — grass retained under a clean, mown/baled surface.
@@ -687,6 +703,37 @@ function passStripes(ctx: CanvasRenderingContext2D, w: number, h: number, angleR
     ctx.fillStyle = flip ? "#ffffff" : "#000000";
     ctx.globalAlpha = alpha;
     ctx.fillRect(-diag / 2, d, diag, spacing);
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+/**
+ * One implement-pass-wide band per stripe, lit 10% at each edge and dark
+ * through the middle 80% (maintainer request, 2026-08-14, for Grass/Alfalfa's
+ * freshly-cut regrowth) — real mower/chopper swaths show a lighter cut edge
+ * where the header/rollers handle the crop differently than the pass's
+ * middle. `spacing` is the pass width — pass the same `passPx` (the real
+ * cutter/mower swath) every other pass-driven feature in this file reads, so
+ * band width always matches the actual implement, not an arbitrary constant.
+ */
+function bandedRows(
+  ctx: CanvasRenderingContext2D, w: number, h: number, angleRad: number,
+  spacing: number, dark: string, light: string, alpha: number,
+): void {
+  const diag = Math.hypot(w, h);
+  const edge = spacing * 0.1;
+  ctx.save();
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate(angleRad);
+  ctx.globalAlpha = alpha;
+  for (let d = -diag / 2; d <= diag / 2; d += spacing) {
+    ctx.fillStyle = light;
+    ctx.fillRect(-diag / 2, d, diag, edge);
+    ctx.fillStyle = dark;
+    ctx.fillRect(-diag / 2, d + edge, diag, spacing - 2 * edge);
+    ctx.fillStyle = light;
+    ctx.fillRect(-diag / 2, d + spacing - edge, diag, edge);
   }
   ctx.restore();
   ctx.globalAlpha = 1;

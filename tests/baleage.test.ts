@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
-  canWrapBales, applyWrapDone, applyBaleDone, baleageProductFor, isWrappedProduct,
+  canWrapBales, applyWrapDone, applyBaleDone, baleageProductFor, isWrappedProduct, migrateLegacyBaleProducts,
 } from "../src/sim/farming";
-import { baleSpoilRateFor, tickBaleSpoilage } from "../src/sim/buildings";
+import { baleSpoilRateFor, tickBaleSpoilage, tickBaleAging } from "../src/sim/buildings";
 import { gameConfig } from "../src/config/gameConfig";
 import { minutesPerMonth } from "../src/sim/calendar";
-import type { Field, SaveState, Building } from "../src/state/saveState";
+import type { Field, SaveState, Building, Implement, FarmTask } from "../src/state/saveState";
 import type { BaleProduct } from "../src/config/gameConfig";
 
 /**
@@ -57,10 +57,13 @@ describe("what can become baleage", () => {
     expect(baleageProductFor("alfalfaBaleage")).toBeUndefined();
   });
 
-  it("flags exactly the six wrapped products (2026-08-13: +2 square, +2 generic aged)", () => {
+  it("flags exactly the eight wrapped products (2026-08-15: 4 fresh + 4 crop-specific aged)", () => {
     const wrapped = (Object.keys(gameConfig.baleProducts) as BaleProduct[]).filter(isWrappedProduct);
     expect(wrapped.sort()).toEqual(
-      ["alfalfaBaleage", "alfalfaHaySquareBaleage", "hayBaleage", "haySquareBaleage", "silageBale", "silageBaleSquare"].sort(),
+      [
+        "alfalfaBaleage", "alfalfaHaySquareBaleage", "hayBaleage", "haySquareBaleage",
+        "alfalfaBaleageAged", "alfalfaHaySquareBaleageAged", "hayBaleageAged", "haySquareBaleageAged",
+      ].sort(),
     );
   });
 });
@@ -99,31 +102,40 @@ describe("the same-month wrapping window", () => {
   });
 });
 
-describe("wrapping a field", () => {
+describe("wrapping a field (2026-08-14 redesign: merges the already-sealed pile back in)", () => {
   it("converts the product and spends the window", () => {
-    const f = field();
-    applyWrapDone(f, 0);
+    // `wrappedBaleLocations` stands in for what the wrap task's tick loop
+    // would have built up by visiting each bale one at a time — `baleProduct`
+    // stays the UNWRAPPED id right up until this merge (see the Field
+    // comment). `baleLocations: undefined` matches the real precondition:
+    // applyWrapDone only ever runs once that pile is drained.
+    const f = field({ baleLocations: undefined, wrappedBaleLocations: [[10, 10], [20, 20]] });
+    applyWrapDone(f);
     expect(f.baleProduct).toBe("hayBaleage");
     expect(f.baledAt).toBeUndefined();
+    expect(f.wrappedBaleLocations).toBeUndefined();
     expect(canWrapBales(f, 0)).toBe(false); // can't be wrapped twice
   });
 
   it("does NOT change the bale count — wrapping preserves bales, it doesn't make them", () => {
-    const f = field({ baleLocations: [[1, 1], [2, 2], [3, 3]] });
-    applyWrapDone(f, 0);
+    const f = field({ baleLocations: undefined, wrappedBaleLocations: [[1, 1], [2, 2], [3, 3]] });
+    applyWrapDone(f);
     expect(f.baleLocations).toHaveLength(3);
   });
 
-  it("leaves an unwrappable field completely alone", () => {
-    const f = field({ baleProduct: "straw" });
-    applyWrapDone(f, 0);
+  it("no-ops on a field with nothing wrapped yet — there's no pile to merge", () => {
+    const f = field({ baleProduct: "straw" }); // default fixture: bales down, no wrappedBaleLocations
+    applyWrapDone(f);
     expect(f.baleProduct).toBe("straw");
     expect(f.baledAt).toBe(0); // window untouched — nothing happened
   });
 
   it("alfalfa wraps to its own product, not grass baleage", () => {
-    const f = field({ crop: "alfalfaSilage", baleProduct: "alfalfaHay" });
-    applyWrapDone(f, 0);
+    const f = field({
+      crop: "alfalfaSilage", baleProduct: "alfalfaHay",
+      baleLocations: undefined, wrappedBaleLocations: [[10, 10], [20, 20]],
+    });
+    applyWrapDone(f);
     expect(f.baleProduct).toBe("alfalfaBaleage");
   });
 });
@@ -135,6 +147,9 @@ describe("baling stamps the window", () => {
   it("a round baler records WHEN, so the wrap window can be judged", () => {
     const f = perennial();
     applyBaleDone(f, false, 5000);
+    // grassSilage shares plain Grass's "hay" id again (2026-08-15 cleanup —
+    // see the BaleProduct union's comment); wrap-eligibility is judged off
+    // the FIELD's crop (`cropProducesWrappedBale`), not the bale's own id.
     expect(f.baleProduct).toBe("hay");
     expect(f.baledAt).toBe(5000);
     expect(canWrapBales(f, 5000)).toBe(true);
@@ -217,32 +232,190 @@ describe("wrapped bales barely spoil — the whole payoff", () => {
   });
 });
 
-describe("baleage balance", () => {
-  it("prices both baleage products below their dry twin PER BALE (it's half water)", () => {
-    expect(gameConfig.baleProducts.hayBaleage.pricePerBale)
-      .toBeLessThan(gameConfig.baleProducts.hay.pricePerBale);
-    expect(gameConfig.baleProducts.alfalfaBaleage.pricePerBale)
-      .toBeLessThan(gameConfig.baleProducts.alfalfaHay.pricePerBale);
+describe("tickBaleAging: wrapped bales already in storage age into their own Aged Baleage twin (2026-08-15)", () => {
+  function store(product: BaleProduct, n: number): Building {
+    return { id: "b1", kind: "baleArea", pos: [0, 0], storedBales: { [product]: n } } as Building;
+  }
+
+  it("does nothing before the aging window has passed", () => {
+    const b = store("hayBaleage", 100);
+    const save = { buildings: [b] } as SaveState;
+    tickBaleAging(save, 0); // first tick just starts the clock
+    tickBaleAging(save, MONTH * (gameConfig.forage.silageAgingMonths - 0.1));
+    expect(b.storedBales!.hayBaleage).toBe(100);
+    expect(b.storedBales!.hayBaleageAged).toBeUndefined();
   });
 
-  it("makes MORE bales per acre, each heavier and wetter — DM per acre is what's preserved", () => {
+  it("folds the whole pile into its Aged Baleage twin once the window passes", () => {
+    const b = store("hayBaleage", 100);
+    const save = { buildings: [b] } as SaveState;
+    tickBaleAging(save, 0); // starts the clock
+    tickBaleAging(save, MONTH * gameConfig.forage.silageAgingMonths);
+    expect(b.storedBales!.hayBaleage).toBeUndefined();
+    expect(b.storedBales!.hayBaleageAged).toBe(100);
+  });
+
+  it("ages the square twin into its own square Aged Baleage, independent of the round pile", () => {
+    const b = {
+      id: "b1", kind: "baleArea", pos: [0, 0],
+      storedBales: { alfalfaHaySquareBaleage: 40, hayBaleage: 10 },
+    } as Building;
+    const save = { buildings: [b] } as SaveState;
+    tickBaleAging(save, 0);
+    tickBaleAging(save, MONTH * gameConfig.forage.silageAgingMonths);
+    expect(b.storedBales!.alfalfaHaySquareBaleage).toBeUndefined();
+    expect(b.storedBales!.hayBaleage).toBeUndefined();
+    expect(b.storedBales!.alfalfaHaySquareBaleageAged).toBe(40);
+    expect(b.storedBales!.hayBaleageAged).toBe(10);
+  });
+
+  it("leaves unwrapped hay alone — it has nothing to age into", () => {
+    const b = store("hay", 100);
+    const save = { buildings: [b] } as SaveState;
+    tickBaleAging(save, 0);
+    tickBaleAging(save, MONTH * gameConfig.forage.silageAgingMonths * 2);
+    expect(b.storedBales!.hay).toBe(100);
+  });
+
+  it("restarts the clock for a fresh delivery that arrives after a conversion", () => {
+    const b = store("hayBaleage", 100);
+    const save = { buildings: [b] } as SaveState;
+    tickBaleAging(save, 0);
+    tickBaleAging(save, MONTH * gameConfig.forage.silageAgingMonths); // converts the first 100
+    b.storedBales!.hayBaleage = 50; // a fresh batch hauled in
+    tickBaleAging(save, MONTH * gameConfig.forage.silageAgingMonths); // starts the fresh clock, doesn't convert yet
+    expect(b.storedBales!.hayBaleage).toBe(50);
+    expect(b.storedBales!.hayBaleageAged).toBe(100);
+    tickBaleAging(save, MONTH * gameConfig.forage.silageAgingMonths * 2);
+    expect(b.storedBales!.hayBaleage).toBeUndefined();
+    expect(b.storedBales!.hayBaleageAged).toBe(150);
+  });
+
+  it("clears the clock once a product's pile sells/hauls down to zero", () => {
+    const b = store("hayBaleage", 10);
+    const save = { buildings: [b] } as SaveState;
+    tickBaleAging(save, 0);
+    delete b.storedBales!.hayBaleage; // hauled/sold off entirely
+    tickBaleAging(save, MONTH * 0.5);
+    b.storedBales!.hayBaleage = 10; // a fresh delivery
+    tickBaleAging(save, MONTH * 0.5); // starts a FRESH clock, not the old one
+    tickBaleAging(save, MONTH * (gameConfig.forage.silageAgingMonths - 0.1)); // still under the window since the restart
+    expect(b.storedBales!.hayBaleage).toBe(10);
+    expect(b.storedBales!.hayBaleageAged).toBeUndefined();
+  });
+
+  it("carries the +10% aged markup through, per crop (2026-08-15 pricing pass)", () => {
+    expect(gameConfig.baleProducts.hayBaleageAged.pricePerBale).toBeGreaterThan(gameConfig.baleProducts.hayBaleage.pricePerBale);
+    expect(gameConfig.baleProducts.alfalfaBaleageAged.pricePerBale).toBeGreaterThan(gameConfig.baleProducts.alfalfaBaleage.pricePerBale);
+    expect(gameConfig.baleProducts.haySquareBaleageAged.pricePerBale).toBeGreaterThan(gameConfig.baleProducts.haySquareBaleage.pricePerBale);
+    expect(gameConfig.baleProducts.alfalfaHaySquareBaleageAged.pricePerBale).toBeGreaterThan(gameConfig.baleProducts.alfalfaHaySquareBaleage.pricePerBale);
+  });
+});
+
+describe("baleage balance", () => {
+  it("prices baleage ABOVE the dry twin's $/ton — wrapping adds value, it isn't a water discount (rule 3)", () => {
     for (const [dry, wet] of [["hay", "hayBaleage"], ["alfalfaHay", "alfalfaBaleage"]] as const) {
-      expect(gameConfig.baleProducts[wet].balesPerAcre).toBeGreaterThan(gameConfig.baleProducts[dry].balesPerAcre);
+      const dryPerTon = gameConfig.baleProducts[dry].pricePerBale / gameConfig.baleProducts[dry].tonsPerBale;
+      const wetPerTon = gameConfig.baleProducts[wet].pricePerBale / gameConfig.baleProducts[wet].tonsPerBale;
+      expect(wetPerTon).toBeGreaterThan(dryPerTon);
+    }
+  });
+
+  it("keeps the SAME bales per acre as the dry twin — wrapping doesn't create bales, just seals them (rule 4)", () => {
+    for (const [dry, wet] of [["hay", "hayBaleage"], ["alfalfaHay", "alfalfaBaleage"]] as const) {
+      expect(gameConfig.baleProducts[wet].balesPerAcre).toBe(gameConfig.baleProducts[dry].balesPerAcre);
       expect(gameConfig.baleProducts[wet].tonsPerBale).toBeGreaterThan(gameConfig.baleProducts[dry].tonsPerBale);
     }
   });
 
-  it("grosses within ~15% of dry hay per acre, so the choice is about STORAGE not free money", () => {
+  it("grosses noticeably more than dry hay per acre — heavier bales at a higher $/ton, not free money", () => {
     for (const [dry, wet] of [["hay", "hayBaleage"], ["alfalfaHay", "alfalfaBaleage"]] as const) {
       const dryGross = gameConfig.baleProducts[dry].pricePerBale * gameConfig.baleProducts[dry].balesPerAcre;
       const wetGross = gameConfig.baleProducts[wet].pricePerBale * gameConfig.baleProducts[wet].balesPerAcre;
-      expect(wetGross).toBeGreaterThan(dryGross * 0.85);
-      expect(wetGross).toBeLessThan(dryGross * 1.15);
+      expect(wetGross).toBeGreaterThan(dryGross * 1.4);
+      expect(wetGross).toBeLessThan(dryGross * 1.7);
     }
   });
 
   it("a combi baler costs far more than a round baler plus a wrapper — you pay for the one-pass guarantee", () => {
     const separate = gameConfig.equipment.bailer.medium.price + gameConfig.equipment.baleWrapper.medium.price;
     expect(gameConfig.equipment.combiBaler.medium.price).toBeGreaterThan(separate * 1.5);
+  });
+});
+
+describe("migrateLegacyBaleProducts (2026-08-15)", () => {
+  // The Silage crops' one-day-old "…Unwrapped" ids were cut as pricing-
+  // identical duplicates of "hay"/"alfalfaHay"/"haySquare"/
+  // "alfalfaHaySquare" (see the BaleProduct union's comment). A save
+  // written during that one day could have the old ids sitting in a
+  // field's pile, a storage building, a trailer's cargo tag, an in-flight
+  // task, or a per-product sell override — every one of those needs to
+  // still resolve to a real `gameConfig.baleProducts` entry, or lookups
+  // like `isWrappedProduct` crash on `undefined`.
+  it("remaps a field's own pile", () => {
+    const f = field({ baleProduct: "grassRoundbaleUnwrapped" as BaleProduct });
+    const save = { fields: [f], buildings: [], implements: [], tasks: [] } as unknown as SaveState;
+    migrateLegacyBaleProducts(save);
+    expect(f.baleProduct).toBe("hay");
+  });
+
+  it("remaps a storage building's counts, merging into any existing pile of the new id", () => {
+    const b = {
+      id: "b1", kind: "baleArea", pos: [0, 0],
+      storedBales: { grassRoundbaleUnwrapped: 40, hay: 10, alfalfaSquareBaleUnwrapped: 5 },
+    } as unknown as Building;
+    const save = { fields: [], buildings: [b], implements: [], tasks: [] } as unknown as SaveState;
+    migrateLegacyBaleProducts(save);
+    expect(b.storedBales!.hay).toBe(50); // 40 remapped + the 10 already there
+    expect(b.storedBales!.alfalfaHaySquare).toBe(5);
+    expect(b.storedBales).not.toHaveProperty("grassRoundbaleUnwrapped");
+    expect(b.storedBales).not.toHaveProperty("alfalfaSquareBaleUnwrapped");
+  });
+
+  it("remaps a trailer's cargo tag and an in-flight haul/sell task's product", () => {
+    const i = { id: "i1", kind: "haySpikes", cargoBaleProduct: "alfalfaRoundbaleUnwrapped" as BaleProduct } as unknown as Implement;
+    const haul = { id: "t1", type: "haulBales", baleProduct: "grassRoundbaleUnwrapped" as BaleProduct } as unknown as FarmTask;
+    const sell = { id: "t2", type: "sell", sellProduct: "grassSquareBaleUnwrapped" } as unknown as FarmTask;
+    const save = { fields: [], buildings: [], implements: [i], tasks: [haul, sell] } as unknown as SaveState;
+    migrateLegacyBaleProducts(save);
+    expect(i.cargoBaleProduct).toBe("alfalfaHay");
+    expect(haul.baleProduct).toBe("hay");
+    expect(sell.sellProduct).toBe("haySquare");
+  });
+
+  it("remaps a per-product sell-schedule override, without clobbering one already on the new id", () => {
+    const save = {
+      fields: [], buildings: [], implements: [], tasks: [],
+      sellSchedule: {
+        grassRoundbaleUnwrapped: { month: 5, auto: true },
+        alfalfaRoundbaleUnwrapped: { month: 6, auto: true },
+        alfalfaHay: { month: 2, auto: false }, // already has its own override
+      },
+    } as unknown as SaveState;
+    migrateLegacyBaleProducts(save);
+    expect(save.sellSchedule!.hay).toEqual({ month: 5, auto: true }); // moved over
+    expect(save.sellSchedule!.alfalfaHay).toEqual({ month: 2, auto: false }); // untouched, not overwritten
+    expect(save.sellSchedule).not.toHaveProperty("grassRoundbaleUnwrapped");
+    expect(save.sellSchedule).not.toHaveProperty("alfalfaRoundbaleUnwrapped");
+  });
+
+  it("is a safe no-op on a save with nothing legacy to migrate", () => {
+    const f = field({ baleProduct: "hay" });
+    const save = { fields: [f], buildings: [], implements: [], tasks: [] } as unknown as SaveState;
+    expect(() => migrateLegacyBaleProducts(save)).not.toThrow();
+    expect(f.baleProduct).toBe("hay");
+  });
+
+  it("every retired id resolves to a real, still-lookup-able product", () => {
+    // The actual crash this guards: `isWrappedProduct`/any `gameConfig.
+    // baleProducts[x]` lookup throws on `undefined` for an id the config
+    // no longer knows.
+    for (const oldId of ["grassRoundbaleUnwrapped", "alfalfaRoundbaleUnwrapped", "grassSquareBaleUnwrapped", "alfalfaSquareBaleUnwrapped"]) {
+      const f = field({ baleProduct: oldId as BaleProduct });
+      const save = { fields: [f], buildings: [], implements: [], tasks: [] } as unknown as SaveState;
+      migrateLegacyBaleProducts(save);
+      expect(() => isWrappedProduct(f.baleProduct!)).not.toThrow();
+      expect(gameConfig.baleProducts[f.baleProduct!]).toBeDefined();
+    }
   });
 });

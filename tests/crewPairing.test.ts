@@ -230,6 +230,103 @@ describe("a bale trailer joins the rig in the field before a second one goes out
   });
 });
 
+describe("a static bale backlog grows its own crew, live (2026-08-14 fix)", () => {
+  // The bug this guards: `queueHaulBales`'s crew-growth logic was only ever
+  // CALLED at discrete events (a bale dropping, a wrap finishing, the manual
+  // button) — every test above proves the function's own gates are correct,
+  // but all of them call it directly. In real play, once the field's bales
+  // are ALL already down (baling long finished, nothing dropping any more),
+  // none of those events fire again — so a second Hay-Spikes rig never
+  // joined an in-progress haul no matter how large the backlog was, even
+  // though every condition for growing the crew was true the whole time.
+  // Live `tickTasks` simulation, no manual `queueHaulBales` calls after the
+  // first — proves the periodic re-check (added to the `haulBales` tick
+  // block itself) actually closes that gap end to end.
+  it("adds a second Hay-Spikes rig sharing the first's trailer, with no further bale drops", () => {
+    const save = newGame();
+    save.money = 20_000_000;
+    buyBuildingAt(save, "baleArea", [-400, -400]);
+    buyAgent(save, "tractor", "medium", [0, 0]); // rig 1's spikes tractor
+    buyAgent(save, "tractor", "medium", [0, 0]); // rig 1's trailer tractor
+    buyAgent(save, "tractor", "medium", [0, 0]); // rig 2's spikes tractor (idle, spare)
+    buyImplement(save, "haySpikes", "medium");
+    buyImplement(save, "haySpikes", "medium");
+    buyImplement(save, "baleTrailer", "medium");
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary, status: "mulched", baleProduct: "straw",
+      // A large STATIC backlog — nothing ever adds to this array again, the
+      // way a field sitting un-hauled after baling finished would look.
+      baleLocations: Array.from({ length: 40 }, (_, i) => [i * 8, i * 8] as Meters),
+    };
+    save.fields.push(field);
+
+    // Seed the FIRST task the same way a real bale-drop would have — one
+    // manual trigger, matching reality's one-time event — then let the live
+    // sim take over entirely from here.
+    expect(queueHaulBales(save, field.id, 0)).toBeTruthy();
+
+    run(save, 0, () =>
+      save.tasks.filter((t) => t.type === "haulBales").length >= 2
+      && save.tasks.filter((t) => t.type === "haulBales").every((t) => !!t.agentId),
+    );
+
+    const haulers = save.tasks.filter((t) => t.type === "haulBales");
+    expect(haulers.length).toBeGreaterThanOrEqual(2);
+    expect(haulers.every((t) => !!t.agentId)).toBe(true);
+    // The whole point of the feature under test: the second rig SHARES the
+    // first's trailer rather than sitting idle waiting for one of its own.
+    const trailerIds = new Set(haulers.map((t) => t.trailerAgentId).filter(Boolean));
+    expect(trailerIds.size).toBe(1);
+  });
+});
+
+describe("a second Bale Trailer is put to work, not left idle while its farm-mate shares (2026-08-15 fix)", () => {
+  // Maintainer report: "duplication of tractors deployed to run the Bale
+  // Trailer... two tractors and two trailers, but they are stacked on top
+  // of each other and not acting independently... fill with the same 30
+  // bale capacity when two trailers working should handle 60." Root cause:
+  // `assignTrailerHelper` checked for an already-paired trailer to SHARE
+  // before ever checking whether a second, fully idle trailer rig existed —
+  // so a genuinely owned second Bale Trailer just sat parked while both
+  // Hay-Spikes rigs converged on the first trailer's one fixed rendezvous
+  // point (the "stacked" symptom) and its capacity (the "30 not 60" one).
+  // Same live-simulation shape as the test above (one manual trigger, then
+  // the periodic re-check takes over) — the only difference is a farm that
+  // owns TWO trailers instead of one.
+  it("gives the second Hay-Spikes rig its OWN trailer when a second one is idle and available", () => {
+    const save = newGame();
+    save.money = 20_000_000;
+    buyBuildingAt(save, "baleArea", [-400, -400]);
+    buyAgent(save, "tractor", "medium", [0, 0]); // rig 1's spikes tractor
+    buyAgent(save, "tractor", "medium", [0, 0]); // rig 1's trailer tractor
+    buyAgent(save, "tractor", "medium", [0, 0]); // rig 2's spikes tractor
+    buyAgent(save, "tractor", "medium", [0, 0]); // rig 2's OWN trailer tractor
+    buyImplement(save, "haySpikes", "medium");
+    buyImplement(save, "haySpikes", "medium");
+    buyImplement(save, "baleTrailer", "medium");
+    buyImplement(save, "baleTrailer", "medium"); // the second trailer this bug used to strand
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary, status: "mulched", baleProduct: "straw",
+      baleLocations: Array.from({ length: 40 }, (_, i) => [i * 8, i * 8] as Meters),
+    };
+    save.fields.push(field);
+
+    expect(queueHaulBales(save, field.id, 0)).toBeTruthy();
+
+    run(save, 0, () =>
+      save.tasks.filter((t) => t.type === "haulBales").length >= 2
+      && save.tasks.filter((t) => t.type === "haulBales").every((t) => !!t.agentId && !!t.trailerAgentId),
+    );
+
+    const haulers = save.tasks.filter((t) => t.type === "haulBales");
+    expect(haulers.length).toBeGreaterThanOrEqual(2);
+    // The point of the fix: two DISTINCT trailer tractors, each running its
+    // own relay in parallel — not both haulers piled onto one.
+    const trailerIds = new Set(haulers.map((t) => t.trailerAgentId).filter(Boolean));
+    expect(trailerIds.size).toBe(2);
+  });
+});
+
 describe("farm-wide Hay-Spikes : Bale-Trailer balance (2026-08-13, maintainer request)", () => {
   /** A field full of bales and nothing crewed on it yet. */
   function baleField(): { save: SaveState; field: Field } {

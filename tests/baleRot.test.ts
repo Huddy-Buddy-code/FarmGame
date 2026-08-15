@@ -163,12 +163,30 @@ describe("edges", () => {
     // The bigger pile loses more bales, but the same FRACTION.
     expect(400 - b.storedBales.alfalfaHay!).toBeGreaterThan(200 - b.storedBales.straw!);
   });
+
+  it("doesn't crash on a retired/unknown product id sitting in storedBales (2026-08-15)", () => {
+    // Reproduces a real stuck-game report: a save carrying an id from before a
+    // rename that the migrations didn't catch made this throw on EVERY tick
+    // (`baleSpoilRateFor` indexing `gameConfig.baleProducts[key]` with no
+    // guard) — since this runs inside `tickWorld`, nothing downstream of it
+    // (rendering, Skip Month) ever completed again. The known product's pile
+    // still has to rot normally; only the bad key is skipped.
+    const save = newGame();
+    save.money = 10_000_000;
+    const b = buyBuildingAt(save, "baleArea", [0, 0]);
+    b.storedBales = { alfalfaHay: 400, retiredBaleProductId: 50 } as SaveState["buildings"][number]["storedBales"];
+    expect(() => tickBaleSpoilage(save, 4 * MONTH)).not.toThrow();
+    expect(b.storedBales.retiredBaleProductId).toBe(50); // untouched, not silently dropped
+    expect(b.storedBales.alfalfaHay).toBeLessThan(400); // the real product still rots
+  });
 });
 
 describe("alfalfa's yield cut (maintainer decision, 2026-07-25)", () => {
   it("is 15% off the pre-cut figures, round and square alike", () => {
     expect(gameConfig.baleProducts.alfalfaHay.balesPerAcre).toBeCloseTo(2.13 * 0.85, 2);
-    expect(gameConfig.baleProducts.alfalfaHaySquare.balesPerAcre).toBeCloseTo(1.78 * 0.85, 2);
+    // Square balesPerAcre derives from the round figure via the 1.6x weight
+    // ratio (2026-08-15 pass), not its own pre-cut anchor: 2.13 * (0.75/1.2) * 0.85.
+    expect(gameConfig.baleProducts.alfalfaHaySquare.balesPerAcre).toBeCloseTo(2.13 * (0.75 / 1.2) * 0.85, 2);
   });
 
   it("leaves the PRICE at true market — the cut is yield, not value", () => {

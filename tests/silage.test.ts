@@ -5,16 +5,20 @@ import { newGame } from "../src/state/saveState";
 import type { Field, SaveState } from "../src/state/saveState";
 import {
   ensureAgents, tickTasks, enqueueTask, buyImplement, buyAgent, canChopField, chopHeadKind, blockedWork,
-  estimateTaskHours,
+  estimateTaskHours, canMulch, forageDue,
 } from "../src/sim/tasks";
 import {
-  applyChopDone, silageProductForField, silageTonsPerAcreFor, cropMakesSilage,
+  applyChopDone, silageProductForField, silageTonsPerAcreFor, cropMakesSilage, canPlow,
 } from "../src/sim/farming";
 import {
   buyBuildingAt, silageCapacityTons, silageStoredTons, silageRoomTons, storeSilage, bunkerCapacityOf,
+  tickSilageAging, assignSilageBunkerProduct, silageBunkerAccepts, storedSilageTotal,
+  nearestSilageBunkerFor, migrateLegacySilage,
 } from "../src/sim/buildings";
 import { sellSilage, silageInventory } from "../src/sim/economy";
+import { silageInstantPrice } from "../src/sim/market";
 import { gameConfig } from "../src/config/gameConfig";
+import { minutesPerMonth } from "../src/sim/calendar";
 
 beforeAll(() => setProjection(15, "N"));
 
@@ -74,7 +78,7 @@ describe("which crops make silage", () => {
 
   it("maps forage to its product; nothing else has one any more", () => {
     const save = newGame();
-    expect(silageProductForField(fieldOf(save, 10, { id: "a", crop: "forage" }))).toBe("cornSilage");
+    expect(silageProductForField(fieldOf(save, 10, { id: "a", crop: "forage" }))).toBe("cornForage");
     expect(silageProductForField(fieldOf(save, 10, { id: "b", crop: "grassSilage" }))).toBeUndefined();
     expect(silageProductForField(fieldOf(save, 10, { id: "c", crop: "alfalfaSilage" }))).toBeUndefined();
     expect(silageProductForField(fieldOf(save, 10, { id: "d", crop: "soybeans" }))).toBeUndefined();
@@ -120,10 +124,27 @@ describe("chopping settles the field", () => {
     applyChopDone(f);
     expect(f.crop).toBeUndefined();
     expect(f.lastCrop).toBe("forage");
-    expect(f.status).toBe("stubble");
-    // Nothing to rake, bale or mulch — that's the difference from a combine.
+    // Settles to "harvested" (2026-08-14, maintainer request) — same texture
+    // a combine-harvested Corn field shows, just a month earlier while still
+    // green. Nothing to rake or bale either way (whole plant's gone); an
+    // optional Mulch pass is still available from "harvested" even with
+    // forageReady unset (see `canMulch`), it just earns no residue bonus.
+    expect(f.status).toBe("harvested");
     expect(f.forageReady).toBeUndefined();
     expect(f.residueBaled).toBe(true);
+  });
+
+  it("a chopped field can still take an optional Mulch pass, and doesn't owe one before plowing", () => {
+    const save = newGame();
+    const f = fieldOf(save, 10, { crop: "forage", forageReady: true });
+    applyChopDone(f);
+    // No rake/bale owed (nothing to gather), so plowing is free to skip
+    // mulching entirely — matches a Corn field that was never baled either.
+    expect(forageDue(save, f)).toBe(false);
+    expect(canPlow(f.status)).toBe(true);
+    // But Mulch is still offered, same as it would be on a harvested Corn
+    // field — `canMulch` only checks status + `!residueMulched`.
+    expect(canMulch(save, f)).toBe(true);
   });
 
   it("a perennial simply regrows, exactly as after baling", () => {
@@ -147,8 +168,8 @@ describe("the bunker", () => {
   it("takes ANY silage product — no assignment needed", () => {
     const save = newGame();
     buyBuildingAt(save, "silageBunker", [0, 0], "medium");
-    expect(storeSilage(save, "cornSilage", 100)).toBe(100);
-    expect(storeSilage(save, "haylage", 50)).toBe(50);
+    expect(storeSilage(save, "cornForage", 100)).toBe(100);
+    expect(storeSilage(save, "cornSilage", 50)).toBe(50);
     expect(silageStoredTons(save)).toBe(150);
   });
 
@@ -156,9 +177,9 @@ describe("the bunker", () => {
     const save = newGame();
     buyBuildingAt(save, "silageBunker", [0, 0], "small");
     const cap = bunkerCapacityOf("small");
-    expect(storeSilage(save, "cornSilage", cap + 500)).toBe(cap);
+    expect(storeSilage(save, "cornForage", cap + 500)).toBe(cap);
     expect(silageRoomTons(save)).toBe(0);
-    expect(storeSilage(save, "haylage", 10)).toBe(0);
+    expect(storeSilage(save, "cornSilage", 10)).toBe(0);
   });
 
   it("stores nothing with no bunker built", () => {
@@ -174,15 +195,115 @@ describe("the bunker", () => {
   });
 });
 
+describe("per-bunker product assignment is a REAL restriction (2026-08-15)", () => {
+  // Maintainer request: bunkers moved off one farm-wide pool to real
+  // per-building storage specifically so "dedicate this bunker to one
+  // product" could gate capacity for real, the way Bale Storage already
+  // does — not just a cosmetic label. Mirrors baleHaul.test.ts's "an
+  // assigned store only accepts its product" coverage for bales.
+  it("an assigned bunker refuses a different product outright", () => {
+    const save = newGame();
+    const bunker = buyBuildingAt(save, "silageBunker", [0, 0], "medium");
+    assignSilageBunkerProduct(save, bunker.id, "cornSilage");
+    expect(silageBunkerAccepts(bunker, "cornSilage")).toBe(true);
+    expect(silageBunkerAccepts(bunker, "cornForage")).toBe(false);
+    // haulSilageInto itself only enforces ROOM, trusting its caller already
+    // picked an eligible bunker (same contract as `haulBalesInto`) — the
+    // real refusal happens one level up, in `storeSilage`'s own filter.
+    expect(storeSilage(save, "cornForage", 50)).toBe(0);
+    expect(storedSilageTotal(bunker)).toBe(0);
+  });
+
+  it("storeSilage spreads across eligible bunkers, skipping ones assigned to something else", () => {
+    const save = newGame();
+    const forageOnly = buyBuildingAt(save, "silageBunker", [-100, -100], "small");
+    assignSilageBunkerProduct(save, forageOnly.id, "cornForage");
+    const anyBunker = buyBuildingAt(save, "silageBunker", [-120, -120], "small");
+
+    expect(storeSilage(save, "cornSilage", 100)).toBe(100);
+    expect(forageOnly.storedSilage?.cornSilage ?? 0).toBe(0); // wrong product — refused
+    expect(anyBunker.storedSilage?.cornSilage ?? 0).toBe(100);
+  });
+
+  it("an unassigned bunker keeps accepting anything (today's default, unchanged)", () => {
+    const save = newGame();
+    const bunker = buyBuildingAt(save, "silageBunker", [0, 0], "medium");
+    expect(silageBunkerAccepts(bunker, "cornSilage")).toBe(true);
+    expect(silageBunkerAccepts(bunker, "cornForage")).toBe(true);
+  });
+
+  it("nearestSilageBunkerFor skips a full or ineligible bunker for a farther eligible one", () => {
+    const save = newGame();
+    const near = buyBuildingAt(save, "silageBunker", [0, 0], "small");
+    assignSilageBunkerProduct(save, near.id, "cornForage"); // ineligible for cornSilage
+    const far = buyBuildingAt(save, "silageBunker", [10_000, 10_000], "small");
+    const picked = nearestSilageBunkerFor(save, "cornSilage", [0, 0]);
+    expect(picked?.id).toBe(far.id);
+  });
+
+  it("the chop relay routes to the assigned bunker, not just the nearest one", () => {
+    // End-to-end: a Forage Row-Crop Header + chopper + wagon relay should
+    // fill the ASSIGNED bunker even though an unassigned (or wrong-product)
+    // one sits closer to the field. The relay carries the FRESH product
+    // (cornForage) — see `chooseRelayDest`.
+    const save = silageFarm();
+    const wrongNearby = save.buildings.find((b) => b.kind === "silageBunker")!;
+    assignSilageBunkerProduct(save, wrongNearby.id, "cornSilage"); // the one silageFarm() already built, right by the field — wrong product
+    const correctFarther = buyBuildingAt(save, "silageBunker", [2000, 2000], "medium");
+    const field = fieldOf(save, 10);
+    enqueueTask(save, field, "chop", 0);
+    runTasks(save, 0, () => field.status === "harvested");
+    expect(wrongNearby.storedSilage?.cornForage ?? 0).toBe(0);
+    expect(correctFarther.storedSilage?.cornForage ?? 0).toBeGreaterThan(0);
+  });
+});
+
+describe("migrateLegacySilage (2026-08-15)", () => {
+  it("folds a pre-per-bunker save's pooled silage into the first bunker", () => {
+    const save = newGame();
+    const bunker = buyBuildingAt(save, "silageBunker", [0, 0], "large");
+    // Simulate a save written before this session's change (already on the
+    // current cornForage/cornSilage ids — the separate id-rename migration,
+    // `migrateLegacySilageProductNames`, runs before this one).
+    save.silage = { cornForage: 50, cornSilage: 300 };
+    migrateLegacySilage(save);
+    expect(bunker.storedSilage?.cornForage).toBe(50);
+    expect(bunker.storedSilage?.cornSilage).toBe(300);
+    expect(save.silage).toBeUndefined();
+  });
+
+  it("is a safe no-op on a save with nothing legacy to migrate", () => {
+    const save = newGame();
+    buyBuildingAt(save, "silageBunker", [0, 0], "medium");
+    expect(() => migrateLegacySilage(save)).not.toThrow();
+    expect(silageStoredTons(save)).toBe(0);
+  });
+
+  it("doesn't lose stock that doesn't fit in one bunker — spreads across all of them", () => {
+    const save = newGame();
+    const a = buyBuildingAt(save, "silageBunker", [0, 0], "small");
+    const b = buyBuildingAt(save, "silageBunker", [10, 10], "small");
+    const total = bunkerCapacityOf("small") * 2;
+    save.silage = { cornForage: 0, cornSilage: total };
+    migrateLegacySilage(save);
+    expect(storedSilageTotal(a) + storedSilageTotal(b)).toBe(total);
+  });
+});
+
 describe("selling silage", () => {
-  it("pays the per-ton price and empties the store", () => {
+  it("pays the INSTANT price (no season, pickup fee) and empties the store (2026-08-15)", () => {
+    // Was a flat config-listed price with no discount at all — repriced to
+    // match grain/bales' instant-vs-hauled structure now that silage has
+    // its own full Sell/Haul/Auto system (see `queueSellRun` for the hauled,
+    // full-seasonal-price alternative).
     const save = newGame();
     buyBuildingAt(save, "silageBunker", [0, 0], "medium");
     storeSilage(save, "cornSilage", 200);
     const before = save.money;
     const r = sellSilage(save, "cornSilage", 200, 0);
     expect(r.tons).toBe(200);
-    expect(r.revenue).toBe(200 * gameConfig.silageProducts.cornSilage.pricePerTon);
+    expect(r.revenue).toBe(Math.round(200 * silageInstantPrice("cornSilage")));
+    expect(r.revenue).toBeLessThan(200 * gameConfig.silageProducts.cornSilage.pricePerTon);
     expect(save.money).toBe(before + r.revenue);
     expect(silageStoredTons(save)).toBe(0);
   });
@@ -190,19 +311,77 @@ describe("selling silage", () => {
   it("clamps to what's actually stored", () => {
     const save = newGame();
     buyBuildingAt(save, "silageBunker", [0, 0], "medium");
-    storeSilage(save, "haylage", 30);
-    expect(sellSilage(save, "haylage", 999, 0).tons).toBe(30);
-    expect(sellSilage(save, "haylage", 10, 0).tons).toBe(0);
+    storeSilage(save, "cornForage", 30);
+    expect(sellSilage(save, "cornForage", 999, 0).tons).toBe(30);
+    expect(sellSilage(save, "cornForage", 10, 0).tons).toBe(0);
   });
 
   it("lists only products actually held", () => {
     const save = newGame();
     buyBuildingAt(save, "silageBunker", [0, 0], "medium");
-    storeSilage(save, "alfalfaHaylage", 40);
+    storeSilage(save, "cornForage", 40);
     const rows = silageInventory(save);
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.product).toBe("alfalfaHaylage");
+    expect(rows[0]!.product).toBe("cornForage");
     expect(rows[0]!.tons).toBe(40);
+  });
+});
+
+describe("tickSilageAging: Corn Forage ages into Corn Silage (2026-08-15)", () => {
+  const MONTH = minutesPerMonth();
+
+  it("does nothing before the aging window has passed", () => {
+    const save = newGame();
+    const bunker = buyBuildingAt(save, "silageBunker", [0, 0], "medium");
+    storeSilage(save, "cornForage", 100);
+    tickSilageAging(save, 0); // first tick just starts the clock
+    tickSilageAging(save, MONTH * (gameConfig.forage.silageAgingMonths - 0.1));
+    expect(bunker.storedSilage!.cornForage).toBe(100);
+    expect(bunker.storedSilage!.cornSilage ?? 0).toBe(0);
+  });
+
+  it("folds the whole balance into Corn Silage once the window passes", () => {
+    const save = newGame();
+    const bunker = buyBuildingAt(save, "silageBunker", [0, 0], "medium");
+    storeSilage(save, "cornForage", 100);
+    tickSilageAging(save, 0); // starts the clock
+    tickSilageAging(save, MONTH * gameConfig.forage.silageAgingMonths);
+    expect(bunker.storedSilage!.cornForage ?? 0).toBe(0);
+    expect(bunker.storedSilage!.cornSilage).toBe(100);
+  });
+
+  it("restarts the clock for silage that arrives after a conversion", () => {
+    const save = newGame();
+    const bunker = buyBuildingAt(save, "silageBunker", [0, 0], "large");
+    storeSilage(save, "cornForage", 100);
+    tickSilageAging(save, 0);
+    tickSilageAging(save, MONTH * gameConfig.forage.silageAgingMonths); // converts the first 100
+    storeSilage(save, "cornForage", 50); // a fresh batch arrives
+    tickSilageAging(save, MONTH * gameConfig.forage.silageAgingMonths); // starts the fresh clock, doesn't convert yet
+    expect(bunker.storedSilage!.cornForage).toBe(50);
+    expect(bunker.storedSilage!.cornSilage).toBe(100);
+    tickSilageAging(save, MONTH * gameConfig.forage.silageAgingMonths * 2);
+    expect(bunker.storedSilage!.cornForage ?? 0).toBe(0);
+    expect(bunker.storedSilage!.cornSilage).toBe(150);
+  });
+
+  it("clears the clock once a product sells down to zero — no stale aging on the next arrival", () => {
+    const save = newGame();
+    const bunker = buyBuildingAt(save, "silageBunker", [0, 0], "medium");
+    storeSilage(save, "cornForage", 10);
+    tickSilageAging(save, 0);
+    bunker.storedSilage!.cornForage = 0; // sold off entirely
+    tickSilageAging(save, MONTH * 0.5);
+    storeSilage(save, "cornForage", 10); // a fresh delivery
+    tickSilageAging(save, MONTH * 0.5); // starts a FRESH clock, not the old one
+    tickSilageAging(save, MONTH * (gameConfig.forage.silageAgingMonths - 0.1)); // still under the window since the restart
+    expect(bunker.storedSilage!.cornForage).toBe(10);
+    expect(bunker.storedSilage!.cornSilage ?? 0).toBe(0);
+  });
+
+  it("Corn Forage is the fresh product's display name; Corn Silage is the aged one (2026-08-15 id/name fix)", () => {
+    expect(gameConfig.silageProducts.cornForage.name).toBe("Corn Forage");
+    expect(gameConfig.silageProducts.cornSilage.name).toBe("Corn Silage");
   });
 });
 
@@ -301,11 +480,12 @@ describe("chopping end to end", () => {
     const save = silageFarm();
     const field = fieldOf(save, 20);
     enqueueTask(save, field, "chop", 0);
-    runTasks(save, 0, () => field.status === "stubble");
-    expect(field.status).toBe("stubble");
+    runTasks(save, 0, () => field.status === "harvested");
+    expect(field.status).toBe("harvested"); // 2026-08-14: settles like a combine harvest now, not straight to stubble
     // 20 ac x 20 t/ac = 400 t, less whatever is still in transit on a wagon.
     expect(silageStoredTons(save)).toBeGreaterThan(300);
-    expect(save.silage!.cornSilage).toBeGreaterThan(300);
+    const bunker = save.buildings.find((b) => b.kind === "silageBunker")!;
+    expect(bunker.storedSilage!.cornForage).toBeGreaterThan(300);
   });
 
   it("banks NO grain — chopping and combining are exclusive", () => {
@@ -324,7 +504,7 @@ describe("chopping end to end", () => {
     runTasks(save, 0, () => save.tasks.some((t) => t.type === "unloadHarvester" && !!t.agentId), 200_000);
     const relay = save.tasks.find((t) => t.type === "unloadHarvester");
     expect(relay?.cargoKind).toBe("silage");
-    expect(relay?.silageProduct).toBe("cornSilage");
+    expect(relay?.silageProduct).toBe("cornForage");
   });
 
   it("the wagon trails BEHIND the chopper while onloading, not beside it (2026-08-13)", () => {
@@ -456,7 +636,7 @@ describe("Forage has no combine route", () => {
 describe("silage balance", () => {
   it("forage grosses near grain corn — a real choice, not a free upgrade", () => {
     const grain = gameConfig.crops.corn.baseYieldTonsPerAcre * gameConfig.crops.corn.sellPricePerTon;
-    const silage = gameConfig.crops.forage.silageTonsPerAcre! * gameConfig.silageProducts.cornSilage.pricePerTon;
+    const silage = gameConfig.crops.forage.silageTonsPerAcre! * gameConfig.silageProducts.cornForage.pricePerTon;
     expect(silage).toBeGreaterThan(grain);        // more tonnage off the acre…
     expect(silage).toBeLessThan(grain * 1.3);     // …but not a landslide
   });
@@ -480,9 +660,14 @@ describe("silage balance", () => {
     }
   });
 
-  it("the chopper's buffer is tiny — it is not a tank", () => {
+  it("the chopper's buffer is small — it is not a tank", () => {
+    // Flat 5t at every size (2026-08-14, was 1.5/2/2.5 tiered) — still a
+    // fraction of even the smallest Forage Wagon (36t), just enough slack
+    // that the relay doesn't stall dead the instant a wagon's briefly out
+    // of position.
     for (const s of ["small", "medium", "large"] as const) {
-      expect(gameConfig.equipment.forageHarvester[s].capacityTons).toBeLessThan(5);
+      expect(gameConfig.equipment.forageHarvester[s].capacityTons).toBe(5);
+      expect(gameConfig.equipment.forageHarvester[s].capacityTons).toBeLessThan(gameConfig.equipment.forageWagon[s].capacityTons / 5);
     }
   });
 });

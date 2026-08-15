@@ -11,12 +11,14 @@
  * is one fixed size.
  */
 
-import { gameConfig, tonsPerBushel } from "../config/gameConfig";
+import { gameConfig, tonsPerBushel, SILAGE_PRODUCTS } from "../config/gameConfig";
 import type { CropId, EquipmentSize, BaleProduct, SilageProduct } from "../config/gameConfig";
 import type { BuildingKind, Building, SaveState } from "../state/saveState";
 import type { Meters } from "../geo/coords";
+import type { SimTime } from "./clock";
 import { recordCash } from "./ledger";
 import { minutesPerMonth } from "./calendar";
+import { agedSilageProductFor } from "./farming";
 
 const seq: Record<string, number> = {};
 const nextId = (prefix: string) => `${prefix}-${(seq[prefix] = (seq[prefix] ?? 0) + 1)}`;
@@ -204,12 +206,24 @@ export function haulBalesInto(building: Building, product: BaleProduct, n: numbe
 }
 
 // ---------------------------------------------------------------------------
-// SILAGE BUNKERS (2026-07-31, Phase 2)
+// SILAGE BUNKERS
 //
-// Deliberately the SIMPLEST storage in the game (maintainer decision: "treat
-// it more like a silo for now"). Capacity in tons, pooled farm-wide across
-// every bunker, no per-product assignment and no spoilage — a bunker is
-// assumed sealed and packed. Cover/feed-out mechanics are a later slice.
+// Real per-building storage (2026-08-15, maintainer request — "make it a
+// real per-bunker restriction"), mirroring bale storage below rather than a
+// silo: a silo's "assign a crop" only gates SHARED CAPACITY while the actual
+// tonnage stays one farm-wide pool per crop — fine for grain, since an
+// unassigned silo holds nothing for anyone and so never double-books real
+// volume. A bunker's default has always been "accepts anything" (no
+// assignment step to use one), and that couldn't carry over to a
+// capacity-gate model: an unassigned bunker would need to count toward
+// EVERY product's capacity at once, which double-counts the same physical
+// space the moment two different products actually sit in it. Per-building
+// `storedSilage` (like `storedBales`) avoids that: a bunker's room is real
+// square footage, not a shared number products race for.
+//
+// Was Phase 2's deliberate simplification ("treat it more like a silo for
+// now" — one farm-wide pool, no assignment, no spoilage). Spoilage is still
+// out of scope (a bunker is assumed sealed and packed); assignment isn't.
 // ---------------------------------------------------------------------------
 
 /** Tons one bunker of this tier holds. */
@@ -217,39 +231,221 @@ export function bunkerCapacityOf(size: EquipmentSize): number {
   return gameConfig.buildings.silageBunker[size].capacityTons;
 }
 
-/** Total silage capacity across every bunker on the farm, tons. Unlike silos
- * this is NOT per-product: a bunker takes whatever's tipped into it. */
+/** Total silage capacity across every bunker on the farm, tons — the whole
+ * physical footprint, regardless of assignment (matches the Inventory
+ * tab's farm-wide "X / Y t" summary). */
 export function silageCapacityTons(save: SaveState): number {
   return save.buildings
     .filter((b) => b.kind === "silageBunker")
     .reduce((sum, b) => sum + bunkerCapacityOf(b.size ?? "small"), 0);
 }
 
-/** Tons of silage currently stored, all products. */
-export function silageStoredTons(save: SaveState): number {
-  if (!save.silage) return 0;
-  return (Object.values(save.silage) as number[]).reduce((a, b) => a + b, 0);
+/** Tons of silage physically stored in one bunker, summed across products. */
+export function storedSilageTotal(building: Building): number {
+  const s = building.storedSilage;
+  if (!s) return 0;
+  let n = 0;
+  for (const k in s) n += s[k as SilageProduct] ?? 0;
+  return n;
 }
 
-/** Room left in the farm's bunkers, tons. */
+/** Free tons in one bunker. */
+export function silageBunkerRoom(building: Building): number {
+  if (building.kind !== "silageBunker") return 0;
+  return bunkerCapacityOf(building.size ?? "small") - storedSilageTotal(building);
+}
+
+/** Can this bunker take `product`? Unassigned bunkers accept anything (and
+ * may then hold a mix); an assigned one only its one product — same rule as
+ * `baleStorageAccepts`. */
+export function silageBunkerAccepts(building: Building, product: SilageProduct): boolean {
+  return building.kind === "silageBunker" && (building.assignedProduct === undefined || building.assignedProduct === product);
+}
+
+/** Tons of silage currently stored, all bunkers, all products. */
+export function silageStoredTons(save: SaveState): number {
+  return save.buildings.filter((b) => b.kind === "silageBunker").reduce((sum, b) => sum + storedSilageTotal(b), 0);
+}
+
+/** Room left across the farm's bunkers, tons. */
 export function silageRoomTons(save: SaveState): number {
   return Math.max(0, silageCapacityTons(save) - silageStoredTons(save));
 }
 
-/** Put silage into the bunkers, capped by room. Returns the tons ACCEPTED, so
- * the caller can reroute (or hold) whatever wouldn't fit — same contract as
- * `haulBalesInto`. */
-export function storeSilage(save: SaveState, product: SilageProduct, tons: number): number {
-  const accepted = Math.min(Math.max(0, tons), silageRoomTons(save));
-  if (accepted <= 0) return 0;
-  save.silage ??= { cornSilage: 0, haylage: 0, alfalfaHaylage: 0 };
-  save.silage[product] = (save.silage[product] ?? 0) + accepted;
+/** The bunker nearest `from` that accepts `product` and has room — where a
+ * chop-relay wagon or a Sell run picks up/drops off (mirrors
+ * `nearestBaleStorageFor`). The caller re-checks room right before dumping
+ * (it can fill in between). */
+export function nearestSilageBunkerFor(save: SaveState, product: SilageProduct, from: Meters): Building | undefined {
+  let best: Building | undefined;
+  let bestD = Infinity;
+  for (const b of save.buildings) {
+    if (!silageBunkerAccepts(b, product) || silageBunkerRoom(b) <= 0) continue;
+    const d = Math.hypot(b.pos[0] - from[0], b.pos[1] - from[1]);
+    if (d < bestD) {
+      bestD = d;
+      best = b;
+    }
+  }
+  return best;
+}
+
+/** Move up to `tons` of `product` into `building`, clamped to its free room.
+ * Returns how many tons actually landed — same contract as `haulBalesInto`. */
+export function haulSilageInto(building: Building, product: SilageProduct, tons: number): number {
+  const added = Math.max(0, Math.min(tons, silageBunkerRoom(building)));
+  if (added <= 0) return 0;
+  const s = (building.storedSilage ??= {});
+  s[product] = (s[product] ?? 0) + added;
+  return added;
+}
+
+/**
+ * Put silage into the farm's bunkers, spreading across every eligible one
+ * with room (nearest-first if `from` is given, else building order) rather
+ * than requiring the caller to pick one — the farm-wide convenience most
+ * callers actually want. Returns the tons ACCEPTED overall, so the caller
+ * can reroute (or hold) whatever wouldn't fit anywhere — same contract as
+ * `haulBalesInto`/`haulSilageInto`.
+ */
+export function storeSilage(save: SaveState, product: SilageProduct, tons: number, from?: Meters): number {
+  let left = Math.max(0, tons);
+  if (left <= 0) return 0;
+  const bunkers = save.buildings
+    .filter((b) => silageBunkerAccepts(b, product) && silageBunkerRoom(b) > 0)
+    .sort((a, b) => (from ? Math.hypot(a.pos[0] - from[0], a.pos[1] - from[1]) - Math.hypot(b.pos[0] - from[0], b.pos[1] - from[1]) : 0));
+  let accepted = 0;
+  for (const b of bunkers) {
+    if (left <= 0) break;
+    const got = haulSilageInto(b, product, left);
+    left -= got;
+    accepted += got;
+  }
   return accepted;
 }
 
-/** The bunker nearest `from`, or undefined if the farm has none. */
-export function nearestBunker(save: SaveState, from: Meters): Building | undefined {
-  return nearestOfKind(save, "silageBunker", from);
+/**
+ * Ages fresh Corn Forage into cured Corn Silage once it's sat
+ * `forage.silageAgingMonths` without moving — mirrors `tickBaleAging`'s
+ * per-building clock (same "whole pile, not true per-arrival batches"
+ * tradeoff as `spoilAccrued`): the clock is per (bunker, product) and
+ * starts the first tick that pile is noticed non-empty, restarting
+ * whenever it's fully converted or sold/hauled down to zero.
+ */
+export function tickSilageAging(save: SaveState, now: SimTime): void {
+  for (const b of save.buildings) {
+    if (b.kind !== "silageBunker" || !b.storedSilage) continue;
+    for (const product of SILAGE_PRODUCTS) {
+      if (product === "cornSilage") continue; // already the aged-into product
+      const tons = b.storedSilage[product] ?? 0;
+      if (tons <= 1e-9) {
+        if (b.silageAgingStartedAt) delete b.silageAgingStartedAt[product];
+        continue;
+      }
+      const startedAt = (b.silageAgingStartedAt ??= {})[product];
+      if (startedAt === undefined) {
+        b.silageAgingStartedAt[product] = now;
+        continue;
+      }
+      const months = (now - startedAt) / minutesPerMonth();
+      if (months < gameConfig.forage.silageAgingMonths) continue;
+      delete b.storedSilage[product];
+      b.storedSilage.cornSilage = (b.storedSilage.cornSilage ?? 0) + tons;
+      delete b.silageAgingStartedAt[product];
+    }
+  }
+}
+
+/** Assign (or clear, with `undefined`) which product a Silage Bunker is
+ * dedicated to. Throws if the building isn't a bunker. */
+export function assignSilageBunkerProduct(save: SaveState, buildingId: string, product: SilageProduct | undefined): void {
+  const building = save.buildings.find((b) => b.id === buildingId);
+  if (!building) throw new Error(`Building ${buildingId} not found`);
+  if (building.kind !== "silageBunker") throw new Error(`${BUILDING_NAME[building.kind]} can't be assigned a product`);
+  building.assignedProduct = product;
+}
+
+/**
+ * One-time migration (2026-08-15): fold the old farm-wide pooled
+ * `save.silage` into the farm's bunkers, so a save from before per-building
+ * storage doesn't just lose whatever tonnage it was holding. Spreads via
+ * the same nearest/eligible logic `storeSilage` already uses; if the total
+ * doesn't fit (a legacy pool bigger than current bunker capacity, or no
+ * bunker at all), whatever's left over is DROPPED rather than left in
+ * `save.silage` forever — whole-hearted, not silently reintroducing the
+ * pool as a shadow second copy of the truth. Call once, right after a save
+ * loads; no-ops instantly on every tick after (nothing left to migrate).
+ */
+export function migrateLegacySilage(save: SaveState): void {
+  if (!save.silage) return;
+  for (const product of SILAGE_PRODUCTS) {
+    const tons = save.silage[product] ?? 0;
+    if (tons > 1e-9) storeSilage(save, product, tons);
+  }
+  save.silage = undefined;
+  save.silageAging = undefined;
+}
+
+/** Silage product ids retired 2026-08-15, when the id/name RELATIONSHIP was
+ * fixed (the old ids had it backwards from their own display names — id
+ * "cornSilage" displayed as "Corn Forage") → what they became. Order
+ * matters: "cornSilage" is processed before "silage" so the OLD cornSilage
+ * value is moved out of that key before the SAME key becomes the new home
+ * for the old "silage" value — see `migrateLegacySilageProductNames`, which
+ * relies on `Object.keys` preserving this literal's insertion order.
+ * "haylage"/"alfalfaHaylage" have no entry — confirmed dead (no crop ever
+ * set one), so there's nothing that could be sitting in a save to remap. */
+const RETIRED_SILAGE_PRODUCT: Record<string, SilageProduct> = {
+  cornSilage: "cornForage",
+  silage: "cornSilage",
+};
+
+/** Move any value at a retired key in `rec` onto its new key, summing if the
+ * new key already holds something (shouldn't normally happen, but a save
+ * could theoretically have picked up a fresh "cornForage" delivery in the
+ * instant between migrations). No-ops if `rec` is undefined. */
+function remapRetiredSilageKeys(rec: Partial<Record<string, number>> | undefined): void {
+  if (!rec) return;
+  for (const oldId of Object.keys(RETIRED_SILAGE_PRODUCT)) {
+    const v = rec[oldId];
+    if (v === undefined) continue;
+    delete rec[oldId];
+    const newId = RETIRED_SILAGE_PRODUCT[oldId]!;
+    rec[newId] = (rec[newId] ?? 0) + v;
+  }
+}
+
+/**
+ * One-time migration (2026-08-15): rewrite every place a retired silage
+ * product id could be sitting in a save — the legacy pooled `save.silage`
+ * (before `migrateLegacySilage` consumes it, so it distributes under the
+ * CURRENT ids), a bunker's per-building counts/aging-clock (for a save
+ * already on per-building storage from earlier the same day), an
+ * assigned-product dedication, a Forage Wagon's cargo tag, or an in-flight
+ * chop-relay/sell task's product. Call before `migrateLegacySilage`.
+ */
+export function migrateLegacySilageProductNames(save: SaveState): void {
+  remapRetiredSilageKeys(save.silage as Partial<Record<string, number>> | undefined);
+  for (const b of save.buildings) {
+    remapRetiredSilageKeys(b.storedSilage);
+    remapRetiredSilageKeys(b.silageAgingStartedAt as Partial<Record<string, number>> | undefined);
+    if (b.assignedProduct !== undefined && b.assignedProduct in RETIRED_SILAGE_PRODUCT) {
+      b.assignedProduct = RETIRED_SILAGE_PRODUCT[b.assignedProduct];
+    }
+  }
+  for (const i of save.implements) {
+    if (i.cargoSilage !== undefined && i.cargoSilage in RETIRED_SILAGE_PRODUCT) {
+      i.cargoSilage = RETIRED_SILAGE_PRODUCT[i.cargoSilage];
+    }
+  }
+  for (const t of save.tasks) {
+    if (t.silageProduct !== undefined && t.silageProduct in RETIRED_SILAGE_PRODUCT) {
+      t.silageProduct = RETIRED_SILAGE_PRODUCT[t.silageProduct];
+    }
+    if (t.sellProduct !== undefined && t.sellProduct in RETIRED_SILAGE_PRODUCT) {
+      t.sellProduct = RETIRED_SILAGE_PRODUCT[t.sellProduct];
+    }
+  }
 }
 
 /** Fraction of a bale store's contents lost per month to rot (2026-07-25). */
@@ -300,6 +496,13 @@ export function tickBaleSpoilage(save: SaveState, dtMinutes: number): void {
     if (!isBaleStorage(b.kind)) continue;
     if (!b.storedBales) continue;
     for (const key of Object.keys(b.storedBales) as BaleProduct[]) {
+      // A retired/unknown id the migrations didn't catch (2026-08-15: this
+      // loop reads whatever raw keys are actually sitting in the save, unlike
+      // every other bale reader in the app, which iterates the CURRENT valid
+      // product list instead — see `tickBaleAging`'s `agedSilageProductFor`
+      // for the safe pattern). Skip rather than crash the whole tick loop on
+      // it; the pile just sits unrotted and unsold until something remaps it.
+      if (!(key in gameConfig.baleProducts)) continue;
       // Per-PRODUCT, not per-building: wrapped bales keep almost indefinitely
       // wherever they're stacked, so the rate has to be resolved inside the
       // loop rather than once for the whole store.
@@ -321,6 +524,43 @@ export function tickBaleSpoilage(save: SaveState, dtMinutes: number): void {
         if (b.spoilAccrued) delete b.spoilAccrued[key];
       } else {
         (b.spoilAccrued ??= {})[key] = remainder;
+      }
+    }
+  }
+}
+
+/**
+ * Ages wrapped bales already sitting in a Bale Storage Barn/Area into their
+ * Aged Baleage twin after `forage.silageAgingMonths`
+ * (2026-08-14) — mirrors `tickSilageAging`'s bunker mechanic and its same
+ * tradeoff: `storedBales` is a single pooled count per product per building,
+ * not true per-arrival batches, so the clock is per (building, product) and
+ * starts the first tick that pile is noticed non-empty, restarting whenever
+ * it's emptied out (hauled off, sold, or already fully aged).
+ */
+export function tickBaleAging(save: SaveState, now: SimTime): void {
+  for (const b of save.buildings) {
+    if (!isBaleStorage(b.kind) || !b.storedBales) continue;
+    for (const product of Object.keys(b.storedBales) as BaleProduct[]) {
+      const aged = agedSilageProductFor(product);
+      const n = b.storedBales[product] ?? 0;
+      if (!aged || n <= 0) {
+        if (b.baleAgingStartedAt) delete b.baleAgingStartedAt[product];
+        continue;
+      }
+      const startedAt = (b.baleAgingStartedAt ??= {})[product];
+      if (startedAt === undefined) {
+        b.baleAgingStartedAt[product] = now;
+        continue;
+      }
+      const months = (now - startedAt) / minutesPerMonth();
+      if (months < gameConfig.forage.silageAgingMonths) continue;
+      delete b.storedBales[product];
+      b.storedBales[aged] = (b.storedBales[aged] ?? 0) + n;
+      delete b.baleAgingStartedAt[product];
+      if (b.spoilAccrued?.[product] !== undefined) {
+        b.spoilAccrued[aged] = (b.spoilAccrued[aged] ?? 0) + b.spoilAccrued[product]!;
+        delete b.spoilAccrued[product];
       }
     }
   }

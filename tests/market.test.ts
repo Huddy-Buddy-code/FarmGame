@@ -2,11 +2,12 @@ import { describe, it, expect, beforeAll } from "vitest";
 import {
   peakSaleMonth, seasonalMultiplier, seasonalBonus, grainUnitPrice, baleUnitPrice,
   SELLABLE_GRAINS, SELLABLE_BALES, grainInstantPrice,
-  ALL_MARKET_PRODUCTS, effectiveSellPlan,
+  ALL_MARKET_PRODUCTS, effectiveSellPlan, AUTO_SELL_HOLDS_UNTIL_AGED,
 } from "../src/sim/market";
 import { tickAutoSell } from "../src/sim/economy";
 import { ensureAgents, buyImplement } from "../src/sim/tasks";
 import { buyBuildingAt } from "../src/sim/buildings";
+import type { Building } from "../src/state/saveState";
 import { newGame } from "../src/state/saveState";
 import { minutesPerMonth, setDaysPerMonth } from "../src/sim/calendar";
 import { setProjection } from "../src/geo/coords";
@@ -68,12 +69,82 @@ describe("sellable product lists", () => {
   it("grains exclude the perennial forage crops", () => {
     expect(SELLABLE_GRAINS).toEqual(["corn", "soybeans", "wheat", "rye", "oats", "barley", "canola", "sunflowers"]);
   });
-  it("bales exclude the unreachable forage product, and include the square variants", () => {
-    expect(SELLABLE_BALES).toEqual([
+  it("includes every real bale product — the unreachable 'forage' one was removed outright (2026-08-15)", () => {
+    // Derived from `gameConfig.baleProducts` (2026-08-14 fix) rather than
+    // hand-listed — the hardcoded list this replaced silently missed every
+    // wrapped/baleage product ever added (7 of them), which meant a Bale
+    // Storage building holding nothing BUT baleage showed "Empty" in the
+    // Inventory tab despite a real non-zero count, and auto-sell never
+    // covered wrapped bales at all (`ALL_MARKET_PRODUCTS` is built from this
+    // list too). Spot-check the exact products that were missing, not just
+    // the ones that happened to already be there.
+    //
+    // The "…Unwrapped" quad and "forage" itself are GONE from the config
+    // now (product-list cleanup, 2026-08-15) rather than filtered out here —
+    // see the BaleProduct union's comment.
+    expect(SELLABLE_BALES).toEqual(expect.arrayContaining([
       "cornStover", "straw", "hay", "alfalfaHay",
       "strawSquare", "haySquare", "alfalfaHaySquare",
-    ]);
-    expect(SELLABLE_BALES).not.toContain("forage");
+      "hayBaleage", "alfalfaBaleage", "haySquareBaleage", "alfalfaHaySquareBaleage",
+      "hayBaleageAged", "alfalfaBaleageAged", "haySquareBaleageAged", "alfalfaHaySquareBaleageAged",
+    ]));
+    // Every key in gameConfig.baleProducts is accounted for — no filter left.
+    expect(SELLABLE_BALES).toHaveLength(Object.keys(gameConfig.baleProducts).length);
+  });
+
+  it("auto-sell excludes fresh wrapped baleage, but still includes it manually and once aged (2026-08-14)", () => {
+    for (const p of ["hayBaleage", "alfalfaBaleage", "haySquareBaleage", "alfalfaHaySquareBaleage"] as const) {
+      expect(SELLABLE_BALES).toContain(p); // still sellable by hand from Inventory
+      expect(ALL_MARKET_PRODUCTS).not.toContain(p); // but auto-sell skips it
+    }
+    // Its own crop-specific Aged Baleage twin IS covered — "just sell them
+    // when they age" is the whole point, not "never auto-sell baleage".
+    expect(ALL_MARKET_PRODUCTS).toContain("hayBaleageAged");
+    expect(ALL_MARKET_PRODUCTS).toContain("alfalfaBaleageAged");
+    expect(ALL_MARKET_PRODUCTS).toContain("haySquareBaleageAged");
+    expect(ALL_MARKET_PRODUCTS).toContain("alfalfaHaySquareBaleageAged");
+  });
+
+  it("auto-sell holds fresh Corn Forage until it ages into Corn Silage (2026-08-15)", () => {
+    expect(ALL_MARKET_PRODUCTS).not.toContain("cornForage"); // auto-sell skips the fresh-chopped form
+    // Its cured bunker product IS covered.
+    expect(ALL_MARKET_PRODUCTS).toContain("cornSilage");
+  });
+});
+
+describe("auto-sell holds fresh wrapped baleage until it ages into Silage (2026-08-14)", () => {
+  function baleAreaWith(product: string, n: number): Building {
+    return { id: "b1", kind: "baleArea", pos: [0, 0], storedBales: { [product]: n } } as Building;
+  }
+
+  it("the farm-wide master toggle does not sell hayBaleage", () => {
+    const save = newGame();
+    save.buildings.push(baleAreaWith("hayBaleage", 10));
+    save.sellAll = { month: 11, auto: true };
+    save.sellLastMonthAbs = 8;
+    tickAutoSell(save, 9 * minutesPerMonth()); // cross into Dec
+    expect(save.buildings[0]!.storedBales!.hayBaleage).toBe(10); // untouched
+  });
+
+  it("an explicit per-product override on hayBaleage still doesn't sell it", () => {
+    // AUTO_SELL_HOLDS_UNTIL_AGED is enforced in `ALL_MARKET_PRODUCTS` itself,
+    // which `tickAutoSell` iterates — so even a product with its OWN "auto"
+    // row set can't reach a sale; there's no override path around the hold.
+    const save = newGame();
+    save.buildings.push(baleAreaWith("hayBaleage", 10));
+    save.sellSchedule = { hayBaleage: { month: 11, auto: true } };
+    save.sellLastMonthAbs = 8;
+    tickAutoSell(save, 9 * minutesPerMonth());
+    expect(save.buildings[0]!.storedBales!.hayBaleage).toBe(10);
+  });
+
+  it("the same master toggle DOES sell it once it's aged into hayBaleageAged", () => {
+    const save = newGame();
+    save.buildings.push(baleAreaWith("hayBaleageAged", 10));
+    save.sellAll = { month: 11, auto: true };
+    save.sellLastMonthAbs = 8;
+    tickAutoSell(save, 9 * minutesPerMonth());
+    expect(save.buildings[0]!.storedBales!.hayBaleageAged ?? 0).toBe(0);
   });
 });
 

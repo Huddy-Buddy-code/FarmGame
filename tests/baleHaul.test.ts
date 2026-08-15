@@ -167,12 +167,17 @@ describe("Bale hauling relay (maintainer request, 2026-07-17)", () => {
     const task = queueHaulBales(save, field.id)!;
     let recruitedTrailer = false;
     let trailerCarried = false;
+    // Finer polling step (2026-08-14: tickAgent's per-tick transition cap was
+    // raised 50->500 for the Skip Month montage fix) — the default 30-min
+    // step can now drain the whole trailer-carries-then-unloads cycle inside
+    // a single tick, so a coarser poll could miss ever observing cargoBales
+    // > 0 even though the relay ran correctly.
     runTasks(save, APRIL_1, () => {
       if (task.trailerAgentId) recruitedTrailer = true;
       const trailer = save.implements.find((i) => i.kind === "baleTrailer");
       if ((trailer?.cargoBales ?? 0) > 0) trailerCarried = true;
       return noHaulLeft(save, field)();
-    });
+    }, 400_000, 5);
 
     expect(recruitedTrailer).toBe(true); // the spare tractor was pulled in
     expect(trailerCarried).toBe(true); // the trailer actually hauled bales

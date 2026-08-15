@@ -23,9 +23,11 @@ import type { Map as MlMap, GeoJSONSource, LayerSpecification } from "maplibre-g
 import type { Feature, FeatureCollection, Point } from "geojson";
 
 import { toLngLat } from "../geo/coords";
+import type { Meters } from "../geo/coords";
 import type { Field } from "../state/saveState";
 import type { BaleProduct } from "../config/gameConfig";
 import { gameConfig } from "../config/gameConfig";
+import { baleageProductFor } from "../sim/farming";
 import { baleIconSvg, squareBaleIconSvg } from "../ui/icons";
 
 export const BALE_SOURCE_ID = "bales";
@@ -33,7 +35,7 @@ export const BALE_LAYER_ID = "bales";
 
 /** Rasterized icon size, CSS px (drawn at 2x — see ICON_PIXEL_RATIO). Matches
  * the 14 px the DOM markers used, so bales stay the size players know. */
-const ICON_PX = 14;
+export const ICON_PX = 14;
 const ICON_PIXEL_RATIO = 2;
 
 /**
@@ -44,28 +46,48 @@ const ICON_PIXEL_RATIO = 2;
  */
 export const MAX_BALE_FEATURES = 25_000;
 
-/** What a field's dropped bales ARE — drives the icon shape and tint. */
+/** What a field's dropped (UNWRAPPED) bales ARE — drives the icon shape and
+ * tint for `baleLocations`. */
 export function baleProductOf(field: Field): BaleProduct {
   return field.baleProduct ?? "cornStover";
 }
 
+/** What a field's ALREADY-WRAPPED bales are (2026-08-14) — drives the icon
+ * for `wrappedBaleLocations`, the pile the Wrap task has sealed so far.
+ * Derived, not stored (see the Field.wrappedBaleLocations comment): falls
+ * back to the unwrapped product itself if it somehow isn't wrappable (should
+ * never happen — nothing pushes into `wrappedBaleLocations` for a product
+ * `baleageProductFor` refuses), so a bad state still draws SOMETHING rather
+ * than silently dropping those points. */
+export function wrappedBaleProductOf(field: Field): BaleProduct {
+  const product = baleProductOf(field);
+  return baleageProductFor(product) ?? product;
+}
+
 /**
- * Every dropped bale on the farm as one point FeatureCollection. Pure — no map,
- * no DOM — so the feature-building rules are unit-testable.
+ * Every dropped bale on the farm as one point FeatureCollection — both the
+ * still-unwrapped pile and the already-sealed one, each with its own product
+ * (and so its own icon), which is what lets a field mid-wrap show a genuine
+ * mix of green and white bales (2026-08-14). Pure — no map, no DOM — so the
+ * feature-building rules are unit-testable.
  */
 export function baleFeatureCollection(fields: Field[]): FeatureCollection<Point> {
   const features: Feature<Point>[] = [];
   for (const field of fields) {
-    const locs = field.baleLocations ?? [];
-    if (locs.length === 0) continue;
-    const product = baleProductOf(field);
-    for (const p of locs) {
-      if (features.length >= MAX_BALE_FEATURES) return { type: "FeatureCollection", features };
-      features.push({
-        type: "Feature",
-        properties: { product },
-        geometry: { type: "Point", coordinates: toLngLat(p) },
-      });
+    const pools: Array<[Meters[] | undefined, BaleProduct]> = [
+      [field.baleLocations, baleProductOf(field)],
+      [field.wrappedBaleLocations, wrappedBaleProductOf(field)],
+    ];
+    for (const [locs, product] of pools) {
+      if (!locs || locs.length === 0) continue;
+      for (const p of locs) {
+        if (features.length >= MAX_BALE_FEATURES) return { type: "FeatureCollection", features };
+        features.push({
+          type: "Feature",
+          properties: { product },
+          geometry: { type: "Point", coordinates: toLngLat(p) },
+        });
+      }
     }
   }
   return { type: "FeatureCollection", features };
@@ -73,14 +95,17 @@ export function baleFeatureCollection(fields: Field[]): FeatureCollection<Point>
 
 /**
  * A cheap change key for the whole bale picture: which fields have how many
- * bales, of what product. `setData` re-parses and re-uploads the entire
- * collection, so it must only run when something actually moved.
+ * bales, of what product, in each of the two piles. `setData` re-parses and
+ * re-uploads the entire collection, so it must only run when something
+ * actually moved.
  */
 export function baleStateKey(fields: Field[]): string {
   const parts: string[] = [];
   for (const field of fields) {
     const n = field.baleLocations?.length ?? 0;
     if (n > 0) parts.push(`${field.id}:${n}:${baleProductOf(field)}`);
+    const w = field.wrappedBaleLocations?.length ?? 0;
+    if (w > 0) parts.push(`${field.id}:w${w}:${wrappedBaleProductOf(field)}`);
   }
   return parts.join("|");
 }
@@ -156,6 +181,11 @@ export function baleSymbolLayer(): LayerSpecification {
       "icon-size": ["interpolate", ["linear"], ["zoom"], 13, 0.35, 16, 0.75, 19, 1.4],
       "icon-allow-overlap": true,
       "icon-ignore-placement": true,
+      // Nudged up 25% of the icon's own height (maintainer request,
+      // 2026-08-14) — in icon-pixel units (ICON_PX), so it scales with
+      // icon-size automatically rather than needing its own zoom stops.
+      // Negative Y is UP per the style spec.
+      "icon-offset": [0, -ICON_PX * 0.25],
     },
   };
 }

@@ -215,28 +215,29 @@ export interface HeadlandConfig {
   order: "first" | "last";
 }
 export const TASK_HEADLANDS: Partial<Record<TaskType, HeadlandConfig>> = {
-  // 3, not 6 (maintainer report, 2026-07-25: "too many now with the new
-  // widths"). The count was set when a Large plow was 20 ft, so six laps was a
-  // 37 m border; at the realistic 50 ft it became 91 m — on a 40-acre square
-  // that's nearly half the field driven as headland before the interior fill
-  // starts. Three laps at 50 ft is 46 m, which reads as a border again.
+  // 2 laps everywhere (maintainer request, 2026-08-14 — was 3 for most
+  // passes, 1 for fertilize/weed; unified down/up to 2). Originally 3 (was 6
+  // before that, 2026-07-25 report: "too many now with the new widths" — a
+  // Large plow's headland went from a 37 m border at 20 ft to 91 m at the
+  // realistic 50 ft, nearly half a 40-acre field driven as headland before
+  // the interior fill started).
   //
   // Texture and reveal need no separate change: `headlandLapsForStatus`
   // (field/fieldRender.ts) reads this table for the frame it paints, and the
   // reveal stamps along the coverage path built from it, so both follow.
-  plow: { laps: 3, order: "last" },
-  plant: { laps: 3, order: "last" },
-  fertilize: { laps: 1, order: "last" },
-  weed: { laps: 1, order: "last" },
-  mow: { laps: 3, order: "first" },
-  mulch: { laps: 3, order: "first" },
-  rake: { laps: 3, order: "first" },
-  bale: { laps: 3, order: "first" },
+  plow: { laps: 2, order: "last" },
+  plant: { laps: 2, order: "last" },
+  fertilize: { laps: 2, order: "last" },
+  weed: { laps: 2, order: "last" },
+  mow: { laps: 2, order: "first" },
+  mulch: { laps: 2, order: "first" },
+  rake: { laps: 2, order: "first" },
+  bale: { laps: 2, order: "first" },
   // The wrapper follows the bale line the baler already laid down, so it drives
   // the same shape of route.
-  wrap: { laps: 3, order: "first" },
-  harvest: { laps: 3, order: "first" },
-  chop: { laps: 3, order: "first" }, // the silage counterpart of a harvest pass
+  wrap: { laps: 2, order: "first" },
+  harvest: { laps: 2, order: "first" },
+  chop: { laps: 2, order: "first" }, // the silage counterpart of a harvest pass
 };
 
 /** Trace up to `laps` ring CENTERLINES, one implement-width apart, the first

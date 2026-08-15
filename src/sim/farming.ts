@@ -55,14 +55,86 @@ export function baleProductForField(field: Field, square = false): BaleProduct {
   return square ? (SQUARE_OF[round] ?? round) : round;
 }
 
-/** The square-baled twin of each round product (2026-07-24). Corn stover and
- * the unreachable "forage" have none — nothing makes them any more — so a
- * square baler on those falls back to the round product. */
+/** The square-baled twin of each round product (2026-07-24). Corn stover has
+ * none — nothing makes it any heavier — so a square baler on it falls back
+ * to the round product. Covers the Silage crops too (grassSilage/
+ * alfalfaSilage share plain Grass/Alfalfa's "hay"/"alfalfaHay" id — see the
+ * BaleProduct union's comment, sim/config/gameConfig.ts), so no separate
+ * entries are needed for them. */
 const SQUARE_OF: Partial<Record<BaleProduct, BaleProduct>> = {
   hay: "haySquare",
   alfalfaHay: "alfalfaHaySquare",
   straw: "strawSquare",
 };
+
+/** Product ids retired at various points on 2026-08-15 → what they became.
+ * Keyed as plain strings, not `BaleProduct`, since a loaded save's JSON
+ * isn't validated against the current type — these ids no longer typecheck
+ * as members of it, which is exactly why a save written before the retiring
+ * commit needs remapping rather than just reading fine on its own.
+ *
+ * The Silage crops' one-day-old "unwrapped" bale ids (cut as
+ * pricing-identical duplicates of the plain hay ones — see the BaleProduct
+ * union's comment, config/gameConfig.ts):
+ *   grassRoundbaleUnwrapped/alfalfaRoundbaleUnwrapped + square twins -> hay
+ *
+ * The generic aged-silage bucket (cut when aging was made crop-specific —
+ * same comment): "silageBale"/"silageBaleSquare" averaged grass and
+ * alfalfa baleage together, so there's no way to recover which crop a
+ * legacy one actually was. Defaults to the grass twin — an arbitrary but
+ * harmless choice; a save old enough to hit this is already an edge case. */
+const RETIRED_BALE_PRODUCT: Record<string, BaleProduct> = {
+  grassRoundbaleUnwrapped: "hay",
+  alfalfaRoundbaleUnwrapped: "alfalfaHay",
+  grassSquareBaleUnwrapped: "haySquare",
+  alfalfaSquareBaleUnwrapped: "alfalfaHaySquare",
+  silageBale: "hayBaleageAged",
+  silageBaleSquare: "haySquareBaleageAged",
+};
+
+/**
+ * One-time migration (2026-08-15): rewrite every place a retired bale
+ * product id could be sitting in a save — a field's pile, a storage
+ * building's counts, a trailer's cargo tag, an in-flight haul/sell task's
+ * product, a per-product auto-sell override — to what that id became.
+ * Mirrors `migrateLegacySilage` (sim/buildings.ts): call once, right after
+ * a save loads; every call after the first is an instant no-op (nothing
+ * left to find). No-ops entirely for a save that never had one of these ids.
+ */
+export function migrateLegacyBaleProducts(save: SaveState): void {
+  const remap = (p: string | undefined): BaleProduct | undefined =>
+    p !== undefined ? (RETIRED_BALE_PRODUCT[p] ?? (p as BaleProduct)) : undefined;
+
+  for (const f of save.fields) {
+    if (f.baleProduct !== undefined && f.baleProduct in RETIRED_BALE_PRODUCT) f.baleProduct = remap(f.baleProduct);
+  }
+  for (const b of save.buildings) {
+    if (!b.storedBales) continue;
+    for (const oldId of Object.keys(RETIRED_BALE_PRODUCT)) {
+      const n = (b.storedBales as Record<string, number | undefined>)[oldId];
+      if (!n) continue;
+      const newId = RETIRED_BALE_PRODUCT[oldId]!;
+      b.storedBales[newId] = (b.storedBales[newId] ?? 0) + n;
+      delete (b.storedBales as Record<string, number | undefined>)[oldId];
+    }
+  }
+  for (const i of save.implements) {
+    if (i.cargoBaleProduct !== undefined && i.cargoBaleProduct in RETIRED_BALE_PRODUCT) i.cargoBaleProduct = remap(i.cargoBaleProduct);
+  }
+  for (const t of save.tasks) {
+    if (t.baleProduct !== undefined && t.baleProduct in RETIRED_BALE_PRODUCT) t.baleProduct = remap(t.baleProduct);
+    if (t.sellProduct !== undefined && t.sellProduct in RETIRED_BALE_PRODUCT) t.sellProduct = remap(t.sellProduct);
+  }
+  if (save.sellSchedule) {
+    for (const oldId of Object.keys(RETIRED_BALE_PRODUCT)) {
+      const row = save.sellSchedule[oldId];
+      if (!row) continue;
+      const newId = RETIRED_BALE_PRODUCT[oldId]!;
+      save.sellSchedule[newId] ??= row; // don't clobber an override the player already set on the new id
+      delete save.sellSchedule[oldId];
+    }
+  }
+}
 
 /**
  * The WRAPPED (baleage) twin of each product (2026-07-31, silage Phase 1;
@@ -96,21 +168,33 @@ export function isWrappedProduct(product: BaleProduct): boolean {
   return gameConfig.baleProducts[product].wrapped === true;
 }
 
-/** What a wrapped crop-specific product ages into once nobody's hauled it off
- * (2026-08-13) — grass and alfalfa baleage both end up as the same generic
- * "Silage Bale (wrapped)", round or square. Products missing here don't age
- * (they either aren't wrapped, or are already the generic product). */
+/** What a wrapped product ages into once nobody's hauled it off (2026-08-13;
+ * kept crop-specific 2026-08-15 — grass and alfalfa baleage used to both end
+ * up as one generic "Silage Bale", but the maintainer's bale-pricing pass
+ * wanted crop identity kept ("Grass Silage, Alfalfa Silage, and Corn Silage
+ * are all different"), so aging now stays within the same crop, just a
+ * later, pricier stage of it. Products missing here don't age (either
+ * aren't wrapped, or are already the aged product). */
 const AGED_SILAGE_OF: Partial<Record<BaleProduct, BaleProduct>> = {
-  hayBaleage: "silageBale",
-  alfalfaBaleage: "silageBale",
-  haySquareBaleage: "silageBaleSquare",
-  alfalfaHaySquareBaleage: "silageBaleSquare",
+  hayBaleage: "hayBaleageAged",
+  alfalfaBaleage: "alfalfaBaleageAged",
+  haySquareBaleage: "haySquareBaleageAged",
+  alfalfaHaySquareBaleage: "alfalfaHaySquareBaleageAged",
 };
+
+/** The aged-baleage product a wrapped product becomes after
+ * `forage.silageAgingMonths`, or undefined if it doesn't age (already aged,
+ * or not wrapped). Shared by `resolveAgedBaleProduct` (field bale piles)
+ * and `tickBaleAging` (bales already hauled into storage, see
+ * sim/buildings.ts). */
+export function agedSilageProductFor(product: BaleProduct): BaleProduct | undefined {
+  return AGED_SILAGE_OF[product];
+}
 
 /**
  * What `field`'s wrapped bales should be sold/hauled as RIGHT NOW, aging a
- * crop-specific wrapped product into the generic "Silage Bale (wrapped)"
- * once `forage.silageAgingMonths` have passed since wrapping.
+ * fresh-wrapped product into its own aged baleage twin once
+ * `forage.silageAgingMonths` have passed since wrapping.
  *
  * SIMPLIFICATION (2026-08-13): storage (`Building.storedBales`) is a flat
  * per-product count with no per-batch timestamp, so once bales are hauled
@@ -207,8 +291,16 @@ export function silageTonsPerAcreFor(field: Field, now: SimTime): number {
  * a harvest or a bale run:
  *
  *  - ANNUAL (corn): the whole plant leaves the field. The crop is cleared like
- *    a harvest, and — unlike one — there is NO residue behind it, so the field
- *    goes straight to stubble with nothing to rake, bale or mulch.
+ *    a harvest, and — unlike one — there is NO residue behind it, so no rake
+ *    or bale run is ever possible (`forageReady` stays unset). The field
+ *    still settles to "harvested" (2026-08-14, maintainer request: matches
+ *    the texture a combine-harvested Corn field shows, just a month earlier
+ *    while it's still green) rather than jumping straight to "stubble" — an
+ *    optional Mulch pass is then available exactly as it is for Corn
+ *    (`canMulch` only checks status + `!residueMulched`, not `forageReady`),
+ *    it just has no residue bonus riding on it since there's nothing to
+ *    incorporate. Plowing doesn't wait on that pass either way — "harvested"
+ *    is already plow-ready (see `canPlow`).
  *  - PERENNIAL (grass/alfalfa): the cut material is chopped instead of raked
  *    and baled, so the stand simply regrows, exactly as it does after baling.
  */
@@ -228,25 +320,39 @@ export function applyChopDone(field: Field): void {
   field.fertilized = undefined;
   field.weeded = undefined;
   field.weedy = undefined;
-  // Nothing left on the ground: the chopper took stalk and all. No residue
-  // means no mulch bonus is owed and no bale run is possible.
+  // Nothing left on the ground: the chopper took stalk and all. Flagged
+  // baled (not mulched) so a later Mulch pass still earns its own bonus
+  // check rather than reading as already-done from a run that never happened.
   field.residueBaled = true;
-  field.status = "stubble";
+  field.status = "harvested";
 }
 
-/** Wrapping-complete effect: every bale lying in the field becomes baleage.
- * The COUNT is untouched — wrapping seals the bales that are already there, it
- * doesn't make new ones (only a baler decides how many come off an acre). */
-export function applyWrapDone(field: Field, now: SimTime): void {
-  const product = field.baleProduct;
-  const wrapped = product ? baleageProductFor(product) : undefined;
-  if (!wrapped) return;
-  field.baleProduct = wrapped;
+/**
+ * Wrap-task-complete effect (2026-08-14 redesign): merges `field.
+ * wrappedBaleLocations` — the pile the wrap task sealed one bale at a time as
+ * it visited each spot (see the `wrap` tick block, sim/tasks.ts) — back into
+ * `field.baleLocations`, now as the WRAPPED product, so hauling proceeds
+ * exactly as it does for any other bale product with no further special
+ * handling. The COUNT is untouched either way — wrapping seals bales that are
+ * already there, it doesn't make new ones (only a baler decides how many come
+ * off an acre).
+ *
+ * Called once, when the wrap task's tick loop finds `baleLocations` (the
+ * unwrapped pile) empty and baling isn't still adding to it — see that block
+ * for why `field.wrappedAt` is NOT stamped here: it's stamped when the FIRST
+ * bale was actually sealed, not at this later merge point, so the aging
+ * clock (`resolveAgedBaleProduct`) starts from the truthful moment.
+ */
+export function applyWrapDone(field: Field): void {
+  const wrapped = field.wrappedBaleLocations;
+  if (!wrapped || wrapped.length === 0) return;
+  const wrappedProduct = field.baleProduct ? baleageProductFor(field.baleProduct) : undefined;
+  if (!wrappedProduct) return; // shouldn't happen — the wrap task only ever seals a wrappable product
+  field.baleLocations = wrapped;
+  field.wrappedBaleLocations = undefined;
+  field.baleProduct = wrappedProduct;
   // The window is spent: these are sealed now, so nothing can re-wrap them.
   field.baledAt = undefined;
-  // Starts the aging clock toward the generic "Silage Bale (wrapped)" —
-  // see `resolveAgedBaleProduct`.
-  field.wrappedAt = now;
 }
 
 /** Weight of one bale of `product`, tons. Square bales are heavier than round
@@ -443,7 +549,16 @@ export function applyHarvestDone(field: Field): void {
  * clean/mulched. The bales themselves were dropped one at a time by the baler as
  * it worked (see `tasks.ts`) into `field.baleLocations`, and stay there until
  * sold — so this only settles the field status/flags. */
-export function applyBaleDone(field: Field, square = false, now?: SimTime, wrapping = false): void {
+/**
+ * Stamp `field.baleProduct`/`baledAt`/`wrappedAt` for a bale run — split out
+ * of `applyBaleDone` (2026-08-14) so it can also run at the FIRST bale a
+ * still-in-progress run drops, not just at the run's completion. The wrapper
+ * trailing the baler (see the `bale` tick's drop branch, sim/tasks.ts) needs
+ * `field.baleProduct` set the moment there's anything to wrap — `wrapPending`/
+ * `canWrapBales` both require it and would otherwise refuse every wrap
+ * attempted before the LAST bale of a run finally completes it.
+ */
+export function stampBaleProduct(field: Field, square: boolean, now: SimTime | undefined, wrapping: boolean): void {
   // Record what the bales are (drives sale price + marker tint) while the crop
   // is still readable — for perennials it stays set, for corn it's already
   // cleared so this resolves to corn stover. `square` comes from the baler that
@@ -460,8 +575,19 @@ export function applyBaleDone(field: Field, square = false, now?: SimTime, wrapp
   // Already-wrapped bales have nothing to time (see `canWrapBales`).
   field.baledAt = wrapped ? undefined : now;
   // Already wrapped straight off the combi baler — starts the aging clock
-  // toward the generic "Silage Bale (wrapped)" (see `resolveAgedBaleProduct`).
+  // toward its own Aged Baleage twin (see `resolveAgedBaleProduct`).
   field.wrappedAt = wrapped ? now : undefined;
+}
+
+export function applyBaleDone(field: Field, square = false, now?: SimTime, wrapping = false): void {
+  // Only if the drop branch (tasks.ts) hasn't already stamped it on the
+  // FIRST bale of this run — which every live bale task hits before it can
+  // ever reach completion, `totalBales` is never zero. Re-stamping here with
+  // the LATER completion-time `now` would push the wrap window's start back
+  // to the run's last bale instead of its first, undoing the reason the
+  // early stamp exists. Only a direct unit-test call to `applyBaleDone`
+  // (skipping the tick loop entirely) still needs this fallback.
+  if (field.baleProduct === undefined) stampBaleProduct(field, square, now, wrapping);
   field.forageReady = undefined;
   field.windrowed = undefined;
   field.lastCutProductivity = undefined; // consumed by this bale run
