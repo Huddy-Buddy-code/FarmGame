@@ -38,6 +38,24 @@ export const BALE_LAYER_ID = "bales";
 export const ICON_PX = 14;
 const ICON_PIXEL_RATIO = 2;
 
+/** Square bales render bigger than round on the map (maintainer request,
+ * 2026-08-16: +50%, landing at 1.5x; then "decrease 10%", 1.5 × 0.9 = 1.35x) —
+ * `icon-size` (below) is a single expression shared by every bale product, so
+ * the size difference instead comes from registering the square products'
+ * icons at a bigger native raster; MapLibre scales each product's icon
+ * relative to its OWN registered size. `icon-offset`'s "25% of the icon's
+ * own height" nudge stays calibrated to `ICON_PX`, so on a square bale it
+ * now reads as a slightly smaller fraction of its (bigger) height — a minor
+ * trade-off, not worth a data-driven offset expression for. */
+const SQUARE_ICON_SCALE = 1.35;
+
+/** The native raster size (CSS px, pre-`ICON_PIXEL_RATIO`) to register a
+ * product's map icon at — pulled out of `registerBaleIcons` so the size
+ * decision is unit-testable without a real MapLibre map or DOM `Image`. */
+export function baleIconPx(product: BaleProduct): number {
+  return gameConfig.baleProducts[product].square ? ICON_PX * SQUARE_ICON_SCALE : ICON_PX;
+}
+
 /**
  * Sanity ceiling on TOTAL bale features. A symbol layer eats tens of thousands
  * without complaint, so this is nowhere near the old per-field 600 — it exists
@@ -152,7 +170,8 @@ async function registerBaleIcons(map: MlMap): Promise<void> {
   await Promise.all(
     products.map(async (product) => {
       if (map.hasImage(product)) return;
-      const data = await svgToImageData(baleIconFor(product, ICON_PX), ICON_PX);
+      const px = baleIconPx(product);
+      const data = await svgToImageData(baleIconFor(product, px), px);
       // A concurrent call may have won the race while we rasterized.
       if (!map.hasImage(product)) map.addImage(product, data, { pixelRatio: ICON_PIXEL_RATIO });
     }),

@@ -1478,13 +1478,6 @@ function haulProgress(task: FarmTask): { total: number; remaining: number; clear
   return { total, remaining, cleared, pct: total > 0 ? Math.min(100, (cleared / total) * 100) : 0 };
 }
 
-/** The shared "140 bales · 60% cleared" prefix on both relay cards' status
- * line. Empty until the sim has measured the job (its first tick). */
-function haulProgressText(task: FarmTask): string {
-  const { total, pct } = haulProgress(task);
-  return total > 0 ? `${total} bale${total === 1 ? "" : "s"} · ${pct.toFixed(0)}% cleared` : "";
-}
-
 /**
  * The relay's Bale Trailer half, as its own Work-Queue card (2026-07-25).
  *
@@ -1515,7 +1508,6 @@ function buildBaleTrailerRow(task: FarmTask): HTMLElement | null {
   // load, so the card carried the identical bar twice (maintainer report).
   // The load keeps its own bar down on the implement row.
   const job = haulProgress(task);
-  const progressText = haulProgressText(task);
 
   const row = document.createElement("div");
   row.className = "queue-row active" + (task.waitingForStorage ? " warn" : "");
@@ -1524,8 +1516,13 @@ function buildBaleTrailerRow(task: FarmTask): HTMLElement | null {
     <span class="qr-info">
       <div class="qr-name">Bale Trailer · ${escapeHtml(fieldLabelOf(task.fieldId))}</div>
       <div class="qr-machine">${escapeHtml(tAgent.name)}</div>
-      <div class="qr-sub">${progressText ? `${progressText} · ` : ""}${phase}${job.remaining > 0 ? ` · ${job.remaining}` : ""}</div>
-      ${job.total > 0 ? `<div class="progress"><div class="fill" style="width:${job.pct.toFixed(0)}%"></div></div>` : ""}
+      <div class="qr-sub">${phase}</div>
+      ${job.total > 0
+        ? `<div class="progress-row">
+            <div class="progress"><div class="fill" style="width:${job.pct.toFixed(0)}%"></div></div>
+            <span class="progress-hrs">${job.remaining}/${job.total}</span>
+          </div>`
+        : ""}
       ${implRow(
         implementInfoLines("baleTrailer", trailer.size),
         load,
@@ -1713,7 +1710,6 @@ function buildQueueRow(task: FarmTask): HTMLElement {
     // Shared with the trailer's card via `haulProgress` so the two halves of
     // one relay can never show different progress for the same job.
     const job = haulProgress(task);
-    const progressText = haulProgressText(task);
     const row = document.createElement("div");
     row.className = "queue-row" + (isActive ? " active" : " queued") + (task.waitingForStorage ? " warn" : "");
     row.innerHTML = `
@@ -1721,8 +1717,13 @@ function buildQueueRow(task: FarmTask): HTMLElement {
       <span class="qr-info">
         <div class="qr-name">Haul Bales · ${escapeHtml(fieldLabelOf(task.fieldId))}</div>
         ${agent ? `<div class="qr-machine">${agent.name}</div>` : ""}
-        <div class="qr-sub">${progressText ? `${progressText} · ` : ""}${haulSubText(task)}${job.remaining > 0 ? ` · ${job.remaining}` : ""}</div>
-        ${isActive && job.total > 0 ? `<div class="progress"><div class="fill" style="width:${job.pct.toFixed(0)}%"></div></div>` : ""}
+        <div class="qr-sub">${haulSubText(task)}</div>
+        ${isActive && job.total > 0
+          ? `<div class="progress-row">
+              <div class="progress"><div class="fill" style="width:${job.pct.toFixed(0)}%"></div></div>
+              <span class="progress-hrs">${job.remaining}/${job.total}</span>
+            </div>`
+          : ""}
         ${implementRowHtml(task, agent)}
       </span>`;
     wireRowSelection(row, task);
@@ -3568,21 +3569,14 @@ const UNLOAD_PHASE_TEXT: Record<string, string> = {
   dumping: "Unloading at the silo…",
 };
 
-const HAUL_PHASE_TEXT: Record<string, string> = {
-  toBale: "Collecting bales…",
-  loading: "Spearing a bale…",
-  toTrailer: "Carrying to the trailer…",
-  unloadToTrailer: "Loading the trailer…",
-  toStorage: "Hauling to storage…",
-  dumping: "Unloading at storage…",
-  waiting: "Waiting…",
-};
-
-/** One-line status for a Haul Bales job's queue row — the spikes tractor's leg,
- * or a ⚠️ if a hauler is stuck with nowhere to store. */
+/** One-line status for a Haul Bales job's queue row — a ⚠️ if a hauler is
+ * stuck with nowhere to store, else a flat "Collecting bales…" regardless
+ * of the collector's actual internal phase (2026-08-16, maintainer request —
+ * the phase-by-phase text, e.g. "Carrying to the trailer…", read as noise
+ * once the remaining/total count sits right next to the progress bar). */
 function haulSubText(task: FarmTask): string {
   if (task.waitingForStorage) return "⚠️ Waiting for storage room";
-  return HAUL_PHASE_TEXT[task.haulPhase ?? "toBale"] ?? "Hauling bales…";
+  return "Collecting bales…";
 }
 
 function agentStatusText(agent: Agent): { text: string; pct: number | null } {

@@ -151,6 +151,57 @@ describe("baling a field for real", () => {
   });
 });
 
+describe("a square baler ejects bales on the fly, at full speed (2026-08-16)", () => {
+  // `baleTieMinutes` is tiny ("~10 s at 1x", 0.17 sim-min) — the 30-sim-min
+  // step `baleWith` above uses would never actually SHOW a pause that short;
+  // driving before and after it washes the gap out. A small field (so the run
+  // finishes quickly) plus a step well under baleTieMinutes is what actually
+  // catches a standing-still tick.
+  const smallSide = Math.sqrt(3 * 4046.8564224);
+  const smallBoundary: Meters[] = [[0, 0], [smallSide, 0], [smallSide, smallSide], [0, smallSide]];
+
+  function run(kind: "bailer" | "squareBaler"): { field: Field; stalledWhileWorking: boolean } {
+    const save = newGame();
+    save.money = 20_000_000;
+    buyBuildingAt(save, "baleArea", [-400, -400]);
+    buyAgent(save, "tractor", "large", [0, 0]);
+    buyImplement(save, kind, "medium");
+    const field: Field = {
+      id: "field-1", parcelId: "p", boundary: smallBoundary, status: "harvested",
+      lastCrop: "wheat", forageReady: true, windrowed: true,
+    };
+    save.fields.push(field);
+    enqueueTask(save, field, "bale", APRIL_1);
+    const agent = save.agents.find((a) => a.kind === "tractor")!;
+
+    let now = APRIL_1;
+    let stalledWhileWorking = false;
+    let iterations = 0;
+    while (save.tasks.some((t) => t.type === "bale") && iterations++ < 20_000) {
+      const before: Meters = [agent.pos[0], agent.pos[1]];
+      const wasWorking = agent.state === "working";
+      now += 0.1;
+      tickFarming(save, now);
+      tickTasks(save, now, 0.1, () => 0.5);
+      if (wasWorking && agent.state === "working" && before[0] === agent.pos[0] && before[1] === agent.pos[1]) {
+        stalledWhileWorking = true;
+      }
+    }
+    return { field, stalledWhileWorking };
+  }
+
+  it("never stands still while working — the whole field is one continuous pass", () => {
+    const { field, stalledWhileWorking } = run("squareBaler");
+    expect(field.baleLocations!.length).toBeGreaterThan(1); // made more than one bale, not just a lucky single pass
+    expect(stalledWhileWorking).toBe(false);
+  });
+
+  it("...unlike a round baler, which still stops to tie each one (sanity check: the test can actually see a pause)", () => {
+    const { stalledWhileWorking } = run("bailer");
+    expect(stalledWhileWorking).toBe(true);
+  });
+});
+
 describe("square bales look square", () => {
   // Maintainer request, 2026-07-24: "make sure the Square Bales have an icon on
   // the Field and Inventory for a rectangular hay, straw, or alfalfa bale."

@@ -1253,6 +1253,11 @@
          Pulled up ~20% of the tractor's own icon height (60px baseline ×
          0.2 = 12px) from the shared +6px, landing at -6px. */
       .agent-dot .agent-implement[data-impl^="bailer:"] { transform: translateY(-6px); }
+      /* The Square Baler's sprite reads low relative to the tractor at the
+         shared +6px offset too (maintainer request, 2026-08-16: "bring it up
+         ~30% relative to the tractor sprite" — landed at -12px — then "too
+         far up, back down ~15%" — 60px baseline × 0.15 = 9px, -12 + 9 = -3px). */
+      .agent-dot .agent-implement[data-impl^="squareBaler:"] { transform: translateY(-3px); }
       /* The Bale Wrapper's photographic sprite reads as un-hitched too —
          floating below AND behind the tractor (maintainer follow-up,
          2026-08-14: "bring it up and left to look hitched"). Shifted left on
@@ -1261,8 +1266,53 @@
          sprite does. First pass pulled it up to -14px, which then read as
          riding too high (maintainer follow-up: "lower... about 40%") —
          lowered by 40% of the tractor's own icon height (60px baseline ×
-         0.4 = 24px), landing at -14 + 24 = +10px. */
-      .agent-dot .agent-implement[data-impl^="baleWrapper:"] { margin-left: -20px; transform: translateY(10px); }
+         0.4 = 24px), landing at -14 + 24 = +10px. Nudged up again 2026-08-16
+         (same pass as the Square Baler's down-15% above, opposite direction):
+         60px baseline × 0.15 = 9px, +10 - 9 = +1px. */
+      .agent-dot .agent-implement[data-impl^="baleWrapper:"] { margin-left: -20px; transform: translateY(1px); }
+      /* The Forage Wagon's sprite reads low relative to the tractor at the
+         shared +6px offset too (maintainer request, 2026-08-16: "bring it up
+         15% relative to the tractor sprite"). 60px baseline × 0.15 = 9px,
+         6 - 9 = -3px. */
+      .agent-dot .agent-implement[data-impl^="forageWagon:"] { transform: translateY(-3px); }
+      /* Round Baler with Wrapper (combiBaler): sized up 30% (maintainer
+         request, 2026-08-16) — the map marker's implement art is drawn at a
+         flat 55px regardless of kind (`trailerIconHtml`'s px argument, main.ts),
+         set as HTML width/height attributes rather than CSS, so a CSS rule
+         here overrides them cleanly with no `!important` needed. 55 × 1.3 =
+         71.5px. Targets both the photographic `<img>` (what it has today) and
+         the SVG fallback, so this keeps working if the art is ever removed.
+         Nudged up 5% relative to the tractor from the shared +6px offset
+         (60px baseline × 0.05 = 3px, 6 - 3 = 3px) — a smaller move than the
+         other implements above since a 30%-bigger sprite already reads as
+         riding higher on its own. Nudged up another flat 3px (maintainer
+         request, 2026-08-16, no percentage this time): 3 - 3 = 0px. */
+      .agent-dot .agent-implement[data-impl^="combiBaler:"] { transform: translateY(0px); }
+      .agent-dot .agent-implement[data-impl^="combiBaler:"] img,
+      .agent-dot .agent-implement[data-impl^="combiBaler:"] svg { width: 71.5px; height: 71.5px; }
+      /* All trailer sprites sized up 15% (maintainer request, 2026-08-16) —
+         same override mechanism as the Combi Baler above (55px flat baseline
+         set as HTML width/height attributes, beaten by a CSS rule with no
+         `!important`). 55 × 1.15 = 63.25px. "Trailer" is Grain Trailer and
+         Bale Trailer specifically — the Forage Wagon is its own named
+         implement (sized/positioned separately above) even though it plays
+         the same hauling role. Grain/Bale Trailer also swap between several
+         FILL-STATE sprites as they load (`trailerFillImageUrl`) — this
+         targets every `<img>`/`<svg>` under the kind regardless of which
+         fill state is currently showing, so the size holds across the whole
+         fill range instead of just the empty or full sprite. */
+      .agent-dot .agent-implement[data-impl^="grainTrailer:"] img,
+      .agent-dot .agent-implement[data-impl^="grainTrailer:"] svg,
+      .agent-dot .agent-implement[data-impl^="baleTrailer:"] img,
+      .agent-dot .agent-implement[data-impl^="baleTrailer:"] svg { width: 63.25px; height: 63.25px; }
+      /* Both trailers also nudged up 5% relative to the tractor (maintainer
+         request, 2026-08-16), same as every other per-kind offset here: 60px
+         baseline × 0.05 = 3px from the shared +6px offset, 6 - 3 = 3px.
+         `transform` goes on the outer `.agent-implement` span (not img/svg) —
+         same split as the size rule right above, since a translate works on
+         the flex item regardless of what's inside it. */
+      .agent-dot .agent-implement[data-impl^="grainTrailer:"],
+      .agent-dot .agent-implement[data-impl^="baleTrailer:"] { transform: translateY(3px); }
       /* Photographic machine sprites (machineImages.ts) drop in where a matching
          PNG exists; sized square like the SVGs they replace, never distorted. */
       .machine-img { display: block; object-fit: contain; }

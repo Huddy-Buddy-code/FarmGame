@@ -3737,18 +3737,12 @@ function tickAgent(
       let dist = pathDistRuntime.get(task.id);
       if (dist === undefined) dist = distanceAtAcres(path, task.doneAcres, task.totalAcres);
 
-      // Mid-tie? Burn budget standing still; when the timer runs out, eject the
-      // bale and empty one bale's worth from the hopper.
-      const tie = baleTieRemaining.get(task.id);
-      if (tie !== undefined) {
-        const used = Math.min(tie, budget);
-        budget -= used;
-        const left = tie - used;
-        if (left > 1e-9) {
-          baleTieRemaining.set(task.id, left);
-          continue; // still tying (out of budget) — resume next tick
-        }
-        baleTieRemaining.delete(task.id);
+      // Eject the current bale: drop it, empty one bale's worth from the
+      // hopper, and fire the usual wrap/haul follow-ups. Shared by the
+      // round/combi tie-pause below and the square baler's on-the-fly drop
+      // (2026-08-16, maintainer request — a real square baler's knotter ties
+      // while still rolling; only a round baler has to stop to eject).
+      const dropBale = () => {
         // Drop ON the field at the tie spot: current position if inside, else the
         // last on-field position (the baler may have stopped over a concave notch
         // the path cut across — a bale must never land off the field). No
@@ -3758,7 +3752,7 @@ function tickAgent(
         const drop = inside ? agent.pos : (baleLastInside.get(task.id) ?? agent.pos);
         const firstBaleOfRun = (field.baleLocations?.length ?? 0) === 0;
         (field.baleLocations ??= []).push([drop[0], drop[1]]);
-        baler.cargoTons = Math.max(0, baler.cargoTons - baleTarget);
+        baler!.cargoTons = Math.max(0, (baler!.cargoTons ?? 0) - baleTarget!);
         baleTargetRuntime.delete(task.id); // re-roll the next bale's fill distance
         // The wrapper trails the baler (2026-08-14, maintainer request) —
         // same "starts once the lead machine has produced something to work
@@ -3785,12 +3779,36 @@ function tickAgent(
         // covering the field or there's nothing free to send — or if the field
         // is destined for the wrapper (see `wrapPending`).
         queueHaulBales(save, field.id, now);
+      };
+
+      // Mid-tie? Burn budget standing still; when the timer runs out, eject
+      // the bale. Square balers never enter this state (see below) — they
+      // never have a tie timer to be mid-way through.
+      const tie = baleTieRemaining.get(task.id);
+      if (tie !== undefined) {
+        const used = Math.min(tie, budget);
+        budget -= used;
+        const left = tie - used;
+        if (left > 1e-9) {
+          baleTieRemaining.set(task.id, left);
+          continue; // still tying (out of budget) — resume next tick
+        }
+        baleTieRemaining.delete(task.id);
+        dropBale();
         continue;
       }
 
-      // Hopper hit this bale's (randomized) threshold → stop and tie a bale.
+      // Hopper hit this bale's (randomized) threshold. A round/combi baler
+      // stops and ties (real machines eject the finished bale before the
+      // knotter can start the next one); a square baler's knotter ties
+      // continuously as it rolls, so it ejects on the fly at full speed and
+      // never loses any drive budget (2026-08-16, maintainer request).
       if (baler.cargoTons >= baleTarget - 1e-9) {
-        baleTieRemaining.set(task.id, gameConfig.forage.baleTieMinutes);
+        if (square) {
+          dropBale();
+        } else {
+          baleTieRemaining.set(task.id, gameConfig.forage.baleTieMinutes);
+        }
         continue;
       }
 

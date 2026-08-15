@@ -1,8 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { baleFeatureCollection, baleStateKey, baleProductOf, wrappedBaleProductOf, MAX_BALE_FEATURES } from "../src/field/baleLayer";
+import {
+  baleFeatureCollection, baleStateKey, baleProductOf, wrappedBaleProductOf, MAX_BALE_FEATURES, baleIconPx, ICON_PX,
+} from "../src/field/baleLayer";
 import { setProjection } from "../src/geo/coords";
 import type { Field } from "../src/state/saveState";
 import type { Meters } from "../src/geo/coords";
+import { gameConfig } from "../src/config/gameConfig";
+import type { BaleProduct } from "../src/config/gameConfig";
 
 setProjection(15, "N"); // Story County — toLngLat needs a projection
 
@@ -125,5 +129,24 @@ describe("wrapped pool rendering (2026-08-14) — a field mid-wrap shows a genui
     const f = field("f1", [[1, 1]], "hay");
     f.wrappedBaleLocations = [[2, 2]]; // one of the two just got sealed
     expect(baleStateKey([f])).not.toBe(baleStateKey([unwrapped]));
+  });
+});
+
+describe("square bales render 35% bigger on the map (2026-08-16)", () => {
+  it("gives every square product a 35% bigger icon than round", () => {
+    for (const product of Object.keys(gameConfig.baleProducts) as BaleProduct[]) {
+      const expected = gameConfig.baleProducts[product].square ? ICON_PX * 1.35 : ICON_PX;
+      expect(baleIconPx(product), product).toBe(expected);
+    }
+  });
+
+  it("round products keep the original size exactly", () => {
+    expect(baleIconPx("hay")).toBe(ICON_PX);
+    expect(baleIconPx("cornStover")).toBe(ICON_PX);
+  });
+
+  it("square products are visibly bigger, not just differently shaped", () => {
+    expect(baleIconPx("haySquare")).toBeGreaterThan(baleIconPx("hay"));
+    expect(baleIconPx("alfalfaHaySquare")).toBeGreaterThan(baleIconPx("alfalfaHay"));
   });
 });
