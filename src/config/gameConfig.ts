@@ -699,13 +699,6 @@ export interface GameConfig {
    */
   harvestWindowMonths: number;
 
-  /** Field Schedule tab windows (`sim/schedule.ts`). How far a player may shift
-   * an auto-managed step from its natural month. */
-  schedule: {
-    /** How many months after harvest the optional mulch pass stays legal. */
-    mulchWindowMonths: number;
-  };
-
   /** Loans (brief §8, "loan interest, the difficulty dial"). v1 is simple: one
    * fixed-rate, fixed-term amortized loan per campaign YEAR the player
    * borrows in (maintainer design, 2026-07-11) — see `sim/finance.ts`. */
@@ -1467,9 +1460,6 @@ export const gameConfig: GameConfig = {
     instantSellPenaltyPct: 0.1,
   },
   harvestWindowMonths: 2,
-  schedule: {
-    mulchWindowMonths: 3,
-  },
   loan: {
     ratePercent: 5,
     termMonths: 180, // 15 years

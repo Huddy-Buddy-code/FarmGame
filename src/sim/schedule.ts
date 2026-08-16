@@ -14,8 +14,9 @@
  *
  * plow spans the gap between crops — from the harvest month through the
  * planting month inclusive, deliberately overlapping both by one month (see
- * `plowMonthsInOrder`). It defaults to January, or to the month after harvest
- * for a crop that overwinters through January — see `effectiveMonthFor`.
+ * `plowMonthsInOrder`). It defaults to the LAST legal month — right before
+ * (or the same month as) planting, not the slack season right after harvest
+ * — see `effectiveMonthFor`.
  *
  * weed is SEASONAL on top of the crop's own window: weeds only flush in spring
  * and summer, and cover crops are never weeded at all.
@@ -130,48 +131,46 @@ export function legalMonthsFor(type: ScheduleTaskType, crop: CropId, plantMonth?
     return rangeWrappedCapped(plantMonth + span, plantMonth + span + harvestWindowMonthsFor(crop) - 1);
   }
   // Mulch: from the HARVEST month (maintainer request, 2026-07-23 — it used to
-  // start the month after) through the mulch window. Same reasoning as plow:
-  // `canMulch` requires the field to already be harvested, and refuses while a
-  // rake or bale is queued, so sharing the month can't reorder anything.
+  // start the month after) through the SAME gap plow gets (maintainer request,
+  // 2026-08-16: "mulching should be the final task, always after everything
+  // else... any months, as long as it is after everything else"). Every other
+  // task's own window already ends strictly before harvest (weed/fertilize
+  // both cap at plantMonth+span-1), so harvest is always the chronologically
+  // LAST of them by construction — mulch's window just needs to start there
+  // and run through the next planting, same as plow does, since mulch has to
+  // happen before the next plow/plant anyway. Sharing the harvest month is
+  // safe for the same reason plow sharing months is: `canMulch` requires the
+  // field to already be harvested and refuses while a rake or bale is queued,
+  // so the calendar only says WHICH month, not what order things happen in it.
   if (type === "mulch") {
-    return rangeWrappedCapped(plantMonth + span, plantMonth + span + gameConfig.schedule.mulchWindowMonths);
+    return rangeWrappedCapped(plantMonth + span, plantMonth + MONTHS_PER_YEAR);
   }
   return [];
 }
-
-/** The month a plow defaults to when the player hasn't chosen one: JANUARY —
- * the traditional slack-season pass, and the default the maintainer asked for
- * (2026-07-23). */
-const DEFAULT_PLOW_MONTH = 0;
 
 /**
  * The month a task will actually fire at: the override if still legal, else the
  * task's default, else undefined (no legal month exists — e.g. a perennial's
  * plow row).
  *
- * Every task defaults to its earliest legal month EXCEPT plow, which defaults
- * to January when January is available. For a spring-planted crop that's the
- * quiet middle of the plow window. For a crop that OVERWINTERS — Winter Wheat
- * is in the ground from September to July — January isn't available at all, and
- * the fallback (the first legal month, i.e. the first one after the ground
- * clears) lands right where it should: the month after harvest, just ahead of
- * that crop's own autumn planting. Defaulting those to January would have been
- * actively broken, scheduling the plow ten months after the seed.
+ * Every task defaults to its EARLIEST legal month EXCEPT plow, which defaults
+ * to its LATEST — right before planting, or the same month as planting
+ * (maintainer request, 2026-08-16: "I want crops to Plow before they plant,
+ * not at the end of the life cycle"). `plowMonthsInOrder` builds `legal`
+ * ascending from the harvest month through the planting month, so the last
+ * entry is always the planting month itself — `legal[legal.length - 1]` needs
+ * no separate lookup. This replaced an old January-else-month-after-harvest
+ * default (which put an overwintering cover crop's plow right after ITS OWN
+ * harvest — "the end of the life cycle" — instead of ahead of its next
+ * planting); the trade-off is that plow's soft retry (see `plowDueAt`) now has
+ * no later month left to fall back to if the very last one is missed, since
+ * there's nothing past it in the ordering.
  */
 export function effectiveMonthFor(type: ScheduleTaskType, crop: CropId, override: number | undefined, plantMonth?: number): number | undefined {
   const legal = legalMonthsFor(type, crop, plantMonth);
   if (legal.length === 0) return undefined;
   if (override !== undefined && legal.includes(override)) return override;
-  if (type === "plow") {
-    if (legal.includes(DEFAULT_PLOW_MONTH)) return DEFAULT_PLOW_MONTH;
-    // A crop that's in the ground every January (a cover crop) falls back to
-    // the month AFTER harvest — not the harvest month itself, which the window
-    // now includes but where the crop may well still be standing.
-    if (plantMonth !== undefined) {
-      const afterHarvest = monthMod(plantMonth + gameConfig.crops[crop].growMonths + 1);
-      if (legal.includes(afterHarvest)) return afterHarvest;
-    }
-  }
+  if (type === "plow") return legal[legal.length - 1]!;
   return legal[0];
 }
 

@@ -90,6 +90,7 @@ import {
   MACHINE_ICON, IMPLEMENT_ICON_SVG, tractorIconSvg, baleIconSvg,
   plowIconSvg, planterIconSvg, sprayerIconSvg, rakeIconSvg, grainTrailerIconSvg,
   mowerIconSvg, mulcherIconSvg, haySpikesIconSvg, baleTrailerIconSvg,
+  combineIconSvg, balerIconSvg, forageHarvesterIconSvg, wrapIconSvg,
 } from "./ui/icons";
 import { machineImageUrl, machineImgTag, trailerFillImageUrl, machineVariantImageUrl } from "./ui/machineImages";
 import type { EquipmentKind, ImplementKind } from "./sim/tasks";
@@ -4388,6 +4389,45 @@ function restoreSpeed(paused: boolean) {
  * line is positioned over the lanes by offsetting past it. */
 const CAL_LABEL_W = 150;
 
+/** Re-bases a month-of-year (0-11, Jan=0) onto the DISPLAY year, which starts
+ * at March (`START_MONTH`) to align with the season bar. Shared by the Crop
+ * Calendar and the Field Schedule tab — both draw a Mar→Feb axis. */
+function dispMoy(moy: number): number {
+  return (moy - START_MONTH + MONTHS_PER_YEAR) % MONTHS_PER_YEAR;
+}
+
+/** Projects an ABSOLUTE campaign month (`sim/rotationTimeline.ts`'s
+ * zero-based, unbounded axis) onto the same 0-11 display axis as `dispMoy` —
+ * a total function, so every task's `at`/`legal` month always lands
+ * somewhere on the shared axis regardless of which real campaign year it'll
+ * actually run in. The Field Schedule tab deliberately draws one generic
+ * year per rotation step rather than a true multi-year timeline (see the
+ * doc comment on `refreshScheduleCalendar`), which is what makes this
+ * projection a pure modulo with nothing to clip or special-case. */
+function dispAbs(abs: AbsMonth): number {
+  return dispMoy(((abs % MONTHS_PER_YEAR) + MONTHS_PER_YEAR) % MONTHS_PER_YEAR);
+}
+
+/** One display-month's width, as a percent of the 12-month axis. Shared by
+ * the Crop Calendar and Field Schedule tab's band/chip positioning. */
+function calPct(months: number): number {
+  return (months / MONTHS_PER_YEAR) * 100;
+}
+
+/** A plant/harvest window band, `left%/width%` positioned along the display
+ * year — splits into two segments if it wraps the year edge (e.g. winter
+ * wheat: planted Sep, ready Jun). Shared by the Crop Calendar and Field
+ * Schedule tab. */
+function calBand(cls: string, start: number, len: number): string {
+  if (start + len > MONTHS_PER_YEAR) {
+    return (
+      `<div class="band ${cls}" style="left:${calPct(start)}%;width:${calPct(MONTHS_PER_YEAR - start)}%"></div>` +
+      `<div class="band ${cls}" style="left:0%;width:${calPct(start + len - MONTHS_PER_YEAR)}%"></div>`
+    );
+  }
+  return `<div class="band ${cls}" style="left:${calPct(start)}%;width:${calPct(len)}%"></div>`;
+}
+
 // Crop calendar: planting/harvest bands per crop over the display year (Mar→Feb),
 // derived from gameConfig (plant windows + grow time) — no hand-kept data.
 // ---------------------------------------------------------------------------
@@ -4403,7 +4443,6 @@ function buildCropCalendar() {
  * pace, which is the whole point of keying growth to months. */
 function rebuildCropCalendarGrid() {
   const grid = $("cal-grid");
-  const disp = (mo: number) => (mo - START_MONTH + MONTHS_PER_YEAR) % MONTHS_PER_YEAR;
 
   // Season header (the display year aligns with seasons: Mar starts spring).
   let html = `<div></div>`;
@@ -4418,27 +4457,17 @@ function rebuildCropCalendarGrid() {
   // One lane per crop with plant + harvest bands (percent of the display year).
   // Bands can WRAP the display-year edge (winter wheat: planted Sep, ready
   // Jun — 2026-07-22) — split into two segments instead of overflowing.
-  const pct = (months: number) => (months / MONTHS_PER_YEAR) * 100;
-  const band = (cls: string, start: number, len: number): string => {
-    if (start + len > MONTHS_PER_YEAR) {
-      return (
-        `<div class="band ${cls}" style="left:${pct(start)}%;width:${pct(MONTHS_PER_YEAR - start)}%"></div>` +
-        `<div class="band ${cls}" style="left:0%;width:${pct(start + len - MONTHS_PER_YEAR)}%"></div>`
-      );
-    }
-    return `<div class="band ${cls}" style="left:${pct(start)}%;width:${pct(len)}%"></div>`;
-  };
   for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
     const cfg = gameConfig.crops[cropId];
-    const plantStart = disp(cfg.plantMonths[0]!);
+    const plantStart = dispMoy(cfg.plantMonths[0]!);
     const plantLen = cfg.plantMonths.length;
-    let bands = band("plant", plantStart, plantLen);
+    let bands = calBand("plant", plantStart, plantLen);
     if (cfg.perennial) {
       // Perennials are cut on separate monthly windows — draw a plain harvest
       // bar per cutting month, same style as the annual crops below
       // (maintainer request: drop the special detached/inset "cut" look).
       for (const mo of cfg.harvestMonths ?? []) {
-        bands += band("harv", disp(mo), 1);
+        bands += calBand("harv", dispMoy(mo), 1);
       }
     } else {
       // Annual: harvest opens a grow-time after planting and runs for the real
@@ -4447,8 +4476,8 @@ function rebuildCropCalendarGrid() {
       // This band is now load-bearing rather than decorative: past its right
       // edge the crop withers, so it has to match the crop's real window
       // (per-crop since 2026-07-24 — oats and barley get a third month).
-      const harvStart = disp((cfg.plantMonths[0]! + cfg.growMonths) % MONTHS_PER_YEAR);
-      bands += band("harv", harvStart, harvestWindowMonthsFor(cropId));
+      const harvStart = dispMoy((cfg.plantMonths[0]! + cfg.growMonths) % MONTHS_PER_YEAR);
+      bands += calBand("harv", harvStart, harvestWindowMonthsFor(cropId));
     }
     // A bale marker after the name for crops whose residue can be baled
     // (maintainer request, 2026-07-23), tinted by the product it makes.
@@ -4891,14 +4920,16 @@ function closeFieldPanel() {
 
 /** Switch the Field panel's active side-tab, updating the tab-strip's
  * highlighted button and which tab-content div is visible, then force-
- * refreshing so the newly-shown tab repaints immediately. All four tabs share
- * one uniform width (see `.fp-main`). */
+ * refreshing so the newly-shown tab repaints immediately. Only the Schedule
+ * tab widens `.fp-main` (2026-08-16, its 12-months-across timeline needs
+ * real width) — View/Finances/Settings stay at the compact default. */
 function switchFieldPanelTab(tab: FieldPanelTab): void {
   fieldPanelTab = tab;
   for (const t of FIELD_PANEL_TABS) {
     $(`fp-${t}-tab`).style.display = t === tab ? "block" : "none";
     $(`fp-tab-${t}`).classList.toggle("active", t === tab);
   }
+  $("fp-main").classList.toggle("wide", tab === "schedule");
   refreshFieldPanel(true);
 }
 
@@ -4999,9 +5030,9 @@ function refreshPlanEditor(field: Field, auto: boolean): void {
   const container = $("fp-plans");
   // Keyed on the rotation POINTER, not the campaign year — the year no longer
   // selects the active step, so a year turn is not a reason to rebuild. The
-  // viewed step and clipboard state are in the key too: both change what's drawn.
+  // clipboard state is in the key too: it changes what's drawn (paste button).
   const key = [
-    field.id, auto ? 1 : 0, activeRotationIdx(field), scheduleViewStepIdx,
+    field.id, auto ? 1 : 0, activeRotationIdx(field),
     field.rotationName ?? "", rotationClipboard ? 1 : 0, JSON.stringify(field.plans ?? []),
   ].join("|");
   if (key === lastPlansKey) return;
@@ -5629,75 +5660,134 @@ function renderQueueHaulBales(field: Field): void {
   host.appendChild(btn);
 }
 
-// --- Field Schedule calendar (maintainer request, 2026-07-21; rotated to a
-//     VERTICAL layout 2026-07-21 to save horizontal space) -------------------
-/** Which rotation STEP (plans[] index) the calendar is currently showing —
- * independent of which step is actually running right now, so the player can
- * view/edit any step's schedule. Driven by the crop chips (2026-07-23, which
- * replaced the old ‹ Yr N › stepper). */
-let scheduleViewStepIdx = 0;
+// --- Field Schedule calendar (2026-08-16 rework: Crop-Calendar-style
+//     horizontal timeline — same design language as `rebuildCropCalendarGrid`
+//     above, just per-field and interactive) --------------------------------
 
-/** Month ROWS top-to-bottom, in the game's season order (Mar→Feb, starting at
- * START_MONTH) so the year reads Spring→Winter down the calendar, matching the
- * year bar. `SCHEDULE_MONTH_ORDER[row]` = the real 0-11 month number. */
+/** Month ORDER, Mar→Feb (starting at START_MONTH), used by unrelated
+ * month-select dropdowns elsewhere — kept even though the schedule grid
+ * itself no longer stacks months vertically. */
 const SCHEDULE_MONTH_ORDER: number[] = Array.from({ length: 12 }, (_, i) => (START_MONTH + i) % MONTHS_PER_YEAR);
 
-type ScheduleSeason = "spring" | "summer" | "fall" | "winter";
-function seasonOfMonth(m: number): ScheduleSeason {
-  if (m >= 2 && m <= 4) return "spring";
-  if (m >= 5 && m <= 7) return "summer";
-  if (m >= 8 && m <= 10) return "fall";
-  return "winter";
-}
-/** The Schedule timeline's own drag state — separate from the Work Queue's
- * `draggingTaskId` (different domain/shape). */
-let draggingScheduleCell: { planIdx: number; kind: string } | null = null;
+/** Which rotation steps (by `planIdx`) currently have their task key expanded
+ * — click a crop label to toggle (2026-08-16). View-only state, folded into
+ * the change-detection key below so expanding/collapsing actually re-renders. */
+let expandedScheduleRows = new Set<number>();
 
-const TL_TASK_ICON: Record<string, string> = {
-  plow: "🚜", plant: "🌱", fertilize: "🌿", weed: "💦", harvest: "🌾",
-  mulch: "🍂", mow: "🌾", bale: "📦", wrap: "🎁", silage: "🌱",
-};
-const TL_TASK_LABEL: Record<string, string> = {
+/** The Schedule timeline's currently-open "which task?" picker (2026-08-16 —
+ * replaced drag-and-drop, see `refreshScheduleCalendar`'s doc comment). Only
+ * ever one open at a time; tracked so a second click elsewhere can close it. */
+let openSchedulePicker: { el: HTMLElement; onDocClick: (e: MouseEvent) => void } | null = null;
+
+function closeSchedulePicker(): void {
+  if (!openSchedulePicker) return;
+  document.removeEventListener("click", openSchedulePicker.onDocClick, true);
+  openSchedulePicker.el.remove();
+  openSchedulePicker = null;
+}
+
+/** Text label per task kind, for chip/key tooltips. */
+const TASK_LABEL: Record<TimelineTaskKind, string> = {
   plow: "Plow", plant: "Plant", fertilize: "Fertilize", weed: "Weed", harvest: "Harvest",
   mulch: "Mulch", mow: "Mow (cut)", bale: "Rake / Bale", wrap: "Wrap (Baleage)", silage: "Chop (Silage)",
 };
 
+/** Real SVG icon for a task kind (2026-08-16) — replaces the old emoji map
+ * (`TL_TASK_ICON`), which had two collisions: plant/silage both used 🌱,
+ * harvest/mow both used 🌾. Reuses the same icon already drawn for the
+ * matching EQUIPMENT, so a task's chip and its implement's shop/queue icon
+ * always agree. */
+function taskIconSvg(kind: TimelineTaskKind, px: number): string {
+  switch (kind) {
+    case "plow": return plowIconSvg(px);
+    case "plant": return planterIconSvg(px);
+    case "fertilize": case "weed": return sprayerIconSvg(px);
+    case "harvest": return combineIconSvg(px);
+    case "mow": return mowerIconSvg(px);
+    case "bale": return balerIconSvg(px);
+    case "mulch": return mulcherIconSvg(px);
+    case "silage": return forageHarvesterIconSvg(px);
+    case "wrap": return wrapIconSvg(px);
+  }
+}
+
 let lastScheduleCalKey = "";
 
-/** Task COLUMNS, left to right, in the order a crop actually experiences them.
- * The header is the union across every step in the rotation, so a column means
- * the same thing in every block. */
-const TL_COLUMN_ORDER: TimelineTaskKind[] = [
-  "plow", "plant", "fertilize", "weed", "mow", "harvest", "bale", "wrap", "silage", "mulch",
-];
-
-/** Field whose schedule was last auto-scrolled to today. Scrolling is a
- * ONE-TIME courtesy when the panel opens — re-running it on every re-render
- * yanked the view out from under the player every time they clicked a task
- * (maintainer report, 2026-07-31). */
+/** Field whose schedule was last auto-scrolled to its current step. Scrolling
+ * is a ONE-TIME courtesy when the panel opens — re-running it on every
+ * re-render yanked the view out from under the player every time they
+ * clicked a task (maintainer report, 2026-07-31). */
 let tlScrolledFieldId: string | null = null;
 
+/** Width of the Schedule grid's crop-label column, in px. MUST match
+ * `.fp-sc-grid`'s first grid-template-column in index.html — the Today line
+ * is positioned over the lanes by offsetting past it, same technique as
+ * `CAL_LABEL_W`/`#cal-now` above. */
+
+/** Canonical top-to-bottom STACKING order for task icons that land in the
+ * same display month on the same row (2026-08-16, maintainer request —
+ * "allow the tasks to stack on top of each other and grow down, icon on top
+ * is the first to complete"). Not the same list as the old TL_COLUMN_ORDER:
+ * this one encodes real same-month dependency order, since it now has to
+ * resolve BOTH directions correctly — plow defaults to the SAME month as
+ * planting (so plow-before-plant has to hold), while a player-overridden
+ * plow can just as easily land on the harvest month instead (so harvest-
+ * before-plow has to hold too). `weed`/`fertilize` sit before `harvest`
+ * because both of their windows always end strictly before it; `mulch`
+ * sits after `harvest`/`mow`/`bale`/`wrap`/`silage` and before `plow`
+ * because `canPlow` requires the field already harvested-or-mulched. */
+const TASK_STACK_ORDER: TimelineTaskKind[] = [
+  "fertilize", "weed", "harvest", "mow", "bale", "wrap", "silage", "mulch", "plow", "plant",
+];
+
+/** Pixel offsets for the same-month chip stack: `CHIP_STACK_TOP` is where the
+ * first (top) chip sits, matching the plant/harvest bars' own vertical band;
+ * `CHIP_STACK_STEP` is the per-chip vertical gap below it. */
+const CHIP_STACK_TOP = 16;
+const CHIP_STACK_STEP = 24;
+
 /**
- * The rotation TIMELINE (maintainer rework, 2026-07-31).
+ * The rotation TIMELINE (2026-08-16 rework, replacing the tasks-across-the-
+ * top / literal-months-down-the-side grid this had been since 2026-07-31 —
+ * see git history for that version).
  *
- * LAYOUT: tasks run across the TOP axis, shared by every crop in the rotation.
- * The vertical axis is the rotation itself — each step is a BLOCK of its own
- * months, stacked in the order they happen. Today is a line across the grid.
+ * LAYOUT now matches the Crop Calendar (`rebuildCropCalendarGrid`): MONTHS
+ * fixed across the top, ONE ROW PER ROTATION STEP stacked downward, green/
+ * gold bars for the plant/harvest WINDOW (the crop's legal window, same as
+ * Crop Calendar draws — NOT shifted by any schedule override on this step;
+ * the override instead moves where the PLANT chip sits within that window).
+ * Every row shares one generic Mar->Feb display-year axis (`dispMoy`/
+ * `dispAbs`) rather than a true multi-year timeline — a rotation step's
+ * tasks project onto that shared axis regardless of which real campaign
+ * year they'll actually run in. Deliberate simplification: not every task's
+ * true legal window is representable on one row's own axis in full (e.g.
+ * plow's window can run from this step's harvest through its OWN next
+ * plant month, which may be a year or more away) — but `dispAbs` is a total
+ * function onto 0-11, so every month always lands somewhere on the shared
+ * axis; nothing is dropped or clipped, it just may visually sit near
+ * another row's own bars.
  *
- * Why this shape: the field panel is narrow and tall. A month axis across the
- * top meant permanent side-scrolling; a crop-per-column grid gave each crop one
- * narrow column to hold every task, so two tasks in the same month collided.
- * Tasks are a fixed, small column set that fits the width, and stacking crops
- * downward is the one direction the panel has room to grow.
+ * THE CALENDAR IS STILL THE WHOLE EDITOR: crop choice, adding/removing
+ * steps, and moving a task to another month all happen here, same as
+ * before. NEW: optional tasks (weed/fertilize/mulch/bale/wrap/silage) are
+ * hidden from the lane unless turned ON, and are only reachable via each
+ * row's expandable task KEY (click the crop label) — mandatory tasks
+ * (plow/plant/harvest, plus perennial `mow`) are always shown on the lane
+ * and can never be hidden.
  *
- * THE CALENDAR IS THE WHOLE EDITOR (maintainer, 2026-07-31). Crop choice, adding
- * and removing steps, turning optional operations on and off, and moving a task
- * to another month all happen HERE — there is no separate crop list or toggle
- * strip any more, because both were saying things the calendar already showed.
- *
- * Every task's AVAILABLE months are drawn all the time as dotted cells, not
- * revealed on click. That's what let the click-to-select step disappear: you
- * just click the month you want.
+ * MOVING A TASK is click-only (2026-08-16 — drag-and-drop removed). One
+ * transparent `.fp-sc-slot` per DISPLAY MONTH (12 per row, not per task) —
+ * clicking a legal one applies directly if exactly one movable task is legal
+ * there, or opens a small `.fp-sc-picker` popup to choose which one if
+ * several are (common now that plow and mulch share the same wide harvest→
+ * next-planting window: most non-growing months are legal for both).
+ * Replaced the earlier one-tick-per-task design specifically because it
+ * rendered every movable task's ticks always-visible and stacked at the
+ * SAME position when their windows overlapped — later tasks silently
+ * intercepted earlier ones' clicks (a real bug, not just visual noise: with
+ * plow and mulch now windowed identically, plow's ticks were completely
+ * unreachable, sitting under mulch's). One slot per month sidesteps that
+ * category of bug entirely — there's nothing left to stack.
  *
  * All the arithmetic lives in `sim/rotationTimeline.ts` and is unit-tested;
  * this only draws it. Moving a task still goes through `setScheduleOverride`
@@ -5717,10 +5807,13 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
   if (!field.plans || field.plans.length === 0) field.plans = [defaultPlan()];
   const plans = field.plans;
   const perennialField = isPerennial(plans[0]!.crop);
-  // One block per rotation step — see `ProjectOptions.maxBands`.
+  // One band per rotation step — see `ProjectOptions.maxBands`.
   const timeline = projectRotation(field, clock.time());
 
-  const key = [field.id, activeRotationIdx(field), JSON.stringify(plans), timeline.todayAbs].join("|");
+  const key = [
+    field.id, activeRotationIdx(field), JSON.stringify(plans), timeline.todayAbs,
+    [...expandedScheduleRows].sort((a, b) => a - b).join(","),
+  ].join("|");
   if (key === lastScheduleCalKey) return;
   lastScheduleCalKey = key;
 
@@ -5732,65 +5825,66 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
 
   host.insertAdjacentHTML("beforeend",
     `<div class="fp-cal-legend">
-      <span><i class="lg-sched"></i>Scheduled</span>
-      <span><i class="lg-legal"></i>Available — click to move</span>
+      <span><i class="lg-plant"></i>Plant window</span>
+      <span><i class="lg-sched"></i>Harvest window</span>
       <span><i class="lg-today"></i>Today</span>
     </div>`);
 
-  // Columns: every task kind any step in this rotation uses, canonically
-  // ordered so a column means the same thing in every block.
-  const used = new Set<TimelineTaskKind>();
-  for (const band of timeline.bands) for (const t of band.tasks) used.add(t.kind);
-  const columns = TL_COLUMN_ORDER.filter((k) => used.has(k));
-  const colOf = (kind: TimelineTaskKind): number => 2 + columns.indexOf(kind);
-
   const scroller = document.createElement("div");
-  scroller.className = "fp-tl-scroll";
+  scroller.className = "fp-sc-scroll";
   const grid = document.createElement("div");
-  grid.className = "fp-tl-grid";
-  grid.style.gridTemplateColumns = `40px repeat(${columns.length}, minmax(28px, 1fr))`;
+  grid.className = "fp-sc-grid";
   scroller.appendChild(grid);
   host.appendChild(scroller);
 
-  let row = 1;
-
-  // --- Sticky task header ---
-  const corner = document.createElement("div");
-  corner.className = "fp-tl-corner";
-  corner.style.gridRow = String(row);
-  corner.style.gridColumn = "1";
-  grid.appendChild(corner);
-  for (const kind of columns) {
-    const head = document.createElement("div");
-    head.className = "fp-tl-thead";
-    head.style.gridRow = String(row);
-    head.style.gridColumn = String(colOf(kind));
-    head.textContent = TL_TASK_ICON[kind] ?? "•";
-    head.title = TL_TASK_LABEL[kind] ?? kind;
-    grid.appendChild(head);
+  // --- Sticky season/month header — same shape as Crop Calendar's, minus
+  // its leading label-column corner cells: the Schedule grid has no label
+  // column at all now (2026-08-16 — "that area is unnecessary"), so every
+  // row (including the header) spans the full 12 columns from column 1. ---
+  for (const s of ["🌱", "☀️", "🍂", "❄️"]) {
+    const sh = document.createElement("div");
+    sh.className = "fp-sc-seasonhead";
+    sh.style.gridColumn = "span 3";
+    sh.textContent = s;
+    grid.appendChild(sh);
   }
-  row++;
-
-  /** Rows carrying a real month, for placing the today line afterwards. */
-  const monthRows: { abs: AbsMonth; row: number }[] = [];
+  for (let i = 0; i < MONTHS_PER_YEAR; i++) {
+    const mo = document.createElement("div");
+    mo.className = "fp-sc-mo";
+    mo.textContent = MONTH_SHORT[(START_MONTH + i) % MONTHS_PER_YEAR]!;
+    grid.appendChild(mo);
+  }
 
   for (const band of timeline.bands) {
     const plan = plans[band.planIdx]!;
     const cfg = gameConfig.crops[band.crop];
 
-    // --- Block header: the crop itself is edited here ---
+    // --- Block header: the crop itself is edited here, same as before —
+    //     plus the crop LABEL is now a button that expands/collapses this
+    //     row's task key. ---
     const bhead = document.createElement("div");
-    bhead.className = "fp-tl-bhead" + (band.current ? " current" : "");
-    bhead.style.gridRow = String(row);
-    bhead.style.gridColumn = "1 / -1";
+    bhead.className = "fp-sc-bhead" + (band.current ? " current" : "");
     if (band.planted) {
-      bhead.insertAdjacentHTML("beforeend", `<span class="fp-tl-planted" title="Already in the ground">●</span>`);
+      bhead.insertAdjacentHTML("beforeend", `<span class="fp-sc-planted" title="Already in the ground">●</span>`);
     }
 
-    // Crop picker — replaces the separate crop list that used to sit above the
-    // calendar saying the same thing twice.
+    const expanded = expandedScheduleRows.has(band.planIdx);
+    const label = document.createElement("button");
+    label.type = "button";
+    label.className = "fp-sc-croplabel";
+    label.setAttribute("aria-expanded", String(expanded));
+    label.innerHTML = `${expanded ? "▾" : "▸"} ${cfg.emoji} ${cfg.name}`;
+    label.title = expanded ? "Hide this step's task list" : "Show every optional task this step can run, and turn them on/off";
+    label.addEventListener("click", () => {
+      if (expanded) expandedScheduleRows.delete(band.planIdx);
+      else expandedScheduleRows.add(band.planIdx);
+      lastScheduleCalKey = ""; // view-only state — force the next refresh through
+      refreshScheduleCalendar(field, auto);
+    });
+    bhead.appendChild(label);
+
     const sel = document.createElement("select");
-    sel.className = "fp-tl-crop-sel";
+    sel.className = "fp-sc-crop-sel";
     for (const cropId of Object.keys(gameConfig.crops) as CropId[]) {
       const opt = document.createElement("option");
       opt.value = cropId;
@@ -5810,16 +5904,16 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
         plan.weed = false;
         plan.bale = true;
       }
-      // The new crop's legal months differ — an override carried over from the
-      // old crop would be re-validated away silently, so clear it and let the
-      // calendar show real defaults.
+      // The new crop's legal months differ — an override carried over from
+      // the old crop would be re-validated away silently, so clear it and
+      // let the calendar show real defaults.
       plan.schedule = undefined;
       editPlans();
     });
     bhead.appendChild(sel);
 
     const del = document.createElement("button");
-    del.className = "fp-tl-crop-del";
+    del.className = "fp-sc-crop-del";
     del.textContent = "✕";
     del.disabled = plans.length <= 1;
     del.title = plans.length <= 1 ? "A rotation needs at least one crop" : `Remove ${cfg.name} from the rotation`;
@@ -5831,135 +5925,201 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
     });
     bhead.appendChild(del);
     grid.appendChild(bhead);
-    row++;
 
-    // --- The months this step actually needs: first task (usually the plow,
-    //     which sits ahead of the crop) through the last. ---
-    const marks = band.tasks.flatMap((t) => t.at);
-    const from = Math.min(band.plantAbs, ...marks);
-    const to = Math.max(band.harvestAbs, ...marks);
-    const taskFor = new Map(band.tasks.map((t) => [t.kind, t]));
+    // --- Row: the 12-month lane, full width (2026-08-16 — dropped the
+    //     small crop-icon label column entirely; the name's already on the
+    //     header above, so a repeated icon here was just unused space). ---
+    const lane = document.createElement("div");
+    lane.className = "fp-sc-lane";
 
-    for (let abs = from; abs <= to; abs++) {
-      const { year, month } = splitAbs(abs);
-      const inGround = abs >= band.plantAbs && abs <= band.harvestAbs;
+    // Plant/harvest WINDOW bars — annual crops only (perennials have no
+    // plant/harvest concept at all: `perennialTasks()` never emits either
+    // kind). Same formula as `rebuildCropCalendarGrid`'s per-crop loop
+    // above, just per rotation STEP instead of per crop in gameConfig —
+    // this is the crop's whole legal window, not shifted by any schedule
+    // override (the mandatory `plant` chip below shows exactly where
+    // within it this step is actually scheduled).
+    if (!band.perennial) {
+      const plantStart = dispMoy(cfg.plantMonths[0]!);
+      lane.insertAdjacentHTML("beforeend", calBand("plant", plantStart, cfg.plantMonths.length));
+      const harvStart = dispMoy((cfg.plantMonths[0]! + cfg.growMonths) % MONTHS_PER_YEAR);
+      lane.insertAdjacentHTML("beforeend", calBand("harv", harvStart, harvestWindowMonthsFor(band.crop)));
+    }
 
-      const gutter = document.createElement("div");
-      gutter.className = `fp-tl-month ${seasonOfMonth(month)}${month === 0 ? " year-start" : ""}`;
-      gutter.style.gridRow = String(row);
-      gutter.style.gridColumn = "1";
-      gutter.title = `${MONTH_SHORT[month]} Year ${year}`;
-      gutter.innerHTML = month === 0
-        ? `<span class="fp-tl-year">Y${year}</span><span class="fp-tl-mname">${MONTH_SHORT[month]}</span>`
-        : `<span class="fp-tl-mname">${MONTH_SHORT[month]}</span>`;
-      grid.appendChild(gutter);
+    // Per-task-kind: which task(s) COULD move to a given DISPLAY MONTH
+    // (`monthOptions`, for the slots below), and which task(s) actually ARE
+    // scheduled there (`monthChips`, rendered as stacked icons further down)
+    // — both grouped per month rather than per task, since that's the axis
+    // that matters once two tasks can share a month.
+    const monthOptions = new Map<number, Array<{ kind: TimelineTaskKind; applyMonth: (moy: number) => void }>>();
+    const monthChips = new Map<number, Array<{ kind: TimelineTaskKind; mandatory: boolean; abs: AbsMonth }>>();
 
-      for (const kind of columns) {
-        const task = taskFor.get(kind);
-        const here = !!task && task.at.includes(abs);
-        const cell = document.createElement("div");
-        cell.className = "fp-tl-cell" + (inGround ? " in-ground" : "");
-        cell.style.gridRow = String(row);
-        cell.style.gridColumn = String(colOf(kind));
+    for (const task of band.tasks) {
+      const mandatory = task.toggle === undefined;
+      if (!mandatory && !task.on) continue; // optional + off: only reachable via the key below, not the lane
 
-        // AVAILABLE months are drawn always, not on click (maintainer request)
-        // — so moving a task is one click on the month you want, and the whole
-        // select-then-place step disappears.
-        if (task && !here && task.on && task.scheduleType && task.legal.includes(abs)) {
-          const scheduleType = task.scheduleType;
-          const plantMonth = task.plantMonth;
-          cell.classList.add("legal");
-          cell.title = `Move ${TL_TASK_LABEL[kind]} to ${MONTH_SHORT[month]} Y${year}`;
-          const apply = (): void => {
-            try {
-              setScheduleOverride(plan, scheduleType, month, plantMonth);
-              msg.textContent = "";
-              editPlans();
-            } catch (err) {
-              msg.textContent = (err as Error).message;
-            }
-          };
-          cell.addEventListener("click", apply);
-          cell.addEventListener("dragover", (e) => {
-            if (draggingScheduleCell?.kind !== kind) return;
-            e.preventDefault();
-            cell.classList.add("drag-over");
-          });
-          cell.addEventListener("dragleave", () => cell.classList.remove("drag-over"));
-          cell.addEventListener("drop", (e) => {
-            e.preventDefault();
-            cell.classList.remove("drag-over");
-            if (draggingScheduleCell?.kind !== kind) return;
-            apply();
-          });
+      const movable = task.legal.length > 0 && task.on && !!task.scheduleType;
+      if (movable) {
+        const scheduleType = task.scheduleType!;
+        const plantMonth = task.plantMonth;
+        const applyMonth = (moy: number): void => {
+          try {
+            setScheduleOverride(plan, scheduleType, moy, plantMonth);
+            msg.textContent = "";
+            editPlans();
+          } catch (err) {
+            msg.textContent = (err as Error).message;
+          }
+        };
+        for (const l of task.legal) {
+          const d = dispAbs(l);
+          (monthOptions.get(d) ?? monthOptions.set(d, []).get(d)!).push({ kind: task.kind, applyMonth });
         }
-        grid.appendChild(cell);
       }
 
-      // Chips: this month's tasks, each in its own column.
-      for (const task of band.tasks) {
-        if (!task.at.includes(abs)) continue;
+      for (const abs of task.at) {
+        const d = dispAbs(abs);
+        (monthChips.get(d) ?? monthChips.set(d, []).get(d)!).push({ kind: task.kind, mandatory, abs });
+      }
+    }
+
+    // Render the stacks: sort each month's chips into completion order
+    // (`TASK_STACK_ORDER`), then stack them top-to-bottom, growing DOWN into
+    // the space below the bars (2026-08-16 — "allow the tasks to stack...
+    // icon on top is the first to complete"). Centered on the MONTH's own
+    // column, not its left edge — `(d + 0.5) / 12`, not `d / 12`.
+    let maxStack = 1;
+    for (const [d, chips] of monthChips) {
+      chips.sort((a, b) => TASK_STACK_ORDER.indexOf(a.kind) - TASK_STACK_ORDER.indexOf(b.kind));
+      maxStack = Math.max(maxStack, chips.length);
+      const leftPct = (((d + 0.5) / MONTHS_PER_YEAR) * 100).toFixed(2);
+      chips.forEach((c, i) => {
+        const { year, month } = splitAbs(c.abs);
+        const options = monthOptions.get(d);
+        const movable = !!options?.some((o) => o.kind === c.kind);
         const chip = document.createElement("div");
-        const movable = task.legal.length > 0 && task.on && !!task.scheduleType;
-        chip.className = "fp-tl-chip" + (task.on ? "" : " off") + (movable ? " movable" : "");
-        chip.style.gridRow = String(row);
-        chip.style.gridColumn = String(colOf(task.kind));
-        chip.textContent = TL_TASK_ICON[task.kind] ?? "•";
-        const name = TL_TASK_LABEL[task.kind] ?? task.kind;
-        // OPTIONAL operations are switched on and off from their own chip
-        // (maintainer request) — the toggle strip that used to live on the
-        // crop header is gone.
-        if (task.toggle) {
-          const toggle = task.toggle;
-          chip.title = task.on
-            ? `${name} — ${MONTH_SHORT[month]} Y${year} · click to turn OFF${movable ? ", drag to move" : ""}`
-            : `${name} is off — click to turn it on`;
-          chip.addEventListener("click", () => {
+        chip.className = "fp-sc-chip" + (c.mandatory ? " mandatory" : " optional");
+        chip.style.left = `${leftPct}%`;
+        chip.style.top = `${CHIP_STACK_TOP + i * CHIP_STACK_STEP}px`;
+        chip.innerHTML = taskIconSvg(c.kind, 20);
+        chip.title = `${TASK_LABEL[c.kind]} — ${MONTH_SHORT[month]} Y${year}`
+          + (movable ? " · click an outlined month to move it" : " · fixed timing");
+        lane.appendChild(chip);
+      });
+    }
+    // The lane grows to fit the tallest stack in THIS row (2026-08-16 —
+    // "use some of the space below the timeline") rather than a fixed
+    // height every row pays for whether it needs it or not.
+    lane.style.height = `${CHIP_STACK_TOP + maxStack * CHIP_STACK_STEP + 8}px`;
+
+    // One transparent slot per DISPLAY MONTH (2026-08-16, replacing one tick
+    // per task — see the doc comment above for why). A click applies
+    // directly when exactly one task is legal there; with more than one
+    // (common — plow and mulch now share the same wide window) it opens a
+    // small picker instead of guessing which the player meant.
+    for (let d = 0; d < MONTHS_PER_YEAR; d++) {
+      const slot = document.createElement("div");
+      slot.className = "fp-sc-slot";
+      slot.style.left = `${((d / MONTHS_PER_YEAR) * 100).toFixed(2)}%`;
+      const options = monthOptions.get(d);
+      if (options && options.length > 0) {
+        slot.classList.add("legal");
+        const moy = (d + START_MONTH) % MONTHS_PER_YEAR;
+        const monthLabel = MONTH_SHORT[moy];
+        slot.title = options.length === 1
+          ? `Move ${TASK_LABEL[options[0]!.kind]} to ${monthLabel}`
+          : `${monthLabel}: move ${options.map((o) => TASK_LABEL[o.kind]).join(" or ")} here`;
+        slot.addEventListener("click", () => {
+          if (options.length === 1) {
+            closeSchedulePicker();
+            options[0]!.applyMonth(moy);
+            return;
+          }
+          if (openSchedulePicker?.el.parentElement === slot) {
+            closeSchedulePicker(); // clicking the same open slot again closes it
+            return;
+          }
+          closeSchedulePicker();
+          const picker = document.createElement("div");
+          picker.className = "fp-sc-picker";
+          for (const opt of options) {
+            const optBtn = document.createElement("button");
+            optBtn.type = "button";
+            optBtn.className = "fp-sc-picker-opt";
+            optBtn.innerHTML = `${taskIconSvg(opt.kind, 16)}<span>${TASK_LABEL[opt.kind]}</span>`;
+            optBtn.addEventListener("click", (e) => {
+              e.stopPropagation();
+              closeSchedulePicker();
+              opt.applyMonth(moy);
+            });
+            picker.appendChild(optBtn);
+          }
+          slot.appendChild(picker);
+          const onDocClick = (e: MouseEvent) => {
+            if (!picker.contains(e.target as Node)) closeSchedulePicker();
+          };
+          // Registered next tick — the click that OPENED the picker would
+          // otherwise immediately close it (it's still bubbling to `document`).
+          requestAnimationFrame(() => document.addEventListener("click", onDocClick, true));
+          openSchedulePicker = { el: picker, onDocClick };
+        });
+      }
+      lane.appendChild(slot);
+    }
+    grid.appendChild(lane);
+
+    // --- The expandable task key: every OPTIONAL task this step could run,
+    //     each a toggle pill (2026-08-16). Mandatory tasks never appear here
+    //     — they're always on the lane above and can't be hidden. ---
+    if (expanded) {
+      const keyRow = document.createElement("div");
+      keyRow.className = "fp-sc-key";
+      const toggleable = band.tasks.filter((t) => t.toggle !== undefined);
+      if (toggleable.length === 0) {
+        keyRow.innerHTML = `<span style="font-size:11px;color:#8a7658;">No optional tasks for ${cfg.name}.</span>`;
+      } else {
+        for (const task of toggleable) {
+          const toggle = task.toggle!;
+          const pill = document.createElement("button");
+          pill.type = "button";
+          pill.className = "fp-sc-key-pill" + (task.on ? "" : " off");
+          pill.innerHTML = `${taskIconSvg(task.kind, 13)}<span>${TASK_LABEL[task.kind]}</span>`;
+          pill.title = task.on
+            ? `${TASK_LABEL[task.kind]} is on — click to turn it off`
+            : `${TASK_LABEL[task.kind]} is off — click to turn it on`;
+          pill.addEventListener("click", () => {
             plan[toggle] = !plan[toggle];
             editPlans();
           });
-        } else {
-          chip.title = `${name} — ${MONTH_SHORT[month]} Y${year}`
-            + (movable ? " · drag, or click an available month" : " · fixed timing");
+          keyRow.appendChild(pill);
         }
-        if (movable) {
-          chip.draggable = true;
-          chip.addEventListener("dragstart", () => {
-            draggingScheduleCell = { planIdx: band.planIdx, kind: task.kind };
-            chip.classList.add("dragging");
-          });
-          chip.addEventListener("dragend", () => {
-            draggingScheduleCell = null;
-            chip.classList.remove("dragging");
-          });
-        }
-        grid.appendChild(chip);
       }
-
-      monthRows.push({ abs, row });
-      row++;
+      grid.appendChild(keyRow);
     }
   }
 
-  // --- Today: a line across the whole grid. Lands ON its month where the
-  //     rotation covers it, and at the top edge of the next month drawn where
-  //     today falls in a fallow gap between blocks. ---
-  const exact = monthRows.find((r) => r.abs === timeline.todayAbs);
-  const marker = exact ?? monthRows.find((r) => r.abs > timeline.todayAbs);
-  if (marker) {
-    const line = document.createElement("div");
-    line.className = "fp-tl-today" + (exact ? "" : " gap");
-    line.style.gridRow = String(marker.row);
-    line.style.gridColumn = "1 / -1";
-    line.title = exact ? "Today" : "Today — the field is between crops";
-    grid.appendChild(line);
-    // ONE-TIME scroll to today when the panel opens on a field. Re-running it
-    // on every re-render yanked the view away whenever a task was clicked.
-    if (tlScrolledFieldId !== field.id) {
-      tlScrolledFieldId = field.id;
-      const target = line;
+  // --- Today: ONE line for the whole grid (every row shares one generic
+  //     axis, so there's exactly one "today" x-position, not one per row) ---
+  // No label-column offset to blend in any more (2026-08-16) — the grid is
+  // a plain 12-column track now, so this is a straight percentage.
+  const f = dispAbs(timeline.todayAbs) / MONTHS_PER_YEAR;
+  const todayLine = document.createElement("div");
+  todayLine.className = "fp-sc-today";
+  todayLine.style.left = `${(f * 100).toFixed(2)}%`;
+  todayLine.title = "Today";
+  grid.appendChild(todayLine);
+
+  // ONE-TIME scroll to the CURRENTLY RUNNING step when the panel opens on a
+  // field (there's no per-month row to scroll to any more — the axis is
+  // always fully visible; only rows scroll). Re-running this on every
+  // re-render yanked the view away whenever a task was clicked
+  // (maintainer report, 2026-07-31, still true of the new layout).
+  if (tlScrolledFieldId !== field.id) {
+    tlScrolledFieldId = field.id;
+    const currentBhead = grid.querySelector<HTMLElement>(".fp-sc-bhead.current");
+    if (currentBhead) {
       requestAnimationFrame(() => {
-        scroller.scrollTop = Math.max(0, target.offsetTop - scroller.clientHeight / 2);
+        scroller.scrollTop = Math.max(0, currentBhead.offsetTop - scroller.clientHeight / 2);
       });
     }
   }
@@ -5967,7 +6127,7 @@ function refreshScheduleCalendar(field: Field, auto: boolean): void {
   // --- Add a crop (perennial stands don't rotate) ---
   if (!perennialField) {
     const add = document.createElement("button");
-    add.className = "fp-tl-add";
+    add.className = "fp-sc-add";
     add.textContent = "＋ Add a crop";
     add.disabled = plans.length >= 5;
     add.title = plans.length >= 5 ? "A rotation holds at most 5 crops" : "Add another crop to the rotation";

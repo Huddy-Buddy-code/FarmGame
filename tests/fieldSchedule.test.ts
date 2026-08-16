@@ -107,6 +107,20 @@ describe("legalMonthsFor", () => {
     expect(mulch.length).toBeGreaterThan(0);
   });
 
+  it("mulch: any month after harvest through the next planting, same gap plow gets (2026-08-16)", () => {
+    // "Mulching should be the final task, always after everything else... any
+    // months, as long as it is after everything else" — weed/fertilize both
+    // cap at plantMonth+span-1 (strictly before harvest) by construction, so
+    // harvest is always the chronologically LAST of the other tasks; mulch's
+    // window just needs to start there and run through the next planting,
+    // exactly like plow's own window does.
+    expect(legalMonthsFor("mulch", "corn", 3)).toEqual(legalMonthsFor("plow", "corn", 3));
+    expect(legalMonthsFor("mulch", "wheat", 8)).toEqual(legalMonthsFor("plow", "wheat", 8));
+    // Same-month-as-harvest is legal (the harvest month is the window's start).
+    const harvestMonth = legalMonthsFor("harvest", "corn", 3)[0]!;
+    expect(legalMonthsFor("mulch", "corn", 3)).toContain(harvestMonth);
+  });
+
   it("cross-checks weed/fertilize legal months against the real farming.ts gates", () => {
     for (const plantMonth of [3, 4]) {
       const plantedAt = timeForMonth(plantMonth);
@@ -134,18 +148,21 @@ describe("effectiveMonthFor", () => {
     expect(effectiveMonthFor("plant", "corn", undefined)).toBe(3);
   });
 
-  it("plow DEFAULTS TO JANUARY when January is in the window", () => {
-    expect(effectiveMonthFor("plow", "corn", undefined, 3)).toBe(0);
-    expect(effectiveMonthFor("plow", "soybeans", undefined, 4)).toBe(0);
+  it("plow DEFAULTS TO right before planting — the LAST legal month (2026-08-16)", () => {
+    // plowMonthsInOrder builds the window ascending from harvest through
+    // planting, so the last entry is always the planting month itself.
+    expect(effectiveMonthFor("plow", "corn", undefined, 3)).toBe(3); // same month as planting
+    expect(effectiveMonthFor("plow", "soybeans", undefined, 4)).toBe(4);
   });
 
-  it("plow on an overwintering crop defaults to the month after harvest instead", () => {
-    // Winter Wheat is in the ground every January, so January can't be the
-    // default — it falls back to the one free month, August, right before its
-    // own September planting. Defaulting to January would schedule the plow
-    // ten months AFTER the seed went in.
-    expect(effectiveMonthFor("plow", "wheat", undefined, 8)).toBe(6); // Jun ripe -> Jul
-    expect(effectiveMonthFor("plow", "rye", undefined, 8)).toBe(5); // May ripe -> Jun
+  it("plow on an overwintering crop also defaults right before its own planting", () => {
+    // Winter Wheat/Rye are in the ground every January, so the OLD
+    // January-else-month-after-harvest default put their plow right after
+    // THEIR OWN harvest ("the end of the life cycle") instead of ahead of
+    // the next autumn seeding. Now it lands on the planting month itself,
+    // same rule as every other crop.
+    expect(effectiveMonthFor("plow", "wheat", undefined, 8)).toBe(8); // Sep, same as planting
+    expect(effectiveMonthFor("plow", "rye", undefined, 8)).toBe(8);
   });
 
   it("honors a valid override", () => {
@@ -198,13 +215,15 @@ function timeForMonth(m: number): number {
 }
 
 describe("legalMonthsFor agrees with the real plow/plant gate functions", () => {
-  it("plowDueAt fires from the chosen month onward, and never before it", () => {
-    // Corn's window is Oct→Mar in that order, defaulting to January. So Oct/Nov/
-    // Dec are too early, Jan onward is due, and a growing month is never due.
+  it("plowDueAt fires only once the ordering reaches the chosen (last) month (2026-08-16)", () => {
+    // Corn's window is Aug->Apr in that order, now defaulting to April — right
+    // before/at planting — so every OTHER month in the ordering (the whole
+    // rest of the gap, including the growing months) is too early, and only
+    // April itself is due. This trades away the old default's retry cushion
+    // (see effectiveMonthFor's doc comment) — a deliberate, known trade-off.
     const pm = 3;
-    for (const m of [9, 10, 11]) expect(plowDueAt("corn", m, undefined, pm)).toBe(false);
-    for (const m of [0, 1, 2]) expect(plowDueAt("corn", m, undefined, pm)).toBe(true);
-    for (const m of [4, 5, 6, 7, 8]) expect(plowDueAt("corn", m, undefined, pm)).toBe(false);
+    for (const m of [7, 8, 9, 10, 11, 0, 1, 2]) expect(plowDueAt("corn", m, undefined, pm)).toBe(false);
+    expect(plowDueAt("corn", 3, undefined, pm)).toBe(true);
   });
 
   it("plowDueAt honors an override and still retries after a missed month", () => {

@@ -51,6 +51,135 @@ typecheck clean.
   tab, Schedule calendar (the calendar IS the rotation editor), Settings
   (multi-farm), Home screen (county picker).
 
+## Recent focus: Field Schedule tab rewrite (2026-08-16)
+
+The "Auto Manage" UI (Field panel → Schedule tab) was rebuilt from scratch,
+replacing the tasks-across-the-top / literal-months-down-the-side grid
+(2026-07-31 design) with a horizontal timeline matching the Crop Calendar's
+look: months fixed across the top, one row per rotation step, green/gold
+plant/harvest window bars. New on top of that: an expandable per-row task
+key (click a crop to show every optional task — weed/fertilize/mulch/bale/
+wrap/silage — as on/off toggle pills; plow/plant/harvest stay mandatory and
+always visible), real SVG task icons replacing the old emoji set (which had
+two collisions: plant/silage both 🌱, harvest/mow both 🌾; `wrap` gets a
+genuinely new icon — it had none before and silently drew a plow icon), and
+continuous drag-and-click retiming (always-visible legal ticks positioned by
+%, replacing discrete grid cells). The Field panel's Schedule tab alone
+grows to 640px (`.fp-main.wide`) to fit; the other three tabs stay compact.
+
+**This initial pass was a pure rendering-layer rewrite** — `sim/rotationTimeline.ts`,
+`sim/schedule.ts`, and `FieldPlan`/`Field` in `state/saveState.ts` were
+untouched and didn't need to be; `projectRotation`/`legalMonthsFor`/
+`setScheduleOverride` already had everything the new renderer needed.
+Confirmed via the existing test suite: 965/965 unchanged, zero test files
+touched (neither `tests/rotationTimeline.test.ts` nor
+`tests/fieldSchedule.test.ts` reaches into `main.ts`). Typecheck clean.
+(A same-day follow-up below DID change `sim/schedule.ts` — real rule
+changes the maintainer asked for after seeing the rewrite in action.)
+
+**NOT verified live this round** — a Browser Preview session hit a real
+tooling problem (not a code problem): screenshots failed with "the Browser
+pane is not displayed," and clicks stopped actually reaching the page (Fields
+panel wouldn't open even via repeated clicks + a full reload). This is the
+first time that's happened this session — distinct from the documented
+NAIP-tile-hang risk — so flagging it here rather than guessing at a fix.
+**This whole rewrite needs a real eyes-on pass before trusting it in play**:
+build a multi-step rotation (bale crop + silage crop + a perennial, to hit
+every branch), confirm the header stays pinned while scrolling, bars/icons
+render at the right months, the key expands/collapses per row, and both
+click-to-move and drag-to-move actually call through to `setScheduleOverride`
+(watch for the error text on an illegal drop). The implementation plan this
+was built from is at `C:\Users\Hudson\.claude\plans\sunny-squishing-wozniak.md`.
+
+### Follow-up (2026-08-16): plow/mulch rule changes + wider drop targets
+
+Three maintainer-requested changes on top of the rewrite above — the first
+two are genuine RULE changes in `sim/schedule.ts`, not just rendering:
+
+- **Plow now defaults to the LAST legal month** (right before, or the same
+  month as, planting) instead of "January, else the month after harvest."
+  Old default put an overwintering cover crop's plow right after its OWN
+  harvest ("the end of the life cycle"); new default puts every crop's plow
+  right ahead of its next planting. Trade-off, called out in the code: the
+  soft-retry cushion (`plowDueAt`'s "at or after chosen month") now has
+  nowhere later to fall back to if the last legal month is missed, since
+  there's nothing past it in the ordering — deliberate, not an oversight.
+  `DEFAULT_PLOW_MONTH` removed as dead code.
+- **Mulch's legal window widened** from a fixed `mulchWindowMonths` (3) cap
+  to the same harvest→next-planting gap plow gets — "any months, as long as
+  it is after everything else." Confirmed by tracing the sim that this is
+  safe: weed/fertilize's own windows always end strictly before harvest by
+  construction, so harvest is already the chronologically last of the other
+  tasks in every case; only the mulch window's END needed to change.
+  `gameConfig.schedule.mulchWindowMonths` removed (now fully unused).
+- **Drag-and-drop landing targets widened** from a 3px centered line to a
+  full month-wide rectangle (`.fp-sc-legal`, `index.html`) — visually "the
+  12 months of the year," matching the header columns above.
+
+8 tests updated/added across `tests/fieldSchedule.test.ts`,
+`tests/farming.test.ts`, `tests/mulch.test.ts` — each confirmed via
+revert-check to fail against the old code. Typecheck clean, 966/966 tests.
+Live browser verification hit the same tooling problem as the initial
+rewrite (see above) — still needs an eyes-on pass, same checklist plus:
+confirm a field's plow now schedules right before its next planting, not
+right after harvest, and that the new drop-target rectangles are actually
+easier to hit than the old thin line was.
+
+### Follow-up (2026-08-16): drag-and-drop replaced with click-to-pick
+
+The wider drop targets above exposed a real bug, not just a UI complaint:
+plow and mulch now share an identical legal window, so their always-visible
+legal ticks landed at the exact same positions and later-painted DOM
+elements silently ate earlier ones' clicks — explaining all three symptoms
+in the maintainer's report at once ("boxes everywhere," plow not
+draggable, mulch "all over the place"). Rather than patch drag-and-drop to
+handle the collision, the maintainer asked to drop dragging entirely:
+
+- One transparent slot per display month, not one tick per task — inherently
+  collision-free, since there's only ever one clickable element per month.
+  A click applies directly when exactly one task is legal there; with more
+  than one (now common) it opens a small `.fp-sc-picker` popup to choose.
+- Bigger, transparent-by-default slots (dashed outline only on legal months)
+  and bigger task-icon chips (28px, 20px icon, up from 20/14).
+- All drag machinery removed: `draggingScheduleChip` state, pointer-move/up
+  handlers, the `movable`/`dragging` CSS.
+
+### Follow-up (2026-08-16): task-icon stacking, centering fix, label column removed
+
+Three more refinements on the same tab:
+
+- **Same-month task icons now stack vertically** instead of fully
+  overlapping — grouped per display month, ordered by `TASK_STACK_ORDER`
+  (a real completion-order list, not just cosmetic: e.g. mulch always sorts
+  after harvest/mow/bale/wrap/silage since `canMulch` requires the field
+  already harvested), and rendered top-to-bottom growing down below the
+  plant/harvest bars. Each row's lane height is now computed from its own
+  tallest stack instead of a fixed 48px every row paid for.
+- **Fixed a centering bug**: chips were positioned at each month's LEFT EDGE
+  (`dispAbs(abs)/12*100%`) instead of its center — off by half a month-width
+  for every chip, not just the mandatory ones the maintainer flagged.
+  Corrected to `(dispAbs(abs)+0.5)/12*100%`.
+- **Removed the row-label column** (`.fp-sc-label`, a redundant small
+  crop-emoji cell — the name's already on the row header above) and gave
+  the freed ~130px back to the 12-month lane. `.fp-sc-grid`'s
+  `grid-template-columns` dropped its leading fixed column; `.fp-sc-lane`
+  and `.fp-sc-key` now span the full grid width.
+
+Typecheck clean, 966/966 tests (main.ts/index.html only — no sim-layer
+changes, so no test file needed updating). Verified this round: zero
+console errors on load, and read the live stylesheet directly to confirm
+`.fp-sc-grid`/`.fp-sc-lane`/`.fp-sc-chip` compiled with the new rules and
+`.fp-sc-label`/`.fp-sc-corner` are gone with no orphaned rules left behind.
+**Did not get a full interactive click-through** — the loaded save had no
+fields yet (0 ac) so there was no live rotation to open the Schedule tab
+against, and drawing one + building a multi-crop rotation to reproduce a
+same-month task collision was more setup than this round's tooling budget
+covered. Still needs a real eyes-on pass: build a rotation with two tasks
+sharing a month (e.g. plow and mulch), confirm the icons actually stack
+instead of overlap, confirm the plant/harvest/plow icons visually center
+over their month column, and confirm the picker popup and slot clicks still
+work now that the lane spans the full width.
+
 ## Recent focus: silage/bale economy (Aug 2026)
 
 The last few weeks' work built out a full silage/forage system and then spent
@@ -102,8 +231,9 @@ visual risk — but worth a real playthrough next time silage/bales come up).
   this is worth doing deliberately, not accidentally.
 - **Contracts / forward-selling** (brief §6) — not started. This is the other
   half of the "planning" fantasy the game is pitched on.
-- Rotation planner and Schedule drag-and-drop are unit-tested only, never
-  played live.
+- **The just-rewritten Field Schedule tab needs a live pass** (see "Recent
+  focus" above) — typecheck/tests are clean but nobody has actually clicked
+  through it in a browser yet.
 - Routing runs on the public OSRM demo instance, not self-hosted.
 
 ## How to run

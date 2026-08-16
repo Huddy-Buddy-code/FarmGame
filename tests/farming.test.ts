@@ -97,8 +97,8 @@ const APRIL_1 = minutesPerMonth();
  * 2026-07-11, narrowed to winter 2026-07-12: keeps auto-manage from re-plowing
  * right after harvest). */
 const WINTER_1 = 9 * minutesPerMonth();
-const JAN_1 = 10 * minutesPerMonth(); // the default plow month for a spring crop
-const OCT_1 = 7 * minutesPerMonth(); // in corn's plow window, but before January
+const JAN_1 = 10 * minutesPerMonth(); // in corn's plow window, but still before its April default
+const OCT_1 = 7 * minutesPerMonth(); // in corn's plow window, but before its April default
 
 describe("calendar", () => {
   it("starts on March 1, Year 1", () => {
@@ -164,18 +164,22 @@ describe("task queue + agents (brief §9, §10): plow → plant → grow → har
 
   it("but auto-manage's own plowing waits for the month the schedule picked", () => {
     // Plowing is legal any month the ground is free (2026-07-23), but
-    // auto-manage still holds off until the scheduled month — January by
-    // default — so a harvested field isn't turned over the moment it clears.
+    // auto-manage still holds off until the scheduled month — now the LAST
+    // legal one, right before/at planting (2026-08-16 — "I want crops to
+    // Plow before they plant, not at the end of the life cycle") — so a
+    // harvested field isn't turned over the moment it clears.
     const save = gameWithAgents();
     const field = freshField("stubble");
     field.autoManage = true;
     field.plans = [defaultPlan()];
     save.fields.push(field);
     autoManageField(save, field, OCT_1);
-    expect(save.tasks).toHaveLength(0); // October: legal to plow, but ahead of January
+    expect(save.tasks).toHaveLength(0); // October: legal to plow, but ahead of April
     autoManageField(save, field, WINTER_1);
-    expect(save.tasks).toHaveLength(0); // December: same — still ahead of January
+    expect(save.tasks).toHaveLength(0); // December: same — still ahead of April
     autoManageField(save, field, JAN_1);
+    expect(save.tasks).toHaveLength(0); // January: same — still ahead of April
+    autoManageField(save, field, APRIL_1);
     expect(save.tasks).toHaveLength(1);
     expect(save.tasks[0]!.type).toBe("plow");
   });
@@ -601,14 +605,16 @@ describe("auto-manage (idle mode, player-requested)", () => {
 
     // Fresh off harvest (August) — August is the FIRST month of corn's plow
     // window, so this is the real test of the maintainer-requested behavior:
-    // legal to plow, but not yet due, so the ground rests until January.
-    // (Ignore any still-finishing Unload Harvester trip — it's not a
-    // lifecycle task and self-clears once the hopper's empty.)
+    // legal to plow, but not yet due, so the ground rests until right before
+    // the next planting (April, 2026-08-16 — plow now defaults to the LAST
+    // legal month instead of January). (Ignore any still-finishing Unload
+    // Harvester trip — it's not a lifecycle task and self-clears once the
+    // hopper's empty.)
     expect(save.tasks.filter((t) => t.type !== "unloadHarvester")).toHaveLength(0);
 
     now = runUntil(save, now, () => field.status === "tilled", 12 * mpm);
     expect(field.status).toBe("tilled");
-    expect([0, 1, 2]).toContain(dateOf(now).month);
+    expect([3, 4, 5]).toContain(dateOf(now).month);
   });
 
   it("silently waits (doesn't throw) when a step isn't affordable or in season", () => {

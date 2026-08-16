@@ -266,6 +266,22 @@ export function baleIconSvg(size = 14, color: BaleTint = "hay"): string {
   `);
 }
 
+/** Bale Wrapper's task icon (2026-08-16): a round bale already in its white
+ * wrap film — the `wrapped` tint (see BALE_TINTS) the map already uses for
+ * baleage, reused here with diagonal criss-crossing bands instead of
+ * `baleIconSvg`'s horizontal twine, so it reads as film wrap rather than
+ * bale twine. Neither `baleWrapper` nor `combiBaler` had a real icon before
+ * this — `IMPLEMENT_ICON_SVG` had no entry for either, so both silently fell
+ * back to the plow icon anywhere an implement icon was drawn for them. */
+export function wrapIconSvg(size = 22): string {
+  const t = BALE_TINTS.wrapped;
+  return svg(size, `
+    <ellipse cx="16" cy="17" rx="12" ry="10.5" fill="${t.fill}" stroke="${t.stroke}" stroke-width="1.4"/>
+    <path d="M5.5 10.5 c6 3 15 3 21 8.5 M26.5 10.5 c-6 3 -15 3 -21 8.5" stroke="${t.band}" stroke-width="1" fill="none"/>
+    <ellipse cx="16" cy="17" rx="4.4" ry="3.9" fill="${t.core}" stroke="${t.stroke}" stroke-width="0.9"/>
+  `);
+}
+
 /** Mower (2026-07-13): a trailed disc mower — angled cutter bar carrying a row
  * of spinning cutting discs, on a small transport wheel. Cuts perennial forage. */
 export function mowerIconSvg(size = 22): string {
@@ -420,4 +436,8 @@ export const IMPLEMENT_ICON_SVG: Record<string, (size?: number) => string> = {
   forageWagon: forageWagonIconSvg,
   rowCropHead: planterIconSvg,
   pickupHead: rakeIconSvg,
+  // Real art (2026-08-16) — both used to silently fall through to the plow
+  // icon (no entry here at all).
+  baleWrapper: wrapIconSvg,
+  combiBaler: wrapIconSvg,
 };

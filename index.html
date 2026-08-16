@@ -185,12 +185,14 @@
       }
       .fp-tab { font-size: 18px; line-height: 1; padding: 8px 6px; border-radius: 8px; opacity: 0.55; }
       .fp-tab.active { opacity: 1; background: var(--green); border-color: var(--green-dark); }
-      /* One uniform, compact width for ALL four tabs (maintainer request,
-         2026-07-21) — the vertical calendar + the 4-column finance table both
-         fit here, so no per-tab width toggle. */
+      /* Compact width by default (View/Finances/Settings all fit at 384px).
+         The Schedule tab alone grows wider (2026-08-16 rework, `.wide` toggled
+         in switchFieldPanelTab) — a 12-months-across horizontal timeline needs
+         real width, and the other three tabs would just look sparse at it. */
       .fp-main {
         padding: 14px 16px; overflow-y: auto; width: 384px; box-sizing: border-box;
       }
+      .fp-main.wide { width: 640px; }
       .fp-tabpanel { min-width: 0; }
 
       /* ---------- New-field draw panel (shown only while placing corners) ---------- */
@@ -361,140 +363,165 @@
       }
       .fp-cal-legend span { display: inline-flex; align-items: center; gap: 4px; }
       .fp-cal-legend i { width: 16px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+      .fp-cal-legend i.lg-plant { background: var(--green); border: 1.5px solid var(--green-dark); box-sizing: border-box; }
       .fp-cal-legend i.lg-sched { background: var(--gold); border: 1.5px solid var(--wood-dark); box-sizing: border-box; }
-      .fp-cal-legend i.lg-legal { background: var(--cream-2); border: 1.5px dashed var(--wood); box-sizing: border-box; }
       .fp-cal-legend i.lg-today { background: var(--red); width: 3px; border-radius: 2px; }
 
-      /* ---------- Rotation TIMELINE (maintainer rework, 2026-07-31) ----------
-         TASKS across the top axis, shared by every crop in the rotation. The
-         vertical axis is the rotation itself: each step is a BLOCK of its own
-         months, stacked in the order they happen, with today drawn across.
+      /* ---------- Rotation TIMELINE (2026-08-16 rework) ----------
+         Same design language as the Crop Calendar above (#cal-grid): MONTHS
+         fixed across the top, ONE ROW PER ROTATION STEP stacked downward,
+         green/gold bars for the plant/harvest WINDOW. Difference from Crop
+         Calendar: it's per-field and interactive — small task-icon chips sit
+         on/above each row's bars at the task's actual scheduled month, and
+         are click- or drag-movable to any other always-visible legal tick.
+         Every row shares one generic Mar->Feb axis (no true multi-year
+         timeline — see the doc comment on `refreshScheduleCalendar`).
 
-         Why this shape: the field panel is ~430px wide and tall. Months across
-         the top meant permanent side-scrolling; a crop-per-column grid gave
-         each crop one narrow column to hold every task, so two tasks in the
-         same month collided. Tasks are a FIXED, small column set that fits the
-         width, and stacking crops downward is the one direction with room.
-
-         It is all ONE css grid (template set from JS: a 42px month gutter + one
-         column per task kind used). Block headers span every column; chips and
-         drop targets are placed at (month row, task column). */
-      .fp-tl-scroll {
-        overflow: auto; max-height: 360px;
+         Replaces the previous tasks-across-the-top / literal-months-down-the-
+         side grid, which existed because the field panel used to be too
+         narrow (~430px) for months-across-the-top without permanent
+         side-scrolling — `.fp-main.wide` (below) removes that constraint. */
+      .fp-sc-scroll {
+        overflow: auto; max-height: 420px;
         border: 1.5px solid var(--cream-2); border-radius: 8px;
         background: rgba(138, 90, 51, 0.05);
       }
-      .fp-tl-grid { display: grid; gap: 2px; padding: 4px; }
-
-      /* Sticky task header across the top; the corner pins both ways. */
-      .fp-tl-corner {
-        position: sticky; top: 0; left: 0; z-index: 7;
-        background: var(--cream); border-radius: 4px;
+      .fp-sc-grid {
+        position: relative; display: grid;
+        grid-template-columns: repeat(12, 1fr);
+        row-gap: 4px; column-gap: 2px; padding: 4px; align-items: center;
       }
-      .fp-tl-thead {
-        position: sticky; top: 0; z-index: 6;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 13px; line-height: 1; cursor: help;
-        min-height: 22px; border-radius: 4px 4px 0 0;
-        background: var(--cream); box-shadow: 0 2px 4px -2px rgba(60, 40, 15, 0.3);
+      .fp-sc-seasonhead {
+        position: sticky; top: 0; z-index: 6; background: var(--cream);
+        font-size: 14px; text-align: center; padding-bottom: 1px;
+        box-shadow: 0 2px 4px -2px rgba(60, 40, 15, 0.3);
+      }
+      .fp-sc-mo {
+        position: sticky; top: 21px; z-index: 6; background: var(--cream);
+        font-size: 11px; font-weight: 700; text-align: center; color: #8a7658;
+        border-bottom: 2px solid var(--cream-2); padding-bottom: 3px;
       }
 
-      /* One rotation step. The header spans the full width, so the blocks read
-         as stacked chapters of one continuous rotation. */
-      .fp-tl-bhead {
+      /* One rotation step's header — crop picker + delete, same behavior as
+         before, just relabeled. The crop NAME is now its own button: click to
+         expand/collapse this row's task key (below). */
+      .fp-sc-bhead {
+        grid-column: 1 / -1;
         display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
         margin-top: 4px; padding: 3px 6px; border-radius: 6px;
         background: var(--cream-2); border: 1.5px solid transparent; box-sizing: border-box;
       }
-      /* The step actually running right now. */
-      .fp-tl-bhead.current { border-color: var(--wood); background: #ecdcb6; }
-      .fp-tl-planted { color: var(--green-dark); font-size: 9px; flex-shrink: 0; }
-      /* The crop picker lives on the block header — the calendar IS the crop
-         editor now, so there's no separate list above it. */
-      .fp-tl-crop-sel {
+      .fp-sc-bhead.current { border-color: var(--wood); background: #ecdcb6; }
+      .fp-sc-planted { color: var(--green-dark); font-size: 9px; flex-shrink: 0; }
+      .fp-sc-croplabel {
+        flex: 0 0 auto; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer;
+        color: var(--wood-dark); background: transparent; border: none; padding: 2px 4px;
+        display: flex; align-items: center; gap: 3px;
+      }
+      .fp-sc-croplabel:hover { text-decoration: underline; }
+      .fp-sc-crop-sel {
         flex: 1 1 auto; min-width: 0; font: inherit; font-size: 11px; font-weight: 700;
         color: var(--wood-dark); background: var(--cream); cursor: pointer;
         border: 1.5px solid var(--wood); border-radius: 6px; padding: 2px 4px;
       }
-      .fp-tl-crop-del {
+      .fp-sc-crop-del {
         flex: 0 0 auto; font: inherit; font-size: 11px; line-height: 1; cursor: pointer;
         padding: 3px 6px; border-radius: 6px; color: var(--red);
         border: 1.5px solid var(--cream); background: transparent;
       }
-      .fp-tl-crop-del:hover:not(:disabled) { border-color: var(--red); background: rgba(199, 81, 70, 0.1); }
-      .fp-tl-crop-del:disabled { opacity: 0.3; cursor: default; }
-      .fp-tl-add {
+      .fp-sc-crop-del:hover:not(:disabled) { border-color: var(--red); background: rgba(199, 81, 70, 0.1); }
+      .fp-sc-crop-del:disabled { opacity: 0.3; cursor: default; }
+      .fp-sc-add {
         width: 100%; margin-top: 6px; font: inherit; font-size: 11px; padding: 5px; cursor: pointer;
         border: 1.5px dashed var(--wood); border-radius: 6px;
         background: var(--cream); color: var(--wood);
       }
-      .fp-tl-add:disabled { opacity: 0.4; cursor: default; }
+      .fp-sc-add:disabled { opacity: 0.4; cursor: default; }
 
-      /* Month gutter, season-tinted to match the year bar. */
-      .fp-tl-month {
-        position: sticky; left: 0; z-index: 4;
-        grid-column: 1; font-size: 9px; font-weight: 700; color: var(--wood-dark);
-        display: flex; align-items: center; justify-content: center; gap: 3px;
-        min-height: 24px; border-radius: 4px; cursor: help; padding: 0 2px;
-        box-shadow: 2px 0 4px -2px rgba(60, 40, 15, 0.25);
+      /* The 12-month lane track — full width, no row-label column (2026-08-16:
+         "that area is unnecessary", the crop name's already on the header
+         above). Height is set inline per-row, sized to that row's tallest
+         task-icon stack (see CHIP_STACK_TOP/CHIP_STACK_STEP, main.ts). */
+      .fp-sc-lane { position: relative; grid-column: 1 / -1; }
+      /* Plant/harvest WINDOW bars — same colors/shape as Crop Calendar's
+         #cal-grid .band, positioned as a slim strip so there's room below it
+         for the stacked task-icon chips. */
+      .fp-sc-lane .band { position: absolute; top: 16px; height: 16px; border-radius: 999px; opacity: 0.9; }
+      .fp-sc-lane .band.plant { background: var(--green); }
+      .fp-sc-lane .band.harv { background: var(--gold); }
+
+      /* One TRANSPARENT slot per display month (2026-08-16 — replaced both
+         the earlier thin centered tick AND the one-tick-per-task version:
+         drag-and-drop is gone entirely now, click-only. See the doc comment
+         on `refreshScheduleCalendar` for why one-per-task had to go — tasks
+         with overlapping windows stacked ticks at the same spot and silently
+         ate each other's clicks). Transparent/borderless by default so an
+         empty row doesn't look like 12 filled boxes; `.legal` months get a
+         faint dashed outline, `.legal:hover` a stronger one. Clicking picks
+         the task directly if only one is legal there, else opens
+         `.fp-sc-picker` to choose. */
+      .fp-sc-slot {
+        position: absolute; top: 4px; bottom: 4px; width: calc(100% / 12 - 2px);
+        border-radius: 4px; background: transparent; border: 1.5px dashed transparent;
+        box-sizing: border-box;
       }
-      .fp-tl-month.spring { background: #a8d178; }
-      .fp-tl-month.summer { background: #f5c95d; }
-      .fp-tl-month.fall   { background: #d98e4a; }
-      .fp-tl-month.winter { background: #bcd8e8; }
-      /* January carries the year, so a multi-year block never reads as one. */
-      .fp-tl-month.year-start { box-shadow: 2px 0 4px -2px rgba(60,40,15,0.25), inset 0 2px 0 var(--wood-dark); }
-      .fp-tl-year { font-size: 8px; opacity: 0.85; }
-      .fp-tl-mname { letter-spacing: -0.02em; }
+      .fp-sc-slot.legal { border-color: rgba(138, 90, 51, 0.35); cursor: pointer; }
+      .fp-sc-slot.legal:hover { background: rgba(109, 161, 68, 0.16); border-color: var(--green-dark); }
 
-      /* Track cell. Tinted green while the crop is actually in the ground, so
-         each block shows its growing season without a separate bar. */
-      .fp-tl-cell { border-radius: 3px; background: rgba(138, 90, 51, 0.06); }
-      .fp-tl-cell.in-ground { background: rgba(109, 161, 68, 0.2); }
-      /* A month this task COULD run in. Shown all the time rather than on
-         click (maintainer request, 2026-07-31) — which is what let the whole
-         select-then-place step disappear: click the month you want. */
-      .fp-tl-cell.legal {
-        cursor: pointer; border: 1.5px dashed var(--wood); box-sizing: border-box;
-        background: var(--cream-2);
+      /* The "which task?" popup (2026-08-16) for a month where more than one
+         task is legal — common now that plow and mulch share a window. */
+      .fp-sc-picker {
+        position: absolute; top: 100%; left: 0; z-index: 20; margin-top: 3px;
+        display: flex; flex-direction: column; gap: 2px; padding: 4px;
+        background: var(--cream); border: 1.5px solid var(--wood); border-radius: 8px;
+        box-shadow: 0 4px 10px rgba(60, 40, 15, 0.3); min-width: 110px;
       }
-      .fp-tl-cell.legal:hover { background: #e8d4a8; }
-      .fp-tl-cell.drag-over { border: 1.5px solid var(--green-dark); background: var(--green); }
+      .fp-sc-picker-opt {
+        display: flex; align-items: center; gap: 6px; font: inherit; font-size: 12px;
+        padding: 4px 8px; border-radius: 6px; border: none; background: transparent;
+        cursor: pointer; color: var(--wood-dark); text-align: left; white-space: nowrap;
+      }
+      .fp-sc-picker-opt:hover { background: var(--cream-2); }
+      .fp-sc-picker-opt svg { width: 16px; height: 16px; flex-shrink: 0; display: block; }
 
-      /* A scheduled task, in its own column at its month. */
-      .fp-tl-chip {
-        z-index: 3; align-self: center; justify-self: center;
-        width: 22px; height: 22px; border-radius: 5px;
+      /* Task icon chips — sized up (maintainer request, 2026-08-16: "task
+         icons larger"). Chips sharing a display month STACK top-to-bottom,
+         growing down below the plant/harvest bars, ordered by which
+         completes first (`TASK_STACK_ORDER`, main.ts); `top` is set inline
+         per-chip since the stacking position is computed, not fixed.
+         Display-only (moving a task is done via the slots below, not the
+         chip itself). */
+      .fp-sc-chip {
+        position: absolute; z-index: 3; transform: translateX(-50%);
+        width: 28px; height: 28px; border-radius: 6px;
         display: flex; align-items: center; justify-content: center;
-        font-size: 12px; line-height: 1;
         background: var(--gold); border: 1.5px solid var(--wood-dark); box-sizing: border-box;
       }
-      .fp-tl-chip.movable { cursor: grab; }
-      .fp-tl-chip.movable:active { cursor: grabbing; }
-      .fp-tl-chip.movable:hover { transform: scale(1.12); }
-      /* Optional operation switched off — click the chip to turn it back on. */
-      .fp-tl-chip.off { background: transparent; border-style: dashed; opacity: 0.45; cursor: pointer; }
-      .fp-tl-chip.off:hover { opacity: 0.8; }
-      .fp-tl-chip.dragging { opacity: 0.5; }
+      .fp-sc-chip svg { width: 20px; height: 20px; display: block; }
+      .fp-sc-chip.optional { background: var(--cream); }
 
-      /* Today — a line across every column, on its own month. */
-      .fp-tl-today {
-        z-index: 5; align-self: center; height: 3px; pointer-events: none;
-        background: var(--red); border-radius: 2px;
-        box-shadow: 0 0 4px rgba(199, 81, 70, 0.6);
+      /* The per-row expandable task key (maintainer request, 2026-08-16):
+         click a crop label to reveal every optional task it can run, each a
+         toggle pill. Only the 6 optional kinds appear here — plow/plant/
+         harvest are mandatory and never hidden (they're on the lane above). */
+      .fp-sc-key { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 5px; padding: 4px 6px 6px 12px; margin-bottom: 2px; }
+      .fp-sc-key-pill {
+        display: inline-flex; align-items: center; gap: 4px;
+        font-size: 11px; padding: 3px 8px 3px 5px; border-radius: 999px; cursor: pointer;
+        background: var(--gold); border: 1.5px solid var(--wood-dark);
       }
-      /* Today falling in a fallow gap between blocks: drawn at the top edge of
-         the next month the rotation actually covers, dashed so it reads as
-         "somewhere before here" rather than "on this month". */
-      .fp-tl-today.gap {
-        align-self: start; height: 0; margin-top: -2px;
-        background: transparent; box-shadow: none;
-        border-top: 3px dashed var(--red);
-      }
+      .fp-sc-key-pill svg { width: 13px; height: 13px; display: block; }
+      .fp-sc-key-pill.off { background: transparent; border-style: dashed; opacity: 0.55; }
+      .fp-sc-key-pill.off:hover { opacity: 0.85; }
 
-      @media (prefers-reduced-motion: reduce) {
-        .fp-tl-chip.movable:hover { transform: none; }
+      /* Today — ONE line for the whole grid (every row shares one axis),
+         not one per row. */
+      .fp-sc-today {
+        position: absolute; top: 0; bottom: 0; width: 2px; z-index: 5;
+        background: var(--red); opacity: 0.7; border-radius: 2px; pointer-events: none;
       }
+      .fp-sc-today::after { content: "▼"; position: absolute; top: -2px; left: -5px; font-size: 10px; color: var(--red); }
+
 
       .fp-sched-defaults {
         width: 100%; font-size: 11px; padding: 5px; margin-top: 8px; cursor: pointer;
