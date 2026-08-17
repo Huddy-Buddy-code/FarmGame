@@ -34,7 +34,7 @@ import { buyFieldFromBoundary, renderField, initIdCounters, sellField, hashSeed 
 import { updateBaleLayer, baleIconFor } from "./field/baleLayer";
 import { confirmDialog, promptDialog } from "./ui/modal";
 import { drawFieldTexture } from "./field/fieldRender";
-import { updateBuildingMarkers, BUILDING_ICON } from "./field/buildingRender";
+import { updateBuildingMarkers, BUILDING_ICON, structureArtHtml } from "./field/buildingRender";
 import {
   buyBuildingAt, sellBuilding, buildingPrice, buildingDisplayName, initBuildingIdCounters,
   BUILDING_NAME, siloCapacityForCrop, siloCapacityOf, siloCapacityTonsOf, assignSiloCrop,
@@ -80,7 +80,7 @@ import {
   harvesterCapacityTons, grainTrailerCapacityTons, harvesterCapacityBushels, grainTrailerCapacityBushels,
   tonsPerBushel, setHarvesterCrop, setRoadNetwork, TASK_IMPLEMENT,
   appendCompletedTask, haySpikesCapacityBales, baleTrailerCapacityBales, queueHaulBales, fieldHasLooseBales,
-  queueSellRun, sellableStock,
+  queueSellRun, sellableStock, canPull,
 } from "./sim/tasks";
 import type { BlockedWork } from "./sim/tasks";
 import { buildRoadNetwork } from "./sim/roadNet";
@@ -93,6 +93,7 @@ import {
   combineIconSvg, balerIconSvg, forageHarvesterIconSvg, wrapIconSvg,
 } from "./ui/icons";
 import { machineImageUrl, machineImgTag, trailerFillImageUrl, machineVariantImageUrl } from "./ui/machineImages";
+import type { MachineVariant } from "./ui/machineImages";
 import type { EquipmentKind, ImplementKind } from "./sim/tasks";
 import {
   tickLoans, borrowOpen, paydownOpen, paydownLoan, refinanceLoan,
@@ -3055,6 +3056,272 @@ function wireDevTools(): void {
     toast(`🧪 Dev: +$${DEV_CASH_GRANT.toLocaleString()} — now $${Math.round(save.money).toLocaleString()}`);
   });
   host.appendChild(btn);
+
+  const spriteBtn = document.createElement("button");
+  spriteBtn.textContent = "🖼️ Sprites";
+  spriteBtn.title = "Dev server only — QC popup: every sprite + every valid tractor/implement hitch combo.";
+  spriteBtn.addEventListener("click", openSpriteViewer);
+  host.appendChild(spriteBtn);
+
+  $("sv-close").addEventListener("click", closeSpriteViewer);
+  $("sprite-viewer").addEventListener("click", (e) => {
+    if (e.target === $("sprite-viewer")) closeSpriteViewer(); // backdrop click
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("sprite-viewer").style.display !== "none") closeSpriteViewer();
+  });
+}
+
+function openSpriteViewer(): void {
+  buildSpriteViewer();
+  $("sprite-viewer").style.display = "flex";
+}
+
+function closeSpriteViewer(): void {
+  $("sprite-viewer").style.display = "none";
+}
+
+/**
+ * Which sizes the shop actually SELLS per implement kind (mirrors
+ * `buildEquipShop`'s `line(...)` calls exactly). Several implements have no
+ * working width left to tier by (a baler swallows whatever windrow it's
+ * given — see the config comments in gameConfig.ts), so `gameConfig` still
+ * carries small/medium/large entries for them, but only Medium is ever sold
+ * or ownable. Kept as viewer-only presentation data rather than pulled from
+ * the shop, since duplicating one small hand-written table here is simpler
+ * than exporting the shop's internal size choices.
+ */
+const IMPLEMENT_SOLD_SIZES: Record<ImplementKind, EquipmentSize[]> = {
+  plow: ["small", "medium", "large"],
+  planter: ["small", "medium", "large"],
+  sprayer: ["small", "medium", "large"],
+  mulcher: ["small", "medium", "large"],
+  cornHeader: ["small", "medium", "large"],
+  grainHeader: ["small", "medium", "large"],
+  rowCropHead: ["small", "medium", "large"],
+  mower: ["small", "medium", "large"],
+  rake: ["small", "medium", "large"],
+  forageWagon: ["small", "medium", "large"],
+  grainTrailer: ["small", "medium", "large"],
+  baleTrailer: ["small", "medium", "large"],
+  pickupHead: ["medium"],
+  bailer: ["medium"],
+  squareBaler: ["medium"],
+  baleWrapper: ["medium"],
+  combiBaler: ["medium"],
+  haySpikes: ["medium"],
+};
+
+/** Implements that hitch to a TRACTOR (`attachImplement`, sim/tasks.ts) —
+ * every implement kind except the four that hitch to their own host machine
+ * instead (a combine's headers, a chopper's heads). Derived from
+ * `IMPLEMENT_GROUP` (exhaustive over `ImplementKind`) rather than hand-typed,
+ * so a new implement kind can't silently go missing from the viewer. */
+const NON_TRACTOR_IMPLEMENT_KINDS = new Set<ImplementKind>(["cornHeader", "grainHeader", "rowCropHead", "pickupHead"]);
+const TRACTOR_IMPLEMENT_KINDS: ImplementKind[] =
+  (Object.keys(IMPLEMENT_GROUP) as ImplementKind[]).filter((k) => !NON_TRACTOR_IMPLEMENT_KINDS.has(k));
+
+function svCell(inner: string, label: string, extraClass?: string): string {
+  return `<div class="sv-cell${extraClass ? " " + extraClass : ""}">${inner}<div class="sv-label">${label}</div></div>`;
+}
+
+function svSection(body: HTMLElement, title: string): HTMLElement {
+  const h = document.createElement("div");
+  h.className = "sv-section";
+  h.textContent = title;
+  body.appendChild(h);
+  const grid = document.createElement("div");
+  grid.className = "sv-grid";
+  body.appendChild(grid);
+  return grid;
+}
+
+/** The host machine's own icon at the exact size the map marker draws it
+ * (`agentIconPx`) — preferring baked composite art (Hay Spikes / a combine's
+ * header) when one applies, same fallback chain `agentMachineIconHtml` uses
+ * for a live Agent, just without needing one. */
+function svMachineBadgeHtml(kind: EquipmentKind, size: EquipmentSize, variant?: MachineVariant): string {
+  if (variant) {
+    const url = machineVariantImageUrl(kind, size, variant);
+    if (url) return machineImgTag(url, agentIconPx(kind));
+  }
+  return machineIconHtml(kind, size, agentIconPx(kind));
+}
+
+/** A hitched implement's own icon, at the flat 55px baseline
+ * `updateAgentMarkers` draws every `.agent-implement` badge at (the per-kind
+ * CSS overrides below then resize/reposition specific kinds from there) —
+ * empty-cargo sprite preferred for the trailers, same as the shop catalog's
+ * icon (`trailerIconHtml`'s own fallback, minus needing a real Implement). */
+function svImplementBadgeHtml(kind: ImplementKind, size: EquipmentSize): string {
+  const fillUrl = trailerFillImageUrl(kind, 0);
+  return fillUrl ? machineImgTag(fillUrl, 55) : implementIconHtml(kind, size, 55);
+}
+
+/**
+ * The exact `.agent-dot` DOM shape `updateAgentMarkers` builds for a machine
+ * on the map — same classes (`.agent-bob` > `.agent-glyph` > `.agent-icons`
+ * > `.agent-machine` + `.agent-implement`), same `data-impl="kind:…"` prefix
+ * the per-kind CSS overrides in index.html key off (bailer/squareBaler/
+ * baleWrapper/forageWagon/combiBaler/grainTrailer/baleTrailer all get their
+ * own size/offset tweak there) — so a hitch preview here is pixel-for-pixel
+ * what the map shows at heading zero (west-facing, unrotated, unmirrored),
+ * and tweaking those same CSS rules moves this viewer's cell too.
+ *
+ * `impl` is omitted for a bare machine — self-propelled (windrower), or a
+ * MINOR implement (`MINOR_IMPLEMENT_KINDS`) that bakes into `.agent-machine`
+ * itself (via `variant`) or has no visible representation yet at all (the
+ * chopper's own heads) rather than drawing as a separate badge — exactly
+ * matching what `updateAgentMarkers` does for those kinds today.
+ */
+function svFieldDotHtml(
+  hostKind: EquipmentKind, hostSize: EquipmentSize,
+  opts: { variant?: MachineVariant; impl?: { kind: ImplementKind; size: EquipmentSize } } = {},
+): string {
+  const machineHtml = svMachineBadgeHtml(hostKind, hostSize, opts.variant);
+  const implHtml = opts.impl ? svImplementBadgeHtml(opts.impl.kind, opts.impl.size) : "";
+  const dataImpl = opts.impl ? `${opts.impl.kind}:${opts.impl.size}:-1` : "";
+  return (
+    `<span class="agent-dot sv-dot"><span class="agent-bob"><span class="agent-glyph"><span class="agent-icons">` +
+    `<span class="agent-machine">${machineHtml}</span>` +
+    `<span class="agent-implement" data-impl="${dataImpl}">${implHtml}</span>` +
+    `</span></span></span></span>`
+  );
+}
+
+/**
+ * Builds the Sprite Viewer's content fresh each time it's opened (dev-only,
+ * cheap, and this way it never goes stale against an art drop mid-session).
+ * Six sections: every machine, every implement (+ trailer cargo-fill
+ * states), every valid tractor+implement hitch, every valid combine+header
+ * hitch, every valid chopper+head hitch, and every structure.
+ */
+function buildSpriteViewer(): void {
+  const body = $("sv-body");
+  body.innerHTML = "";
+
+  {
+    const grid = svSection(body, "Machines");
+    for (const size of SIZES) grid.insertAdjacentHTML("beforeend", svCell(machineIconHtml("tractor", size, 78), `Tractor - ${SIZE_LABEL[size]}`));
+    for (const size of SIZES) grid.insertAdjacentHTML("beforeend", svCell(machineIconHtml("harvester", size, 78), `Combine - ${SIZE_LABEL[size]}`));
+    grid.insertAdjacentHTML("beforeend", svCell(machineIconHtml("windrower", "large", 78), "Windrower"));
+    for (const size of SIZES) grid.insertAdjacentHTML("beforeend", svCell(machineIconHtml("forageHarvester", size, 78), `Forage Harvester - ${SIZE_LABEL[size]}`));
+  }
+
+  {
+    const grid = svSection(body, "Implements");
+    for (const group of IMPLEMENT_GROUP_ORDER) {
+      for (const kind of Object.keys(IMPLEMENT_GROUP) as ImplementKind[]) {
+        if (IMPLEMENT_GROUP[kind] !== group) continue;
+        for (const size of IMPLEMENT_SOLD_SIZES[kind]) {
+          grid.insertAdjacentHTML("beforeend", svCell(implementIconHtml(kind, size, 56), `${IMPLEMENT_KIND_NAME[kind]} - ${SIZE_LABEL[size]}`));
+        }
+      }
+    }
+  }
+
+  {
+    // Cargo-hauling implements swap sprites by how full they are — a separate
+    // art set from the plain size sprite above (`trailerFillImageUrl`).
+    const grid = svSection(body, "Cargo Fill States");
+    for (const kind of ["baleTrailer", "grainTrailer"] as const) {
+      for (const size of IMPLEMENT_SOLD_SIZES[kind]) {
+        for (const pct of [0, 25, 50, 100]) {
+          const url = trailerFillImageUrl(kind, pct);
+          const html = url ? machineImgTag(url, 56) : implementIconHtml(kind, size, 56);
+          grid.insertAdjacentHTML("beforeend", svCell(html, `${IMPLEMENT_KIND_NAME[kind]} - ${SIZE_LABEL[size]} · ${pct}%`));
+        }
+      }
+    }
+  }
+
+  {
+    // Real `.agent-dot` composites (svFieldDotHtml) — pixel-accurate to the
+    // map marker, including every per-kind size/offset override in
+    // index.html, so this is the section to look at when tweaking one.
+    const grid = svSection(body, "Tractor + Implement Combos — As Seen In The Field");
+    for (const kind of TRACTOR_IMPLEMENT_KINDS) {
+      if (kind === "haySpikes") {
+        // Bakes into the TRACTOR's own sprite (empty vs. carrying a bale)
+        // rather than a separate hitched badge — see agentMachineIconHtml.
+        for (const tSize of SIZES) {
+          if (!canPull(tSize, "medium", "haySpikes")) continue;
+          for (const variant of ["hayspike", "hayspikebale"] as const) {
+            const state = variant === "hayspikebale" ? "loaded" : "empty";
+            grid.insertAdjacentHTML("beforeend", svCell(
+              svFieldDotHtml("tractor", tSize, { variant }),
+              `Tractor - ${SIZE_LABEL[tSize]} + Hay Spike (${state})`,
+              "sv-fielddot",
+            ));
+          }
+        }
+        continue;
+      }
+      for (const implSize of IMPLEMENT_SOLD_SIZES[kind]) {
+        for (const tSize of SIZES) {
+          if (!canPull(tSize, implSize, kind)) continue;
+          grid.insertAdjacentHTML("beforeend", svCell(
+            svFieldDotHtml("tractor", tSize, { impl: { kind, size: implSize } }),
+            `Tractor - ${SIZE_LABEL[tSize]} + ${IMPLEMENT_KIND_NAME[kind]} - ${SIZE_LABEL[implSize]}`,
+            "sv-fielddot",
+          ));
+        }
+      }
+    }
+  }
+
+  {
+    const grid = svSection(body, "Combine + Header Combos — As Seen In The Field");
+    for (const headKind of ["cornHeader", "grainHeader"] as const) {
+      const variant = headKind === "cornHeader" ? "cornheader" : "grainheader";
+      for (const headSize of IMPLEMENT_SOLD_SIZES[headKind]) {
+        for (const cSize of SIZES) {
+          if (!canPull(cSize, headSize)) continue;
+          grid.insertAdjacentHTML("beforeend", svCell(
+            svFieldDotHtml("harvester", cSize, { variant }),
+            `Combine - ${SIZE_LABEL[cSize]} + ${IMPLEMENT_KIND_NAME[headKind]} - ${SIZE_LABEL[headSize]}`,
+            "sv-fielddot",
+          ));
+        }
+      }
+    }
+  }
+
+  {
+    // No baked composite art exists yet for the chopper's own heads (only
+    // hayspike/hayspikebale/cornheader/grainheader are recognized variant
+    // tokens, machineImages.ts), and — like Hay Spikes — they're a MINOR
+    // implement that never draws as a separate `.agent-implement` badge
+    // either. So every cell here is honestly just the plain chopper sprite
+    // today; that sameness IS the QC signal (there's nothing to tweak until
+    // head art exists), not a bug in the viewer.
+    const grid = svSection(body, "Chopper + Head Combos — As Seen In The Field");
+    for (const headKind of ["rowCropHead", "pickupHead"] as const) {
+      for (const headSize of IMPLEMENT_SOLD_SIZES[headKind]) {
+        for (const chSize of SIZES) {
+          if (!canPull(chSize, headSize)) continue;
+          grid.insertAdjacentHTML("beforeend", svCell(
+            svFieldDotHtml("forageHarvester", chSize),
+            `Forage Harvester - ${SIZE_LABEL[chSize]} + ${IMPLEMENT_KIND_NAME[headKind]} - ${SIZE_LABEL[headSize]}`,
+            "sv-fielddot",
+          ));
+        }
+      }
+    }
+  }
+
+  {
+    const grid = svSection(body, "Structures");
+    const kinds = Object.keys(BUILDING_ICON) as BuildingKind[];
+    for (const kind of kinds.filter((k) => buildingIsSized(k))) {
+      for (const size of SIZES) {
+        grid.insertAdjacentHTML("beforeend", svCell(structureArtHtml(kind, size), buildingDisplayName(kind, size)));
+      }
+    }
+    for (const kind of kinds.filter((k) => !buildingIsSized(k))) {
+      grid.insertAdjacentHTML("beforeend", svCell(structureArtHtml(kind), buildingDisplayName(kind)));
+    }
+  }
 }
 
 function wireSettingsTab() {

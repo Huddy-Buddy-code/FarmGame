@@ -51,6 +51,41 @@ typecheck clean.
   tab, Schedule calendar (the calendar IS the rotation editor), Settings
   (multi-farm), Home screen (county picker).
 
+## Recent focus: Sprite Viewer dev tool (2026-08-16)
+
+A QC popup (dev server only, `import.meta.env.DEV`-gated) — "🖼️ Sprites"
+button next to the existing "+$1M" cash button in the bottom-left dev corner.
+Opens a full-screen overlay listing every machine, implement, and structure
+sprite the game can draw, plus every VALID tractor+implement, combine+header,
+and chopper+head hitch combination (gated on the real `canPull` size rule, so
+it only shows pairings the game itself would actually let happen). 7
+sections, 174 sprite cells total. Reuses the exact icon-resolution functions
+the game already calls (`machineIconHtml`, `implementIconHtml`,
+`machineVariantImageUrl`, `structureArtHtml`) rather than any new lookup
+path, so what the viewer shows is what actually ships. Verified live: all
+150 `<img>` tags resolved with zero broken sources, close button and
+backdrop-click both dismiss correctly. Typecheck clean, 966/966 tests
+(no sim-layer changes — this is a presentation-only main.ts/index.html add).
+
+### Follow-up (2026-08-16): hitch combos now the real map-marker DOM, not icon+icon
+
+The three combo sections originally showed a placeholder — two icons in a
+flex row with a "+" between them — which didn't reflect real size/position
+at all (maintainer: "I need to see them configured as they would be seen in
+the field, that way we can tweak size and relative position"). Replaced with
+`svFieldDotHtml`, which builds the EXACT `.agent-dot > .agent-bob >
+.agent-glyph > .agent-icons > .agent-machine + .agent-implement` DOM
+`updateAgentMarkers` builds for a real map marker, including the same
+`data-impl="kind:size:-1"` key the per-kind CSS overrides in index.html
+match on (`.agent-implement[data-impl^="bailer:"]` etc. — the round baler's
+-6px nudge, the combi baler's 1.3x size, the bale wrapper's -20px/+1px, …).
+Tweaking those same CSS rules now moves the viewer's cells too — no separate
+positioning copy to keep in sync. Confirmed this is a genuinely faithful
+reproduction, not just plausible-looking: it independently surfaced a real
+art gap (`Combine_Large_CornHeader.png` doesn't exist, so all three "Large +
+Corn Header" cells correctly fall back to the plain combine sprite, exactly
+like the live map would). Typecheck clean, 966/966 tests.
+
 ## Recent focus: Field Schedule tab rewrite (2026-08-16)
 
 The "Auto Manage" UI (Field panel → Schedule tab) was rebuilt from scratch,
